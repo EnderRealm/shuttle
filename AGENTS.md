@@ -2,7 +2,13 @@
 
 ## Project Overview
 
-<!-- Describe your project here -->
+shuttle is the harness that runs agents unattended: a scheduler that fires cron slots,
+a sandbox that wraps every model run, a ledger that records what happened and what it
+cost, and delivery that gets the result off the machine. Phase 1 delivers one thing — a
+nightly email summarising the previous day across the coding-agent estate — produced by
+a run that is scheduled, sandboxed, budgeted, ledgered and delivered by shuttle.
+
+The low-level design is `docs/phase1-design.md`; read it before changing the layout.
 
 ## Tickets
 

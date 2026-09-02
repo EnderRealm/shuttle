@@ -1,0 +1,7 @@
+{
+  "anchors": [
+    { "name": "build", "executable": "go", "arguments": ["build", "./..."] },
+    { "name": "vet", "executable": "go", "arguments": ["vet", "./..."] },
+    { "name": "test", "executable": "go", "arguments": ["test", "./..."] }
+  ]
+}
