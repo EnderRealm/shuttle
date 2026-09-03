@@ -1,0 +1,32 @@
+{
+  "name": "daily",
+  "description": "Previous-day summary of the coding-agent estate, one email",
+  "runtime": {
+    "kind": "claude",
+    "auth": "api_key",
+    "model": "sonnet",
+    "max_turns": 12,
+    "max_budget_usd": 1.50,
+    "timeout_seconds": 900,
+    "tools": ["Read", "Glob", "Grep", "Write"]
+  },
+  "triggers": [
+    { "kind": "cron", "expression": "30 4 * * *", "timezone": "America/Los_Angeles" }
+  ],
+  "inputs": [
+    { "provider": "loom-sessions",   "args": { "window": "previous-day" } },
+    { "provider": "loom-workreport", "args": { "window": "previous-day" } },
+    { "provider": "tk-journal",      "args": { "window": "previous-day" } },
+    { "provider": "tk-tickets",      "args": { "window": "previous-day" } },
+    { "provider": "git-log",         "args": { "window": "previous-day" } },
+    { "provider": "prior-reports",   "args": { "agent": "daily", "count": 1 } }
+  ],
+  "outputs": {
+    "email": { "max": 1 },
+    "file":  { "dir": "daily", "max": 1 }
+  },
+  "sandbox": {
+    "kind": "srt",
+    "allowed_domains": []
+  }
+}

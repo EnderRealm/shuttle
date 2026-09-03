@@ -13,7 +13,7 @@ var helpText = `shuttle - scheduled, sandboxed, ledgered unattended agent runs
 
 Usage: shuttle <command> [args]
 
-Only 'version' is implemented; the rest is the phase 1 command surface
+Only 'version' and 'agents' are implemented; the rest is the phase 1 surface
 (docs/phase1-design.md §12) that the remaining phase 1 tickets fill in.
 
 Daemon:
