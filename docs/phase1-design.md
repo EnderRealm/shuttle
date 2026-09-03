@@ -209,8 +209,13 @@ at startup. Per tick, per agent, per cron trigger:
 Cron semantics are literal wall-clock in the named zone, so `30 4 * * *` in
 `America/Los_Angeles` fires at 04:30 local through DST changes; a slot that does not
 exist on a spring-forward day is skipped and one that exists twice on fall-back fires
-once (the ledger's unique index on `(agent, scheduled_for)` makes the second claim a
-no-op). The daily agent's slot is deliberately outside the 01:00 to 03:00 window.
+once. The repeat is collapsed by the scheduler's wall-clock-per-zone dedupe, in
+`internal/schedule`'s `Due`, before any ledger write: the two occurrences render as
+`2026-11-01T01:30:00-07:00` and `2026-11-01T01:30:00-08:00`, two distinct
+`scheduled_for` values that the unique index on `(agent, scheduled_for, trigger_kind)`
+cannot collapse. Because the repeat is dropped before the ledger sees it, it leaves no
+`skipped` row either — it is not a slot at all. The daily agent's slot is deliberately
+outside the 01:00 to 03:00 window.
 
 Manual runs (`shuttle run <agent>`) bypass the schedule but not the overlap check, the
 limits or the ledger; they carry `trigger_kind = manual` and, with `--slot

@@ -364,3 +364,130 @@ func TestWriteTimestampsAreUTC(t *testing.T) {
 		t.Fatalf("scheduled_for = %q, want the slot with its offset", got.ScheduledFor)
 	}
 }
+
+func TestSpendSinceSumsEveryAgent(t *testing.T) {
+	s := newStore(t)
+	spent, err := s.SpendSince(testClock.Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("spend: %v", err)
+	}
+	// An empty window is unpriced, not free (§12).
+	if spent.Valid {
+		t.Fatalf("spend over an empty ledger = %v, want NULL", spent)
+	}
+	priced := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	if err := s.Complete(priced.ID, Result{CostUSD: sql.NullFloat64{Float64: 0.75, Valid: true}}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	other := claim(t, s, "miner", "2026-09-02T04:30:00-07:00")
+	if err := s.Complete(other.ID, Result{CostUSD: sql.NullFloat64{Float64: 0.25, Valid: true}}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	// A run that reported no cost contributes nothing rather than poisoning
+	// the sum.
+	unpriced := claim(t, s, "daily", "2026-09-02T05:30:00-07:00")
+	if err := s.Complete(unpriced.ID, Result{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	spent, err = s.SpendSince(testClock.Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("spend: %v", err)
+	}
+	if !spent.Valid || spent.Float64 != 1.0 {
+		t.Fatalf("spend = %v, want 1", spent)
+	}
+	spent, err = s.SpendSince(testClock.Add(time.Second))
+	if err != nil {
+		t.Fatalf("spend: %v", err)
+	}
+	if spent.Valid {
+		t.Fatalf("spend after the window = %v, want NULL", spent)
+	}
+}
+
+// lastFiredSlot reads the scheduler's catch-up cursor for an agent.
+func lastFiredSlot(t *testing.T, s *Store, agent string) string {
+	t.Helper()
+	row, err := s.Agent(agent)
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	return row.LastFiredSlot.String
+}
+
+func TestManualClaimLeavesLastFiredSlotAlone(t *testing.T) {
+	s := newStore(t)
+	claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	if got := lastFiredSlot(t, s, "daily"); got != "2026-09-02T04:30:00-07:00" {
+		t.Fatalf("last_fired_slot after a cron claim = %q, want the slot", got)
+	}
+	// A manual run bypasses the schedule (§5), so it must not move the
+	// scheduler's cursor — forward, which would suspend the agent until the
+	// slot it names, or backward, which would re-walk days already behind it.
+	if _, ok, err := s.Claim("daily", slot(t, "2026-12-01T04:30:00-08:00"), TriggerManual); err != nil || !ok {
+		t.Fatalf("manual claim = (%t, %v), want claimed", ok, err)
+	}
+	if got := lastFiredSlot(t, s, "daily"); got != "2026-09-02T04:30:00-07:00" {
+		t.Fatalf("last_fired_slot after a manual claim = %q, want the cron slot", got)
+	}
+}
+
+func TestLastRecordedSlotIsTheNewestCronRow(t *testing.T) {
+	s := newStore(t)
+	if got, err := s.LastRecordedSlot("daily"); err != nil || got != "" {
+		t.Fatalf("last recorded slot on an empty ledger = (%q, %v), want (\"\", nil)", got, err)
+	}
+	// A skipped slot leaves last_fired_slot alone but is still recorded, so it
+	// is the cursor.
+	if _, _, err := s.Skip("daily", slot(t, "2026-09-02T04:30:00-07:00"), TriggerCron, SkipPaused); err != nil {
+		t.Fatalf("skip: %v", err)
+	}
+	if got, err := s.LastRecordedSlot("daily"); err != nil || got != "2026-09-02T04:30:00-07:00" {
+		t.Fatalf("last recorded slot = (%q, %v), want the skipped slot", got, err)
+	}
+	if _, ok, err := s.Claim("daily", slot(t, "2026-12-01T04:30:00-08:00"), TriggerManual); err != nil || !ok {
+		t.Fatalf("manual claim = (%t, %v), want claimed", ok, err)
+	}
+	if got, err := s.LastRecordedSlot("daily"); err != nil || got != "2026-09-02T04:30:00-07:00" {
+		t.Fatalf("last recorded slot after a manual row = (%q, %v), want the cron slot", got, err)
+	}
+}
+
+func TestClaimGatedRefusesASecondSlotWhileOneIsInFlight(t *testing.T) {
+	s := newStore(t)
+	run, reason, err := s.ClaimGated("daily", slot(t, "2026-09-02T04:30:00-07:00"), TriggerCron, Limits{})
+	if err != nil || reason != "" || run == nil {
+		t.Fatalf("first claim = (%v, %q, %v), want the run", run, reason, err)
+	}
+	// A different slot, so the unique index cannot be the arbiter: the gate
+	// and the insert being one transaction is what refuses it.
+	run, reason, err = s.ClaimGated("daily", slot(t, "2026-09-02T05:30:00-07:00"), TriggerManual, Limits{})
+	if err != nil || run != nil || reason != SkipOverlap {
+		t.Fatalf("second claim = (%v, %q, %v), want a skipped overlap", run, reason, err)
+	}
+	rows, err := s.Runs("daily", 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want the claim and its skipped row", len(rows))
+	}
+}
+
+func TestClaimGatedRepeatsASlotOnce(t *testing.T) {
+	s := newStore(t)
+	done := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	if err := s.Complete(done.ID, Result{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	// The slot is already in the ledger: the unique index refuses it, which is
+	// neither a claim nor a gate refusal, so both come back empty.
+	run, reason, err := s.ClaimGated("daily", slot(t, "2026-09-02T04:30:00-07:00"), TriggerCron, Limits{})
+	if err != nil || run != nil || reason != "" {
+		t.Fatalf("repeat = (%v, %q, %v), want (nil, \"\", nil)", run, reason, err)
+	}
+	if n := countRuns(t, s); n != 1 {
+		t.Fatalf("runs = %d, want 1", n)
+	}
+}

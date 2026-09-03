@@ -106,10 +106,11 @@ type Result struct {
 	Silent       bool
 }
 
-// Claim inserts the claimed row for a slot and advances the agent's
-// last_fired_slot. A second claim of the same (agent, scheduled_for,
-// trigger_kind) returns claimed=false and writes nothing — the unique index is
-// the arbiter, deliberately not a SELECT-then-INSERT that two ticks could race.
+// Claim inserts the claimed row for a slot and, for a cron trigger, advances
+// the agent's last_fired_slot. A second claim of the same (agent,
+// scheduled_for, trigger_kind) returns claimed=false and writes nothing — the
+// unique index is the arbiter, deliberately not a SELECT-then-INSERT that two
+// ticks could race.
 func (s *Store) Claim(agent string, slot time.Time, triggerKind string) (*Run, bool, error) {
 	return s.insertSlot(agent, slot, triggerKind, StatusClaimed, "")
 }
@@ -122,6 +123,24 @@ func (s *Store) Skip(agent string, slot time.Time, triggerKind, reason string) (
 }
 
 func (s *Store) insertSlot(agent string, slot time.Time, triggerKind, status, skipReason string) (*Run, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+	run, ok, err := s.insertSlotTx(tx, agent, slot, triggerKind, status, skipReason)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return run, true, nil
+}
+
+// insertSlotTx writes one slot row inside the caller's transaction, so a gate
+// and its claim can share one (ClaimGated).
+func (s *Store) insertSlotTx(tx *sql.Tx, agent string, slot time.Time, triggerKind, status, skipReason string) (*Run, bool, error) {
 	id, err := newRunID(agent, slot)
 	if err != nil {
 		return nil, false, err
@@ -135,12 +154,6 @@ func (s *Store) insertSlot(agent string, slot time.Time, triggerKind, status, sk
 		Status:       status,
 		SkipReason:   nullString(skipReason),
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return nil, false, err
-	}
-	defer tx.Rollback()
-
 	_, err = tx.Exec(
 		`INSERT INTO runs(id, agent, trigger_kind, scheduled_for, claimed_at, status, skip_reason)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -152,9 +165,11 @@ func (s *Store) insertSlot(agent string, slot time.Time, triggerKind, status, sk
 	if err != nil {
 		return nil, false, fmt.Errorf("claim %s slot %s: %w", agent, run.ScheduledFor, err)
 	}
-	// §5: last_fired_slot advances only on a successful claim. A skipped slot
-	// leaves it where it was.
-	if status == StatusClaimed {
+	// §5 step 7: last_fired_slot advances only on a successful claim, and only
+	// on a cron one. It is the scheduler's catch-up cursor, so a skipped slot
+	// leaves it where it was — and a manual run bypasses the schedule (§5), so
+	// it must not move the schedule's memory either way.
+	if status == StatusClaimed && triggerKind == TriggerCron {
 		if _, err := tx.Exec(
 			`INSERT INTO agents(name, last_fired_slot) VALUES (?, ?)
 				ON CONFLICT(name) DO UPDATE SET last_fired_slot = excluded.last_fired_slot`,
@@ -163,10 +178,109 @@ func (s *Store) insertSlot(agent string, slot time.Time, triggerKind, status, sk
 			return nil, false, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, false, err
-	}
 	return run, true, nil
+}
+
+// Limits is what the §5 gate measures a slot against: the §4.2 daily caps and
+// the day boundary they are counted from. A non-positive max disables that
+// check.
+type Limits struct {
+	MaxRunsPerDay int
+	MaxSpendUSD   float64
+	DayStart      time.Time
+}
+
+// ClaimGated applies the §5 checks and records the slot in one transaction.
+// Three outcomes: the claimed run with an empty reason; a nil run and the skip
+// reason the gate refused on, whose skipped row has been written; or a nil run
+// and an empty reason, meaning the slot was already in the ledger and nothing
+// was written.
+//
+// The gate is inside the transaction because a check made outside it is a
+// check-then-act race: §12 documents `shuttle daemon` and `shuttle run` as
+// concurrent operator actions, SetMaxOpenConns(1) serialises only within one
+// process, and the unique index refuses a repeat of the same slot but not two
+// processes claiming two different slots for one agent.
+func (s *Store) ClaimGated(agent string, slot time.Time, triggerKind string, limits Limits) (*Run, string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback()
+	reason, err := gate(tx, agent, limits)
+	if err != nil {
+		return nil, "", err
+	}
+	status := StatusClaimed
+	if reason != "" {
+		status = StatusSkipped
+	}
+	run, ok, err := s.insertSlotTx(tx, agent, slot, triggerKind, status, reason)
+	if err != nil {
+		return nil, "", err
+	}
+	if !ok {
+		return nil, "", nil
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", err
+	}
+	if reason != "" {
+		return nil, reason, nil
+	}
+	return run, "", nil
+}
+
+// gate returns the skip reason a slot fails on, or "" when it may fire. The
+// order is §5's: the overlap check, then the pause, then the daily limits.
+func gate(tx *sql.Tx, agent string, limits Limits) (string, error) {
+	// One run per agent at a time, no queue (§5 step 4).
+	var inFlight int
+	if err := tx.QueryRow(
+		`SELECT count(*) FROM runs WHERE agent = ? AND status IN (?, ?)`,
+		agent, StatusClaimed, StatusRunning,
+	).Scan(&inFlight); err != nil {
+		return "", err
+	}
+	if inFlight > 0 {
+		return SkipOverlap, nil
+	}
+	var paused bool
+	err := tx.QueryRow(`SELECT paused FROM agents WHERE name = ?`, agent).Scan(&paused)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if paused {
+		return SkipPaused, nil
+	}
+	if limits.MaxRunsPerDay > 0 {
+		// Skipped rows are excluded: a slot that was never launched cost
+		// nothing, so counting it would let one sleep-through spend the day's
+		// cap on rows.
+		var n int
+		if err := tx.QueryRow(
+			`SELECT count(*) FROM runs WHERE agent = ? AND claimed_at >= ? AND status != ?`,
+			agent, sinceText(limits.DayStart), StatusSkipped,
+		).Scan(&n); err != nil {
+			return "", err
+		}
+		if n >= limits.MaxRunsPerDay {
+			return SkipLimit, nil
+		}
+	}
+	if limits.MaxSpendUSD > 0 {
+		// The spend cap is estate-wide (§4.2), so this sums every agent.
+		var spent sql.NullFloat64
+		if err := tx.QueryRow(
+			`SELECT sum(cost_usd) FROM runs WHERE claimed_at >= ?`, sinceText(limits.DayStart),
+		).Scan(&spent); err != nil {
+			return "", err
+		}
+		if spent.Float64 >= limits.MaxSpendUSD {
+			return SkipLimit, nil
+		}
+	}
+	return "", nil
 }
 
 // newRunID builds the §7.2 id: <agent>-<YYYYMMDD-HHMMSS>-<4 hex>. The
@@ -384,4 +498,45 @@ func (s *Store) updateOne(query, id string, args ...any) error {
 		return fmt.Errorf("run %s: not in the ledger", id)
 	}
 	return nil
+}
+
+// LastRecordedSlot is the scheduler's catch-up cursor: the scheduled_for of
+// the newest cron row for the agent, or "" when it has none. Manual rows are
+// excluded because a manual run bypasses the schedule (§5).
+//
+// Both the catch-up loop and the claim write a tick's rows in ascending slot
+// order, so the newest row written is the newest slot. That is why this orders
+// by claimed_at rather than by MAX(scheduled_for): scheduled_for is RFC3339
+// with the slot's own offset (§5), so a lexicographic max is wrong across a
+// DST offset change.
+func (s *Store) LastRecordedSlot(agent string) (string, error) {
+	var slot string
+	err := s.db.QueryRow(
+		`SELECT scheduled_for FROM runs WHERE agent = ? AND trigger_kind = ?
+			ORDER BY claimed_at DESC, id DESC LIMIT 1`,
+		agent, TriggerCron,
+	).Scan(&slot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return slot, err
+}
+
+// SpendSince sums cost_usd across every agent from since, for `shuttle
+// status`. The sum is nullable on purpose (§12): sum ignores NULL and a window
+// whose rows all reported no cost sums to NULL, which is unpriced rather than
+// free.
+func (s *Store) SpendSince(since time.Time) (sql.NullFloat64, error) {
+	var total sql.NullFloat64
+	err := s.db.QueryRow(
+		`SELECT sum(cost_usd) FROM runs WHERE claimed_at >= ?`, sinceText(since),
+	).Scan(&total)
+	return total, err
+}
+
+// sinceText renders a window start in the format claimed_at is written in
+// (Store.timestamp): RFC3339 in UTC, which sorts lexicographically, so the
+// comparison is done in SQL rather than by scanning every row.
+func sinceText(since time.Time) string {
+	return since.UTC().Format(time.RFC3339)
 }

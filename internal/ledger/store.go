@@ -59,9 +59,15 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
+	// _txlock=immediate makes the driver open every transaction with BEGIN
+	// IMMEDIATE, taking sqlite's write lock up front. database/sql's default
+	// is deferred, which takes the lock on the first write and so leaves
+	// ClaimGated's gate reading outside it — a check-then-act race between the
+	// daemon and a concurrent `shuttle run` (§12). Every transaction this
+	// package opens writes, so none pays for a lock it does not need.
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)" +
-		"&_pragma=foreign_keys(ON)"
+		"&_pragma=foreign_keys(ON)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -75,6 +81,13 @@ func Open(path string) (*Store, error) {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// SetClock replaces the clock every write stamps from. It is the seam this
+// package's own tests already drove through the field; exported because the
+// scheduler's tests drive the same clock from another package, and a
+// claimed_at stamped from the wall clock would make their limit windows pass
+// by accident. Production leaves it at time.Now.
+func (s *Store) SetClock(now func() time.Time) { s.now = now }
 
 // privateDir creates the state root if it is absent. MkdirAll applies its mode
 // only to what it creates, so a root that already exists is tightened by the

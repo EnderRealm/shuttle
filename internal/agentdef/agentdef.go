@@ -25,6 +25,13 @@ const (
 // §4.1 schema does not allow.
 var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
+// ParseCron parses a trigger expression. Exported so the scheduler fires on
+// exactly the grammar validation accepts, rather than a second parser that
+// could drift from this one.
+func ParseCron(expression string) (cron.Schedule, error) {
+	return cronParser.Parse(expression)
+}
+
 // Manifest is agent.json, the §4.1 schema. Unknown keys refuse the load, so
 // every key the harness honours is declared here.
 type Manifest struct {

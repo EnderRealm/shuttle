@@ -13,9 +13,10 @@ var helpText = `shuttle - scheduled, sandboxed, ledgered unattended agent runs
 
 Usage: shuttle <command> [args]
 
-Only 'version', 'agents', 'runs', 'show' and 'ack' are implemented; the rest is
-the phase 1 surface (docs/phase1-design.md §12) that the remaining phase 1
-tickets fill in.
+Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack' and
+'run' — which claims a slot and records it, since the runner itself is not built
+yet. The rest is the phase 1 surface (docs/phase1-design.md §12) that the
+remaining phase 1 tickets fill in.
 
 Daemon:
   daemon                       The scheduler; launchd runs this

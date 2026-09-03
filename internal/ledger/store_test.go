@@ -188,6 +188,40 @@ func TestRestrictNeverWidens(t *testing.T) {
 	}
 }
 
+// ClaimGated's gate reads inside its transaction, which is only free of a
+// check-then-act race if the transaction holds the write lock from its first
+// statement. That is what _txlock=immediate buys, and it is a DSN parameter one
+// edit could drop, so it is asserted rather than assumed.
+func TestOpenTakesTheWriteLockAtBegin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	// A second connection standing in for a second process. Its own short
+	// busy_timeout keeps the probe from waiting out Open's five seconds.
+	probe, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(50)")
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	defer probe.Close()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	// A read: a deferred transaction would still be holding no write lock here.
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM runs`).Scan(&n); err != nil {
+		t.Fatalf("read inside the transaction: %v", err)
+	}
+	if _, err := probe.Exec(`INSERT INTO schema_meta(key, value) VALUES ('probe', '1')`); err == nil {
+		t.Fatal("a second connection wrote while a transaction was open, so Begin took no write lock")
+	}
+}
+
 func permOf(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	fi, err := os.Stat(path)
