@@ -13,8 +13,9 @@ var helpText = `shuttle - scheduled, sandboxed, ledgered unattended agent runs
 
 Usage: shuttle <command> [args]
 
-Only 'version' and 'agents' are implemented; the rest is the phase 1 surface
-(docs/phase1-design.md §12) that the remaining phase 1 tickets fill in.
+Only 'version', 'agents', 'runs', 'show' and 'ack' are implemented; the rest is
+the phase 1 surface (docs/phase1-design.md §12) that the remaining phase 1
+tickets fill in.
 
 Daemon:
   daemon                       The scheduler; launchd runs this
@@ -22,7 +23,7 @@ Daemon:
 Runs:
   run <agent> [--slot D] [--dry-run] [--no-deliver] [--unsafe-no-sandbox]
   runs [--agent A] [-n 20]     Ledger rows
-  show <run-id>                result.json, applied.json, paths
+  show <run-id>                One run's ledger row
   agents                       Load and validate every definition
   preflight                    The per-run checks without a run
 

@@ -19,6 +19,7 @@ const (
 	EnvAgentsDir = "SHUTTLE_AGENTS_DIR"
 
 	configFile = "config.json"
+	ledgerFile = "runs.db"
 )
 
 // Config is config.json, the §4.2 shape. Credentials are Keychain item names
@@ -76,6 +77,15 @@ func Home() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".shuttle"), nil
+}
+
+// LedgerPath returns Home()/runs.db, the run ledger (§6).
+func LedgerPath() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ledgerFile), nil
 }
 
 // Load reads Home()/config.json. Unknown keys refuse the load, so an inline

@@ -1,0 +1,366 @@
+package ledger
+
+import (
+	"database/sql"
+	"encoding/json"
+	"regexp"
+	"testing"
+	"time"
+)
+
+// claim claims a slot and fails the test if the slot was already taken.
+func claim(t *testing.T, s *Store, agent, at string) *Run {
+	t.Helper()
+	run, ok, err := s.Claim(agent, slot(t, at), TriggerCron)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !ok {
+		t.Fatalf("claim %s at %s: already claimed", agent, at)
+	}
+	return run
+}
+
+func countRuns(t *testing.T, s *Store) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM runs`).Scan(&n); err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	return n
+}
+
+func TestRunIDFormat(t *testing.T) {
+	s := newStore(t)
+	run := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	// The slot is rendered in its own location, so the id reads as the wall
+	// clock the operator scheduled, not as UTC.
+	if !regexp.MustCompile(`^daily-20260902-043000-[0-9a-f]{4}$`).MatchString(run.ID) {
+		t.Fatalf("run id = %q, want <agent>-20260902-043000-<4 hex>", run.ID)
+	}
+	if run.ScheduledFor != "2026-09-02T04:30:00-07:00" {
+		t.Fatalf("scheduled_for = %q, want the slot with its offset", run.ScheduledFor)
+	}
+}
+
+func TestSecondClaimOfSlotIsNoOp(t *testing.T) {
+	s := newStore(t)
+	first := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+
+	run, ok, err := s.Claim("daily", slot(t, "2026-09-02T04:30:00-07:00"), TriggerCron)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if ok || run != nil {
+		t.Fatalf("second claim = (%v, %t), want (nil, false)", run, ok)
+	}
+	if n := countRuns(t, s); n != 1 {
+		t.Fatalf("runs = %d, want 1", n)
+	}
+	if _, err := s.Get(first.ID); err != nil {
+		t.Fatalf("the first row must survive the no-op: %v", err)
+	}
+}
+
+func TestManualClaimIsASeparateSlotRow(t *testing.T) {
+	s := newStore(t)
+	claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	// The unique index carries trigger_kind: `shuttle run --slot` re-reports a
+	// day the cron slot already covered, and that is a second run on purpose.
+	if _, ok, err := s.Claim("daily", slot(t, "2026-09-02T04:30:00-07:00"), TriggerManual); err != nil || !ok {
+		t.Fatalf("manual claim = (%t, %v), want claimed", ok, err)
+	}
+	if n := countRuns(t, s); n != 2 {
+		t.Fatalf("runs = %d, want 2", n)
+	}
+}
+
+func TestSkipIsTerminalAndRepeatsAreNoOps(t *testing.T) {
+	s := newStore(t)
+	run, ok, err := s.Skip("daily", slot(t, "2026-09-02T04:30:00-07:00"), TriggerCron, SkipMissed)
+	if err != nil || !ok {
+		t.Fatalf("skip = (%t, %v), want recorded", ok, err)
+	}
+	got, err := s.Get(run.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != StatusSkipped || got.SkipReason.String != SkipMissed {
+		t.Fatalf("status/reason = %s/%s, want %s/%s", got.Status, got.SkipReason.String, StatusSkipped, SkipMissed)
+	}
+	if _, ok, err := s.Skip("daily", slot(t, "2026-09-02T04:30:00-07:00"), TriggerCron, SkipOverlap); err != nil || ok {
+		t.Fatalf("repeat skip = (%t, %v), want the no-op", ok, err)
+	}
+	if n := countRuns(t, s); n != 1 {
+		t.Fatalf("runs = %d, want 1", n)
+	}
+	// §5: last_fired_slot advances only on a claim; a skipped slot leaves it.
+	agent, err := s.Agent("daily")
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	if agent.LastFiredSlot.Valid {
+		t.Fatalf("last_fired_slot = %q after a skip, want unset", agent.LastFiredSlot.String)
+	}
+}
+
+func TestClaimAdvancesLastFiredSlot(t *testing.T) {
+	s := newStore(t)
+	claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	agent, err := s.Agent("daily")
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	if agent.LastFiredSlot.String != "2026-09-02T04:30:00-07:00" {
+		t.Fatalf("last_fired_slot = %q, want the claimed slot", agent.LastFiredSlot.String)
+	}
+}
+
+func TestStateMachine(t *testing.T) {
+	moves := map[string]func(*Store, string) error{
+		StatusRunning: func(s *Store, id string) error {
+			return s.MarkRunning(id, 4242, "/tmp/run")
+		},
+		StatusCompleted: func(s *Store, id string) error {
+			return s.Complete(id, Result{})
+		},
+		StatusFailed: func(s *Store, id string) error {
+			return s.Fail(id, ClassDied, "exit 1", Result{})
+		},
+	}
+	tests := []struct {
+		from    string
+		to      string
+		wantErr bool
+	}{
+		{StatusClaimed, StatusRunning, false},
+		{StatusClaimed, StatusCompleted, false},
+		{StatusClaimed, StatusFailed, false},
+		{StatusRunning, StatusRunning, true},
+		{StatusRunning, StatusCompleted, false},
+		{StatusRunning, StatusFailed, false},
+		{StatusCompleted, StatusRunning, true},
+		{StatusCompleted, StatusCompleted, true},
+		{StatusCompleted, StatusFailed, true},
+		{StatusFailed, StatusRunning, true},
+		{StatusFailed, StatusCompleted, true},
+		{StatusFailed, StatusFailed, true},
+		{StatusUnknown, StatusRunning, true},
+		{StatusUnknown, StatusCompleted, true},
+		{StatusUnknown, StatusFailed, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.from+" to "+tt.to, func(t *testing.T) {
+			s := newStore(t)
+			run := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+			driveTo(t, s, run.ID, tt.from)
+
+			err := moves[tt.to](s, run.ID)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("move %s to %s succeeded, want a refusal", tt.from, tt.to)
+				}
+				// The refusal must name the run and both statuses.
+				for _, want := range []string{run.ID, tt.from, tt.to} {
+					if !regexp.MustCompile(regexp.QuoteMeta(want)).MatchString(err.Error()) {
+						t.Fatalf("error %q does not name %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("move %s to %s: %v", tt.from, tt.to, err)
+			}
+			got, err := s.Get(run.ID)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if got.Status != tt.to {
+				t.Fatalf("status = %s, want %s", got.Status, tt.to)
+			}
+		})
+	}
+}
+
+// driveTo moves a freshly claimed run into status.
+func driveTo(t *testing.T, s *Store, id, status string) {
+	t.Helper()
+	var err error
+	switch status {
+	case StatusClaimed:
+		return
+	case StatusRunning:
+		err = s.MarkRunning(id, 4242, "/tmp/run")
+	case StatusCompleted:
+		err = s.Complete(id, Result{})
+	case StatusFailed:
+		err = s.Fail(id, ClassDied, "exit 1", Result{})
+	case StatusUnknown:
+		_, err = s.Reconcile()
+	default:
+		t.Fatalf("cannot drive a run to %s", status)
+	}
+	if err != nil {
+		t.Fatalf("drive to %s: %v", status, err)
+	}
+}
+
+func TestReconcileMarksInFlightRunsUnknown(t *testing.T) {
+	s := newStore(t)
+	claimed := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	running := claim(t, s, "daily", "2026-09-03T04:30:00-07:00")
+	if err := s.MarkRunning(running.ID, 4242, "/tmp/run"); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	done := claim(t, s, "daily", "2026-09-04T04:30:00-07:00")
+	if err := s.Complete(done.ID, Result{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	n, err := s.Reconcile()
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("reconciled %d rows, want 2", n)
+	}
+	for _, id := range []string{claimed.ID, running.ID} {
+		got, err := s.Get(id)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.Status != StatusUnknown {
+			t.Fatalf("status = %s, want %s", got.Status, StatusUnknown)
+		}
+	}
+	got, err := s.Get(done.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != StatusCompleted {
+		t.Fatalf("completed run became %s", got.Status)
+	}
+}
+
+func TestCostDistinguishesUnpricedFromZero(t *testing.T) {
+	s := newStore(t)
+	unpriced := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	if err := s.Complete(unpriced.ID, Result{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	free := claim(t, s, "daily", "2026-09-03T04:30:00-07:00")
+	if err := s.Complete(free.ID, Result{CostUSD: sql.NullFloat64{Float64: 0, Valid: true}}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	got, err := s.Get(unpriced.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.CostUSD.Valid {
+		t.Fatalf("cost = %v, want NULL for a run that reported none", got.CostUSD)
+	}
+	got, err = s.Get(free.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.CostUSD.Valid || got.CostUSD.Float64 != 0 {
+		t.Fatalf("cost = %v, want a present zero", got.CostUSD)
+	}
+}
+
+func TestDeliveryIsIndependentOfRunStatus(t *testing.T) {
+	s := newStore(t)
+	run := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	if err := s.Complete(run.ID, Result{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if err := s.SetDelivery(run.ID, DeliveryFailed, "401 unauthorized"); err != nil {
+		t.Fatalf("set delivery: %v", err)
+	}
+	if err := s.SetOutputsApplied(run.ID, json.RawMessage(`{"file":"daily/2026-09-01.md"}`)); err != nil {
+		t.Fatalf("set outputs: %v", err)
+	}
+
+	got, err := s.Get(run.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != StatusCompleted {
+		t.Fatalf("status = %s, want the run to stay completed", got.Status)
+	}
+	if got.DeliveryStatus.String != DeliveryFailed || got.DeliveryError.String != "401 unauthorized" {
+		t.Fatalf("delivery = %s/%s, want failed with the reason", got.DeliveryStatus.String, got.DeliveryError.String)
+	}
+	if got.DeliveredAt.Valid {
+		t.Fatalf("delivered_at = %q on a failed delivery, want unset", got.DeliveredAt.String)
+	}
+	if got.OutputsApplied.String != `{"file":"daily/2026-09-01.md"}` {
+		t.Fatalf("outputs_applied = %q", got.OutputsApplied.String)
+	}
+
+	if err := s.SetDelivery(run.ID, DeliveryDelivered, ""); err != nil {
+		t.Fatalf("set delivery: %v", err)
+	}
+	got, err = s.Get(run.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.DeliveredAt.Valid || got.DeliveryError.Valid {
+		t.Fatalf("delivered run: delivered_at = %v, error = %v", got.DeliveredAt, got.DeliveryError)
+	}
+}
+
+func TestRunsListsMostRecentFirst(t *testing.T) {
+	s := newStore(t)
+	first := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	s.now = func() time.Time { return testClock.Add(time.Hour) }
+	second := claim(t, s, "daily", "2026-09-03T04:30:00-07:00")
+	other := claim(t, s, "miner", "2026-09-03T05:30:00-07:00")
+
+	runs, err := s.Runs("", 0)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 3 || runs[len(runs)-1].ID != first.ID {
+		t.Fatalf("runs = %v, want the oldest claim last", runs)
+	}
+	runs, err = s.Runs("miner", 20)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != other.ID {
+		t.Fatalf("filtered runs = %v, want only the miner's", runs)
+	}
+	runs, err = s.Runs("daily", 1)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != second.ID {
+		t.Fatalf("limited runs = %v, want the newest daily run", runs)
+	}
+}
+
+func TestWriteTimestampsAreUTC(t *testing.T) {
+	s := newStore(t)
+	// Claimed and stamped from a clock in the scheduler's own zone: the write
+	// columns are ordered as text, so they must not carry its offset.
+	s.now = func() time.Time { return slot(t, "2026-11-01T01:30:00-07:00") }
+	run := claim(t, s, "daily", "2026-11-01T01:30:00-07:00")
+	if err := s.Complete(run.ID, Result{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	got, err := s.Get(run.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	for _, ts := range []string{got.ClaimedAt, got.EndedAt.String} {
+		if ts != "2026-11-01T08:30:00Z" {
+			t.Fatalf("write timestamp = %q, want it in UTC", ts)
+		}
+	}
+	// §5 needs the slot's own offset, so scheduled_for keeps it.
+	if got.ScheduledFor != "2026-11-01T01:30:00-07:00" {
+		t.Fatalf("scheduled_for = %q, want the slot with its offset", got.ScheduledFor)
+	}
+}
