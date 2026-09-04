@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"budget-fixture-session","model":"claude-sonnet-4-5-20250929","cwd":"/private/tmp"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the inputs."}]}}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_budget01","type":"tool_result","content":"<redacted for fixture size>"}]},"session_id":"budget-fixture-session"}
+{"type":"result","subtype":"error_max_budget_usd","is_error":true,"result":"Budget limit of $0.05 reached","num_turns":4,"total_cost_usd":0.0512,"session_id":"budget-fixture-session","usage":{"input_tokens":1200,"output_tokens":340}}

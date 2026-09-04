@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"string-message-session","model":"claude-sonnet-4-5-20250929","cwd":"/private/tmp"}
+{"type":"system","subtype":"permission_denied","tool_name":"Bash","message":"Claude requested permission to use Bash, which is denied by the run's settings.","session_id":"string-message-session"}
+{"type":"result","subtype":"success","is_error":false,"result":"done","num_turns":2,"total_cost_usd":0.0031,"session_id":"string-message-session","usage":{"input_tokens":900,"output_tokens":120}}

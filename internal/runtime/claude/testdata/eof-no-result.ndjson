@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"eof-fixture-session","model":"claude-sonnet-4-5-20250929","cwd":"/private/tmp"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading the inputs."}]}}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_eof01","type":"tool_result","content":"<redacted for fixture size>"}]},"session_id":"eof-fixture-session"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}
