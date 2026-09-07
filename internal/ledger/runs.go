@@ -141,7 +141,7 @@ func (s *Store) insertSlot(agent string, slot time.Time, triggerKind, status, sk
 // insertSlotTx writes one slot row inside the caller's transaction, so a gate
 // and its claim can share one (ClaimGated).
 func (s *Store) insertSlotTx(tx *sql.Tx, agent string, slot time.Time, triggerKind, status, skipReason string) (*Run, bool, error) {
-	id, err := newRunID(agent, slot)
+	id, err := NewRunID(agent, slot)
 	if err != nil {
 		return nil, false, err
 	}
@@ -283,10 +283,11 @@ func gate(tx *sql.Tx, agent string, limits Limits) (string, error) {
 	return "", nil
 }
 
-// newRunID builds the §7.2 id: <agent>-<YYYYMMDD-HHMMSS>-<4 hex>. The
+// NewRunID builds the §7.2 id: <agent>-<YYYYMMDD-HHMMSS>-<4 hex>. The
 // timestamp is the slot rendered in the slot's own location, so the id reads
-// as the wall-clock time the operator scheduled.
-func newRunID(agent string, slot time.Time) (string, error) {
+// as the wall-clock time the operator scheduled. Exported so a dry run, which
+// claims no row, names its directory with the same id shape.
+func NewRunID(agent string, slot time.Time) (string, error) {
 	var b [2]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err

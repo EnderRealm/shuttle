@@ -20,10 +20,16 @@ const (
 )
 
 var (
-	nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	// NameRE is the §4.1 agent-name rule. Exported because an agent name is
+	// joined to a path elsewhere — prior-reports reads <reports_dir>/<agent> —
+	// and that join is only safe against the same rule.
+	NameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
-	allowedTools     = []string{"Read", "Glob", "Grep", "Write"}
-	allowedProviders = []string{"loom-sessions", "loom-workreport", "tk-journal", "tk-tickets", "git-log", "prior-reports"}
+	allowedTools = []string{"Read", "Glob", "Grep", "Write"}
+
+	// AllowedProviders is the registered set (§8). Exported so the provider
+	// registry is held against exactly the names a manifest may ask for.
+	AllowedProviders = []string{"loom-sessions", "loom-workreport", "tk-journal", "tk-tickets", "git-log", "prior-reports"}
 
 	// Reserved for a future phase (§16): rejected by name so the error says
 	// "not yet" rather than "unknown".
@@ -35,8 +41,8 @@ var (
 // validate applies the §4.1 rules. dirName is the agent directory's base name,
 // which the manifest's name must equal.
 func (m *Manifest) validate(dirName string) error {
-	if !nameRE.MatchString(m.Name) {
-		return fmt.Errorf("name: %q must match %s", m.Name, nameRE)
+	if !NameRE.MatchString(m.Name) {
+		return fmt.Errorf("name: %q must match %s", m.Name, NameRE)
 	}
 	if m.Name != dirName {
 		return fmt.Errorf("name: %q does not match directory %q", m.Name, dirName)
@@ -53,9 +59,9 @@ func (m *Manifest) validate(dirName string) error {
 		}
 	}
 	for i, in := range m.Inputs {
-		if !slices.Contains(allowedProviders, in.Provider) {
+		if !slices.Contains(AllowedProviders, in.Provider) {
 			return fmt.Errorf("inputs[%d].provider: %q is not a registered provider (registered: %s)",
-				i, in.Provider, strings.Join(allowedProviders, ", "))
+				i, in.Provider, strings.Join(AllowedProviders, ", "))
 		}
 	}
 	if err := m.Outputs.validate(); err != nil {
