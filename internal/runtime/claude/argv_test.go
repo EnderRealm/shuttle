@@ -208,7 +208,7 @@ func TestSettingsJSONRefusesUnknownTool(t *testing.T) {
 	}
 }
 
-// The child's environment is built, not inherited: exactly the §7.4 eight, and
+// The child's environment is built, not inherited: exactly the §7.4 nine, and
 // nothing the daemon's own session carries.
 func TestEnvironIsBuiltFromScratch(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "/private/tmp/agent.sock")
@@ -219,12 +219,15 @@ func TestEnvironIsBuiltFromScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"PATH":              "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
-		"HOME":              "/Users/steve",
-		"TMPDIR":            "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/tmp",
-		"CLAUDE_CONFIG_DIR": "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/claude-home",
-		"ANTHROPIC_API_KEY": "sk-ant-test",
-		"DISABLE_TELEMETRY": "1",
+		"PATH":   "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+		"HOME":   "/Users/steve",
+		"TMPDIR": "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/tmp",
+		// srt rewrites the child's TMPDIR to this; unset, the model's temp
+		// writes would land in /tmp/claude, outside the run directory (§11).
+		"CLAUDE_CODE_TMPDIR":                       "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/tmp",
+		"CLAUDE_CONFIG_DIR":                        "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/claude-home",
+		"ANTHROPIC_API_KEY":                        "sk-ant-test",
+		"DISABLE_TELEMETRY":                        "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 		"TZ": "America/Los_Angeles",
 	}

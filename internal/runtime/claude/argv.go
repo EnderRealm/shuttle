@@ -50,8 +50,8 @@ func (o Options) ConfigDir() string    { return filepath.Join(o.RunDir, "claude-
 func (o Options) TmpDir() string       { return filepath.Join(o.RunDir, "tmp") }
 func (o Options) OutDir() string       { return filepath.Join(o.RunDir, "out") }
 
-// Argv is the §7.4 command line, in the order it is written to run.sh, behind
-// Launcher when one is set.
+// Argv is the §7.4 command line, behind Launcher when one is set: srt takes it
+// as argv after a `--`, so it is exec'd rather than written to a file.
 func Argv(o Options) ([]string, error) {
 	if err := requireLaunchable(o); err != nil {
 		return nil, err
@@ -73,7 +73,7 @@ func Argv(o Options) ([]string, error) {
 }
 
 // Environ is the child's whole environment, built from scratch (§7.4): these
-// eight variables and nothing else. weft inherits the login session and strips
+// nine variables and nothing else. weft inherits the login session and strips
 // three git variables; a scheduled run has no reason to carry SSH_AUTH_SOCK or
 // anything else from a login shell into a model run.
 func Environ(o Options) ([]string, error) {
@@ -84,6 +84,10 @@ func Environ(o Options) ([]string, error) {
 		"PATH=" + o.PATH,
 		"HOME=" + o.HomeDir,
 		"TMPDIR=" + o.TmpDir(),
+		// srt rewrites the child's TMPDIR to CLAUDE_CODE_TMPDIR, or to
+		// /tmp/claude when it is unset (§11), so without this the model's temp
+		// writes would land outside the run directory and be refused.
+		"CLAUDE_CODE_TMPDIR=" + o.TmpDir(),
 		// Every file the CLI writes (session files, todos, debug, statsig
 		// cache) lands under the run directory, and therefore inside what the
 		// sandbox allows (§11).

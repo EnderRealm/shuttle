@@ -530,15 +530,16 @@ func TestRunSuccessPreparesTheRunDirectory(t *testing.T) {
 		t.Errorf("child cwd = %q, want the run directory %q", strings.TrimSpace(string(cwd)), runDir)
 	}
 
-	// What the child observes, not what Environ returned: the §7.4 eight are
+	// What the child observes, not what Environ returned: the §7.4 nine are
 	// only what reaches it if nothing in between adds to them.
 	wantEnv := map[string]string{
-		"PATH":              o.PATH,
-		"HOME":              o.HomeDir,
-		"TMPDIR":            o.TmpDir(),
-		"CLAUDE_CONFIG_DIR": o.ConfigDir(),
-		"ANTHROPIC_API_KEY": o.APIKey,
-		"DISABLE_TELEMETRY": "1",
+		"PATH":               o.PATH,
+		"HOME":               o.HomeDir,
+		"TMPDIR":             o.TmpDir(),
+		"CLAUDE_CODE_TMPDIR": o.TmpDir(),
+		"CLAUDE_CONFIG_DIR":  o.ConfigDir(),
+		"ANTHROPIC_API_KEY":  o.APIKey,
+		"DISABLE_TELEMETRY":  "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 		"TZ": o.Timezone,
 	}
@@ -560,7 +561,7 @@ func TestRunSuccessPreparesTheRunDirectory(t *testing.T) {
 		gotEnv[name] = value
 	}
 	if len(gotEnv) != len(wantEnv) {
-		t.Errorf("child observed %d variables, want the §7.4 eight: %v", len(gotEnv), gotEnv)
+		t.Errorf("child observed %d variables, want the §7.4 nine: %v", len(gotEnv), gotEnv)
 	}
 	for name, value := range wantEnv {
 		if gotEnv[name] != value {

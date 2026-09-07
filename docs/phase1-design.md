@@ -366,7 +366,6 @@ cannot starve the daily.
   prompt.md          the exact text sent to the model
   claude-home/       CLAUDE_CONFIG_DIR for this run (§7.4)
   srt.json           the generated sandbox profile
-  run.sh             the exact argv, so `srt -c` gets one quotable string
   transcript.ndjson  stream-json stdout, verbatim
   stderr.log
   out/               the only directory the model may write: report.md, outputs.json
@@ -427,7 +426,7 @@ runs from a directory with no project settings, and it keeps `~/.claude/.credent
 readable in the sandbox profile. Its preflight must detect an expired login and
 pause the agent (§6.3), because there is no headless recovery.
 
-The argv, written to `run.sh` verbatim:
+The argv:
 
 ```
 exec /opt/homebrew/bin/claude \
@@ -459,9 +458,12 @@ exec /opt/homebrew/bin/claude \
 ```
 
 The environment is built from scratch, not inherited: `PATH` (the baked one),
-`HOME`, `TMPDIR=<run>/tmp`, `CLAUDE_CONFIG_DIR=<run>/claude-home`,
-`ANTHROPIC_API_KEY`, `DISABLE_TELEMETRY=1`,
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `TZ`. Nothing else. weft inherits the
+`HOME`, `TMPDIR=<run>/tmp`, `CLAUDE_CODE_TMPDIR=<run>/tmp` (srt rewrites the
+child's `TMPDIR` to this, or to `/tmp/claude` when it is unset, so without it the
+model's temp writes leave the run directory),
+`CLAUDE_CONFIG_DIR=<run>/claude-home`, `ANTHROPIC_API_KEY`,
+`DISABLE_TELEMETRY=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `TZ`.
+Nothing else. weft inherits the
 whole environment and its `CommandWorker` strips only the three git override
 variables; a daemon has no reason to carry `SSH_AUTH_SOCK` or anything from the
 login session into a model run, so shuttle starts empty.
@@ -678,9 +680,9 @@ streak) posts once.
 
 ## 11. Sandbox
 
-Every model run is wrapped: `srt -s <run>/srt.json -c <run>/run.sh`, with the
-prompt on stdin (srt passes stdio through; measured in weft's evaluation). The
-profile is generated per run against the nested 1.0.0 schema recorded in
+Every model run is wrapped: `srt -s <run>/srt.json -- <argv>`, with the prompt
+on stdin (srt passes stdio through; measured in weft's evaluation). The profile
+is generated per run against the nested 1.0.0 schema recorded in
 `warp/docs/host-session-isolation.md`:
 
 ```json
@@ -689,19 +691,27 @@ profile is generated per run against the nested 1.0.0 schema recorded in
     "denyRead": [
       "~/.ssh", "~/.gnupg", "~/Library/Keychains",
       "~/.claude/.credentials.json", "~/.claude/settings.json",
-      "~/.ticket", "~/.loom", "~/.shuttle/runs.db", "~/.shuttle/config.json",
+      "~/.ticket", "~/.loom", "~/.shuttle",
       "~/.codex", "~/.cursor", "~/code"
     ],
     "allowRead": ["<run>"],
-    "allowWrite": ["<run>/out", "<run>/tmp", "<run>/claude-home"]
+    "allowWrite": ["<run>/out", "<run>/tmp", "<run>/claude-home"],
+    "denyWrite": ["/tmp/claude", "/private/tmp/claude", "~/.claude/debug", "~/.npm/_logs"]
   },
   "network": {
     "allowedDomains": ["api.anthropic.com"],
+    "deniedDomains": [],
     "allowUnixSockets": [],
     "allowLocalBinding": false
   }
 }
 ```
+
+`denyWrite` and `deniedDomains` are required keys in 1.0.0 — srt refuses a
+profile without them rather than running permissively — and `denyWrite` in
+particular closes the paths srt allows writes to by default (`/tmp/claude`,
+`~/.claude/debug` and the other two), which is what makes "the model writes
+nothing outside its run directory" exact rather than approximate.
 
 Reads are deny-then-allow in 1.0.0, which is why the profile denies the state and
 credential directories explicitly and re-allows the run directory beneath the
@@ -711,13 +721,11 @@ write that leaves the machine. The `allowedDomains` list is the agent manifest's
 `sandbox.allowed_domains` appended to the model API host; phase 1's daily agent adds
 nothing.
 
-Two things to measure on the Mac before this is trusted, both ticketed: the exact
-set of paths the CLI writes under `CLAUDE_CONFIG_DIR` with `--bare` (so `allowWrite`
-is complete rather than generous), and whether the CLI honours the proxy environment
-srt sets, since srt's own README notes that a tool ignoring `HTTPS_PROXY` bypasses
-its network filter. The test for the second is a run whose prompt asks the model to
-fetch `example.com` with a tool it has been denied and with one it has not; both
-must fail, one by permission and one by the sandbox.
+`docs/sandbox.md` records what was measured on the Mac: the exact set of paths
+the CLI writes under `CLAUDE_CONFIG_DIR` with `--bare` (so `allowWrite` is
+complete rather than generous), that the CLI does honour the proxy environment
+srt sets, and that on macOS the seatbelt enforces the domain list regardless. It
+also records the residuals the profile does not close.
 
 ## 12. CLI
 

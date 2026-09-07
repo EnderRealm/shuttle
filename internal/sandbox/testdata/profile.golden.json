@@ -1,0 +1,39 @@
+{
+  "filesystem": {
+    "denyRead": [
+      "/Users/steve/.ssh",
+      "/Users/steve/.gnupg",
+      "/Users/steve/Library/Keychains",
+      "/Users/steve/.claude/.credentials.json",
+      "/Users/steve/.claude/settings.json",
+      "/Users/steve/.ticket",
+      "/Users/steve/.loom",
+      "/Users/steve/.shuttle",
+      "/Users/steve/.codex",
+      "/Users/steve/.cursor",
+      "/Users/steve/code"
+    ],
+    "allowRead": [
+      "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a"
+    ],
+    "allowWrite": [
+      "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/out",
+      "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/tmp",
+      "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/claude-home"
+    ],
+    "denyWrite": [
+      "/tmp/claude",
+      "/private/tmp/claude",
+      "/Users/steve/.claude/debug",
+      "/Users/steve/.npm/_logs"
+    ]
+  },
+  "network": {
+    "allowedDomains": [
+      "api.anthropic.com"
+    ],
+    "deniedDomains": [],
+    "allowUnixSockets": [],
+    "allowLocalBinding": false
+  }
+}

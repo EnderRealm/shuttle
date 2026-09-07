@@ -13,7 +13,10 @@ import (
 	"shuttle/internal/schedule"
 )
 
-var runSlot string
+var (
+	runSlot            string
+	runUnsafeNoSandbox bool
+)
 
 var runCmd = &cobra.Command{
 	Use:   "run <agent>",
@@ -24,6 +27,10 @@ A manual run bypasses the schedule but not the overlap check, the daily limits
 or the ledger: a slot the checks refuse is recorded as skipped with its reason.
 --slot resolves that day's slot in the agent's trigger zone, so a re-run reports
 the same day whatever the wall clock says.
+
+--unsafe-no-sandbox is the only way to run a model outside the §11 srt sandbox:
+no manifest kind, no config key and no environment variable can ask for it. The
+claim is recorded either way; the flag warns, naming the run.
 
 There is no runner yet (§7): this command records the claim and executes
 nothing.`,
@@ -81,6 +88,14 @@ nothing.`,
 			return fmt.Errorf("agent %s: slot %s: already in the ledger", name, slot)
 		}
 		fmt.Printf("%s\t%s\n", run.ID, run.ScheduledFor)
+		if runUnsafeNoSandbox {
+			// The single, explicit bypass the runner will consume: this flag is
+			// the only path to an empty claude.Options.Launcher, since §4.1 has
+			// no "none" sandbox kind, config.json no knob and the daemon no
+			// environment variable for it. It names the run so the warning can
+			// be matched to the ledger row afterwards.
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: --unsafe-no-sandbox: run %s is exempt from the srt sandbox\n", run.ID)
+		}
 		fmt.Println("claimed only: there is no runner yet, so nothing was executed")
 		return nil
 	},
@@ -88,5 +103,6 @@ nothing.`,
 
 func init() {
 	runCmd.Flags().StringVar(&runSlot, "slot", "", "The day to run for, YYYY-MM-DD in the agent's trigger zone")
+	runCmd.Flags().BoolVar(&runUnsafeNoSandbox, "unsafe-no-sandbox", false, "Run the model outside the srt sandbox (§11)")
 	rootCmd.AddCommand(runCmd)
 }
