@@ -2,12 +2,19 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"shuttle/internal/ledger"
 )
 
 // dailyManifest is the smallest §4.1-valid agent.json. These tests only need it
@@ -136,5 +143,126 @@ func TestNewSchedulerCarriesConfigAndReportsABrokenDefinition(t *testing.T) {
 	}
 	if sched.Loc.String() != "America/Los_Angeles" {
 		t.Fatalf("zone = %v, want the configured one", sched.Loc)
+	}
+}
+
+func TestDaemonReapsInFlightRunsBeforeTheFirstTick(t *testing.T) {
+	// The pass only signals a pid whose identity it can read from the kernel
+	// (kern.proc.pid, kern.procargs2, kern.proc.pgrp), which is darwin only;
+	// everywhere else the lookups establish nothing, so it kills nothing and
+	// leaves the row in flight. This one runs at the production grace period,
+	// since the daemon owns it.
+	if runtime.GOOS != "darwin" {
+		t.Skip("process identity is readable on darwin only")
+	}
+	agents := shuttleEnv(t)
+	writeAgentDir(t, agents, "daily", dailyManifest)
+	// A run the previous daemon left behind: the row is running and its
+	// process is alive, in its own group as the runtime launches one and
+	// carrying --settings <run_dir>/settings.json as the runtime puts it there
+	// (§7.4), which is what the pass identifies it by. The script is more than one
+	// command so the shell does not exec over itself and drop that argv.
+	runDir := t.TempDir()
+	claimedAt := time.Now()
+	child := exec.Command("sh", "-c", "sleep 300 & wait",
+		"sh", "--settings", filepath.Join(runDir, "settings.json"))
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := child.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	pid := child.Process.Pid
+	// Captured before the reaping goroutine can free the pid: once the pass
+	// kills this process the pid is available again, so cleanup has to recheck
+	// the identity the leader started with rather than that something is alive
+	// on that pid.
+	start, startErr := procStart(pid)
+	// Reaped in the background: the real target is an orphan reaped by init,
+	// while this one is this process's own child and would stay a zombie.
+	go child.Wait()
+	// The whole group, or a descendant that ignored the pass's SIGTERM, outlives
+	// the test — but only while the leader this test started still holds the pid.
+	defer func() {
+		if startErr != nil {
+			t.Logf("start time of pid %d is unreadable (%v); killing nothing", pid, startErr)
+			return
+		}
+		if now, err := procStart(pid); err == nil && now.Equal(start) {
+			syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	}()
+
+	store, err := openLedger()
+	if err != nil {
+		t.Fatalf("open ledger: %v", err)
+	}
+	// Stamped from before the launch, as production's is: the pass only
+	// establishes a process that started after the run was claimed.
+	store.SetClock(func() time.Time { return claimedAt })
+	// A slot in the past, so the tick after the pass has one to fire.
+	run, ok, err := store.Claim("daily", time.Now().Add(-48*time.Hour), ledger.TriggerCron)
+	if err != nil || !ok {
+		t.Fatalf("claim = (%t, %v), want the row", ok, err)
+	}
+	if err := store.MarkRunning(run.ID, pid, runDir); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	store.Close()
+
+	var logs bytes.Buffer
+	daemonCmd.SetErr(&logs)
+	t.Cleanup(func() {
+		daemonCmd.SetErr(nil)
+		daemonCmd.SetContext(context.Background())
+	})
+	// Cancelled up front: the loop runs one tick and returns on ctx.Done.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	daemonCmd.SetContext(ctx)
+	if err := daemonCmd.RunE(daemonCmd, nil); err != nil {
+		t.Fatalf("daemon: %v", err)
+	}
+
+	reaped := strings.Index(logs.String(), fmt.Sprintf("restart: run=%s agent=daily pid=%d action=killed", run.ID, pid))
+	ticked := strings.Index(logs.String(), "agent=daily slot=")
+	if reaped < 0 || ticked < 0 || reaped > ticked {
+		t.Fatalf("want the run reaped before the first tick, log:\n%s", logs.String())
+	}
+	// The tick claimed rather than skipping on overlap, which is the point of
+	// the pass running first: the stale row is no longer in flight.
+	if !strings.Contains(logs.String(), "action=claim run=") {
+		t.Fatalf("the first tick did not claim, log:\n%s", logs.String())
+	}
+	// Polled: the killed process can still be an unreaped zombie for a moment
+	// after the signal.
+	deadline := time.Now().Add(5 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %d survived the restart pass", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	store, err = openLedger()
+	if err != nil {
+		t.Fatalf("reopen ledger: %v", err)
+	}
+	defer store.Close()
+	got, err := store.Get(run.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status != ledger.StatusUnknown {
+		t.Fatalf("status = %s, want %s", got.Status, ledger.StatusUnknown)
+	}
+	// The daemon never resumed it, and the run it claimed on the tick has no
+	// runner behind it yet (§7), so the only row left in flight is that one.
+	rows, err := store.InFlight()
+	if err != nil {
+		t.Fatalf("in flight: %v", err)
+	}
+	for _, row := range rows {
+		if row.ID == run.ID {
+			t.Fatalf("run %s is in flight again after the pass", run.ID)
+		}
 	}
 }

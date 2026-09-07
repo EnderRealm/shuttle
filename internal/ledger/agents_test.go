@@ -67,9 +67,9 @@ func TestUnknownAndSkippedLeaveTheStreakAlone(t *testing.T) {
 
 	// A restart over an in-flight run, and a slot that was never launched:
 	// neither is evidence the agent is broken (§6.2).
-	claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
-	if _, err := s.Reconcile(); err != nil {
-		t.Fatalf("reconcile: %v", err)
+	inFlight := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	if err := s.MarkUnknown(inFlight.ID); err != nil {
+		t.Fatalf("mark unknown: %v", err)
 	}
 	if _, _, err := s.Skip("daily", slot(t, "2026-09-03T04:30:00-07:00"), TriggerCron, SkipOverlap); err != nil {
 		t.Fatalf("skip: %v", err)

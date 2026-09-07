@@ -40,8 +40,8 @@ type Scheduler struct {
 	// Launch owns the run it is handed: the implementation must move that row
 	// to a terminal status (§6.1) even when it fails to start, because a row
 	// left claimed makes every later slot for the agent an overlap skip (§5
-	// step 4) until a daemon restart's Reconcile clears it. nil claims the slot
-	// and launches nothing.
+	// step 4) until a daemon restart reaps it (internal/reap). nil claims the
+	// slot and launches nothing.
 	Launch func(*agentdef.Definition, *ledger.Run) error
 
 	// firstSeen is the catch-up cursor for an agent the ledger has no slot

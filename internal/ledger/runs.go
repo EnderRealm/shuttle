@@ -356,20 +356,30 @@ func finishRun(tx *sql.Tx, id, status, now string, res Result, class, signature 
 	return err
 }
 
-// Reconcile marks every run still claimed or running as unknown, which is what
-// a daemon start does to the rows its predecessor left behind (§5). It never
-// auto-retries: a run that may have spent model quota is not re-fired
-// automatically, only by an operator's `shuttle run`.
-func (s *Store) Reconcile() (int, error) {
-	res, err := s.db.Exec(
-		`UPDATE runs SET status = ?, ended_at = ? WHERE status IN (?, ?)`,
-		StatusUnknown, s.timestamp(), StatusClaimed, StatusRunning,
+// InFlight lists every run still claimed or running: the rows a daemon start
+// finds left behind by its predecessor (§5). The order is deterministic so the
+// restart pass reports them in the order they were claimed.
+func (s *Store) InFlight() ([]*Run, error) {
+	return s.queryRuns(
+		`SELECT `+runColumns+` FROM runs WHERE status IN (?, ?) ORDER BY claimed_at, id`,
+		StatusClaimed, StatusRunning,
 	)
-	if err != nil {
-		return 0, err
-	}
-	n, err := res.RowsAffected()
-	return int(n), err
+}
+
+// MarkUnknown closes an in-flight run the restart pass could not account for
+// (§5). It never auto-retries: a run that may have spent model quota is not
+// re-fired automatically, only by an operator's `shuttle run`.
+func (s *Store) MarkUnknown(id string) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := requireStatus(tx, id, StatusUnknown, StatusClaimed, StatusRunning); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`UPDATE runs SET status = ?, ended_at = ? WHERE id = ?`,
+			StatusUnknown, s.timestamp(), id,
+		)
+		return err
+	})
 }
 
 // SetDelivery records the delivery outcome independently of the run status
@@ -417,6 +427,11 @@ func (s *Store) Runs(agent string, limit int) ([]*Run, error) {
 		query += ` LIMIT ?`
 		args = append(args, limit)
 	}
+	return s.queryRuns(query, args...)
+}
+
+// queryRuns runs a runColumns select and scans every row it returns.
+func (s *Store) queryRuns(query string, args ...any) ([]*Run, error) {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err

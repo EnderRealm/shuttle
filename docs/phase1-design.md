@@ -224,9 +224,26 @@ providers and renders the prompt into the run directory and stops before the mod
 which is the fastest way to iterate on a prompt against real data.
 
 Restart: at daemon start, every row still `claimed` or `running` is checked against
-its recorded `pid`; a dead pid becomes `unknown` (never auto-retried, Hermes's rule),
-a live one is killed by process group and then marked `unknown`. The daemon never
-adopts a run it did not start.
+its recorded `pid`. A row is closed as `unknown` (never auto-retried, Hermes's rule)
+only once the pass has established that no process of the run remains, or that the pid
+belongs to something that is not the run; otherwise it stays in flight, holding the
+overlap gate, and the next daemon start re-checks it. The daemon never adopts a run it
+did not start. Established means all of: the process is alive, it leads its own group,
+its kernel start time falls inside the row's `claimed_at`..`started_at` window, and its
+argv names the row's `run_dir` (the `--settings` path of §7.4). A live process that
+fails one of the later checks is not the run's: it is closed without ever being
+signalled, and one that passes them all is killed by process group and then closed.
+The states left in flight are a kill that failed, since the run's own processes
+outlived the signals; a group left holding members the pass cannot recognise as the
+run's — a replacement group that took the id, or a survivor a SIGTERM handler forked —
+which it can neither authenticate nor signal; a dead leader whose group still holds
+live members, since a tool child that outlived the CLI is a run still alive; and an
+identity lookup that errored on a live pid, including one the platform cannot answer,
+which establishes nothing either way. A dead pid is `unknown` only when the group it
+led is empty too. The one row closed on the ledger's contents rather than the
+process's is one whose data can establish nothing — no `run_dir`, or one that is not
+absolute — since no later pass could do better and holding it would wedge the agent
+forever.
 
 ## 6. Ledger
 

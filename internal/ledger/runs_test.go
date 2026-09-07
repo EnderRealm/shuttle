@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"regexp"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,7 +198,7 @@ func driveTo(t *testing.T, s *Store, id, status string) {
 	case StatusFailed:
 		err = s.Fail(id, ClassDied, "exit 1", Result{})
 	case StatusUnknown:
-		_, err = s.Reconcile()
+		err = s.MarkUnknown(id)
 	default:
 		t.Fatalf("cannot drive a run to %s", status)
 	}
@@ -205,7 +207,7 @@ func driveTo(t *testing.T, s *Store, id, status string) {
 	}
 }
 
-func TestReconcileMarksInFlightRunsUnknown(t *testing.T) {
+func TestInFlightListsClaimedAndRunningInOrder(t *testing.T) {
 	s := newStore(t)
 	claimed := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
 	running := claim(t, s, "daily", "2026-09-03T04:30:00-07:00")
@@ -216,15 +218,42 @@ func TestReconcileMarksInFlightRunsUnknown(t *testing.T) {
 	if err := s.Complete(done.ID, Result{}); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-
-	n, err := s.Reconcile()
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
+	failed := claim(t, s, "daily", "2026-09-05T04:30:00-07:00")
+	if err := s.Fail(failed.ID, ClassDied, "exit 1", Result{}); err != nil {
+		t.Fatalf("fail: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("reconciled %d rows, want 2", n)
+	if _, _, err := s.Skip("daily", slot(t, "2026-09-06T04:30:00-07:00"), TriggerCron, SkipMissed); err != nil {
+		t.Fatalf("skip: %v", err)
+	}
+
+	rows, err := s.InFlight()
+	if err != nil {
+		t.Fatalf("in flight: %v", err)
+	}
+	// Every row shares the fixed clock's claimed_at, so the id is the
+	// tiebreaker and the order is still deterministic.
+	want := []string{claimed.ID, running.ID}
+	slices.Sort(want)
+	var got []string
+	for _, row := range rows {
+		got = append(got, row.ID)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("in flight = %v, want %v in claimed_at, id order", got, want)
+	}
+}
+
+func TestMarkUnknownClosesInFlightRunsOnly(t *testing.T) {
+	s := newStore(t)
+	claimed := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	running := claim(t, s, "daily", "2026-09-03T04:30:00-07:00")
+	if err := s.MarkRunning(running.ID, 4242, "/tmp/run"); err != nil {
+		t.Fatalf("mark running: %v", err)
 	}
 	for _, id := range []string{claimed.ID, running.ID} {
+		if err := s.MarkUnknown(id); err != nil {
+			t.Fatalf("mark unknown: %v", err)
+		}
 		got, err := s.Get(id)
 		if err != nil {
 			t.Fatalf("get: %v", err)
@@ -232,13 +261,28 @@ func TestReconcileMarksInFlightRunsUnknown(t *testing.T) {
 		if got.Status != StatusUnknown {
 			t.Fatalf("status = %s, want %s", got.Status, StatusUnknown)
 		}
+		if !got.EndedAt.Valid {
+			t.Fatal("ended_at unset on an unknown row")
+		}
 	}
-	got, err := s.Get(done.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
+
+	done := claim(t, s, "daily", "2026-09-04T04:30:00-07:00")
+	if err := s.Complete(done.ID, Result{}); err != nil {
+		t.Fatalf("complete: %v", err)
 	}
-	if got.Status != StatusCompleted {
-		t.Fatalf("completed run became %s", got.Status)
+	// A terminal row never moves again (§6.1), so the pass cannot rewrite a
+	// run its predecessor finished.
+	err := s.MarkUnknown(done.ID)
+	if err == nil {
+		t.Fatal("mark unknown over a completed row succeeded, want a refusal")
+	}
+	for _, want := range []string{done.ID, StatusCompleted, StatusUnknown} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %q", err, want)
+		}
+	}
+	if err := s.MarkUnknown("no-such-run"); err == nil {
+		t.Fatal("mark unknown over a missing id succeeded, want an error")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
+	"shuttle/internal/reap"
 	"shuttle/internal/schedule"
 )
 
@@ -32,16 +34,21 @@ stderr, which is what launchd captures into ~/.shuttle/daemon.log.
 Agent definitions are read once at startup, so an agent added or edited under
 SHUTTLE_AGENTS_DIR is invisible until the daemon is restarted.
 
+The restart pass runs once, at startup: a row it leaves in flight is re-checked
+only at the next daemon start, and until then that agent's slots skip on overlap.
+
 There is no runner yet (§7), so a claimed slot is recorded and nothing is
 executed. A claimed row therefore never reaches a terminal status, which means
 that after the first slot is claimed every later slot for that agent is recorded
-as skipped/overlap until the daemon is restarted and reconciles it.`,
+as skipped/overlap until the daemon is restarted and reaps it.`,
 	// The load and ledger errors name the agent and the row; cobra printing
 	// them a second time, with usage, would bury them.
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		logger := log.New(os.Stderr, "", log.LstdFlags)
+		// Cobra's error writer is stderr, which is what launchd captures into
+		// ~/.shuttle/daemon.log, and what a test can redirect.
+		logger := log.New(cmd.ErrOrStderr(), "", log.LstdFlags)
 		store, err := openLedger()
 		if err != nil {
 			return err
@@ -51,13 +58,35 @@ as skipped/overlap until the daemon is restarted and reconciles it.`,
 		if err != nil {
 			return err
 		}
-		// §5's restart rule: the rows a previous daemon left in flight become
-		// unknown. They are never auto-retried, only re-run by an operator.
-		n, err := store.Reconcile()
+		// §5's restart rule, before the first tick so no slot is evaluated
+		// against a stale in-flight row. The rows the pass accounts for become
+		// unknown, killed by process group first when the pid is established as
+		// the run's own; the ones it cannot — kill_failed, unresolved — stay in
+		// flight and keep the agent's slots skipping on overlap. See
+		// reap.Restart for the rule, and the log lines for what each row got.
+		outcomes, err := reap.Restart(store)
+		// Logged before err is checked: a pass stopped by a MarkUnknown
+		// failure still signalled the processes behind the outcomes it did
+		// record, and these lines are the only account of that.
+		inFlight, unsignalled := 0, 0
+		for _, o := range outcomes {
+			logger.Print(restartLine(o))
+			switch o.Action {
+			case reap.ActionKillFailed, reap.ActionUnresolved:
+				// Left in flight, holding the overlap guard for the
+				// processes it could not account for.
+				inFlight++
+				unsignalled++
+			case reap.ActionForeign:
+				// Closed, but its pid was never signalled either.
+				unsignalled++
+			}
+		}
 		if err != nil {
 			return err
 		}
-		logger.Printf("daemon start: reconciled %d run(s) left in flight, watching %d agent(s)", n, len(sched.Defs))
+		logger.Printf("daemon start: closed %d row(s) left in flight, %d not signalled (kill_failed/unresolved/foreign), watching %d agent(s)",
+			len(outcomes)-inFlight, unsignalled, len(sched.Defs))
 
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -81,6 +110,21 @@ as skipped/overlap until the daemon is restarted and reconciles it.`,
 
 func init() {
 	rootCmd.AddCommand(daemonCmd)
+}
+
+// restartLine renders one restart outcome for the daemon log. A row that
+// carried no pid prints pid=- rather than pid=0, which is a real process group
+// on the signalling side and would read as one here.
+func restartLine(o reap.Outcome) string {
+	pid := "-"
+	if o.PID != 0 {
+		pid = strconv.Itoa(o.PID)
+	}
+	line := fmt.Sprintf("restart: run=%s agent=%s pid=%s action=%s", o.RunID, o.Agent, pid, o.Action)
+	if o.Detail != "" {
+		line += fmt.Sprintf(" detail=%q", o.Detail)
+	}
+	return line
 }
 
 // newScheduler wires the §5 scheduler from config.json, the agent definitions
