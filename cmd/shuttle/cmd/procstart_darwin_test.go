@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"bytes"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -18,4 +19,21 @@ func procStart(pid int) (time.Time, error) {
 	}
 	sec, nsec := kp.Proc.P_starttime.Unix()
 	return time.Unix(sec, nsec), nil
+}
+
+// procArgvCarries reports whether the kernel answers for the process's argument
+// space and that answer holds an entry ending in want. Only the end is anchored,
+// which is enough for a readiness gate: this fixture's argv either carries the
+// settings path or has not been published yet. The restart
+// pass identifies a run by its argv, and exec.Cmd.Start returns after the fork
+// rather than after the exec, so a fixture is only ready once the argv it was
+// started with is actually visible. A forked child that has not exec'd yet
+// answers with the argument space it inherited from this test binary, which is
+// why the check is for the string and not merely for the lookup succeeding.
+func procArgvCarries(pid int, want string) bool {
+	buf, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(buf, append([]byte(want), 0))
 }

@@ -164,8 +164,8 @@ func TestDaemonReapsInFlightRunsBeforeTheFirstTick(t *testing.T) {
 	// command so the shell does not exec over itself and drop that argv.
 	runDir := t.TempDir()
 	claimedAt := time.Now()
-	child := exec.Command("sh", "-c", "sleep 300 & wait",
-		"sh", "--settings", filepath.Join(runDir, "settings.json"))
+	settings := filepath.Join(runDir, "settings.json")
+	child := exec.Command("sh", "-c", "sleep 300 & wait", "sh", "--settings", settings)
 	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := child.Start(); err != nil {
 		t.Fatalf("start sleep: %v", err)
@@ -190,6 +190,21 @@ func TestDaemonReapsInFlightRunsBeforeTheFirstTick(t *testing.T) {
 			syscall.Kill(-pid, syscall.SIGKILL)
 		}
 	}()
+	// Start returned after the fork, and the pass identifies a run by the argv
+	// the exec has still to publish. A pid caught in that window answers with the
+	// argument space it inherited from this test binary, which does not carry the
+	// settings pair, so the pass establishes it as foreign and closes the row
+	// unsignalled — not the outcome under test. Waited for after the cleanup
+	// above is installed, so giving up here still leaves the group something to
+	// reap it. The window this deliberately leaves open is the one the test is
+	// for: the shell forks its own `sleep` child later still.
+	argvBy := time.Now().Add(5 * time.Second)
+	for !procArgvCarries(pid, settings) {
+		if time.Now().After(argvBy) {
+			t.Fatalf("the argv of pid %d never carried %s", pid, settings)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	store, err := openLedger()
 	if err != nil {

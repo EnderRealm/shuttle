@@ -77,8 +77,11 @@ type member struct {
 type Action string
 
 const (
-	ActionNoPID  Action = "no_pid" // the row was claimed with no pid recorded; nothing to check
-	ActionDead   Action = "dead"   // the pid is gone and the group it led holds nothing; no signal sent
+	ActionNoPID Action = "no_pid" // the row was claimed with no pid recorded; nothing to check
+	// ActionDead is the run gone with nothing having received a signal: the pid
+	// is gone and the group it led holds nothing, or the kernel found no member
+	// of the group to deliver to.
+	ActionDead   Action = "dead"
 	ActionKilled Action = "killed" // the pid was established as the run's own, the group was signalled and is now empty
 	// ActionForeign is a pid established as not the run's own — another user's
 	// process, one that does not lead its group, one that started outside the
@@ -91,10 +94,10 @@ const (
 	// signal. The row stays in flight per Restart's rule.
 	ActionKillFailed Action = "kill_failed"
 	// ActionUnresolved is a row nothing could be established about, with nothing
-	// signalled: a group holding live processes the pass cannot authenticate as
-	// the run's own, a dead leader whose group still holds live members, or an
-	// identity lookup that errored on a live pid. The row stays in flight per
-	// Restart's rule.
+	// signalled: a group whose pre-signal snapshot does not hold the process
+	// identify established, a dead leader whose group still holds live members,
+	// or an identity lookup that errored on a live pid. The row stays in flight
+	// per Restart's rule.
 	ActionUnresolved Action = "unresolved"
 )
 
@@ -110,7 +113,11 @@ type Outcome struct {
 	PID    int // 0 when the row had none
 	Action Action
 	// Detail is the reason a pid was judged foreign or its group left
-	// unresolved, or the text of a lookup or kill error; empty otherwise.
+	// unresolved, the text of a lookup or kill error, or — on a kill that
+	// succeeded through the SIGKILL — the note that it rested on continuity
+	// rather than on a member of the pre-SIGTERM listing; empty otherwise. A
+	// kill that failed reports why it failed instead, which is the more useful
+	// of the two on a row that is being held.
 	Detail string
 }
 
@@ -131,8 +138,8 @@ var _ Ledger = (*ledger.Store)(nil)
 //
 // A row is closed only once the pass has established that no process of the run
 // remains, or that the recorded pid belongs to something that is not the run.
-// Short of that it stays in flight — the kill that failed, the group left
-// holding members the pass cannot authenticate, the dead leader whose group
+// Short of that it stays in flight — the kill that failed, the group whose
+// pre-signal snapshot could not be authenticated, the dead leader whose group
 // still holds live members, the identity lookup that errored on a live pid: the
 // ledger asserts only what the pass checked, and closing a row whose processes
 // may still be alive would drop the overlap guard and let the next tick claim a
@@ -249,12 +256,13 @@ func identify(run *ledger.Run) (Action, member, string) {
 
 // leaderGone is the answer for a recorded pid the kernel no longer knows. The
 // leader being gone is not the run being gone: the group it led can still hold
-// live members — a tool child that outlived the CLI, or the survivor a previous
-// pass's SIGTERM handler forked — and while any member remains the pgid stays
-// reserved, so nothing unrelated can have taken it. Those members cannot be
-// authenticated as the run's own either, so they are never signalled and the row
-// is held per Restart's rule; a listing that cannot be read establishes nothing
-// about the group at all, so it is held the same way.
+// live members — a tool child that outlived the CLI. They are never signalled
+// all the same. killGroup's continuity runs from a snapshot that held the process
+// identify established, and there is no such observation here — the leader died
+// before this pass ever listed the group, so the group may have emptied and the
+// id been handed on at any point since. The row is held per Restart's rule; a
+// listing that cannot be read establishes nothing about the group at all, so it
+// is held the same way.
 func leaderGone(pid int) (Action, member, string) {
 	members, err := listGroup(pid)
 	if err != nil {
@@ -290,30 +298,46 @@ func startWindow(run *ledger.Run) (time.Time, time.Time, error) {
 // stages (§7.4) but without its wait, since these processes are not our
 // children. It returns the outcome the row is recorded with and its detail:
 // ActionKilled once the group is empty, ActionDead when it emptied before
-// anything was signalled, ActionUnresolved for a group left holding members the
-// pass cannot authenticate, and ActionKillFailed for the run's own processes
-// outliving the SIGKILL or a signal the kernel refused.
+// anything could be delivered, ActionUnresolved for a snapshot that cannot be
+// authenticated as the run's, and ActionKillFailed for a group that outlived the
+// SIGKILL or a signal the kernel refused. A kill that succeeded through the
+// SIGKILL carries a detail when it rested on continuity rather than on a member
+// of the pre-SIGTERM listing, since the action alone does not say which, and
+// only one of the two is established on an observed member.
 //
-// Every stage is decided on the identity of the members the group started
-// with — pid and kernel start time — rather than on the group id still
-// answering: these are orphans, init reaps the last member the instant it
-// exits, and the id is free for reuse from then on, so a group that answers a
-// later probe may be an unrelated one that took the id. Never having seen the
-// group empty establishes nothing.
+// The group is authenticated once, before anything is signalled: the snapshot
+// has to hold the process identify established, or nothing is sent. Past that
+// point every member the group holds is the run's by continuity. A process group
+// id is the pid of the process that created it, so a replacement group with this
+// id needs a new process allocated this pid, and the kernel will not allocate a
+// pid that is in use as a pgid — XNU's alloc_pid skips it via pgfind_internal,
+// Linux keeps the leader's struct pid alive while a PIDTYPE_PGID reference
+// exists. While the group holds any member its id cannot have been handed on, so
+// a group never observed empty is still the same group, and a descendant that
+// appeared after the snapshot — the child a leader forked microseconds later,
+// the process a SIGTERM handler forked — is the run's to kill. That is the rule
+// the snapshot's non-leader members are already killed under, since only the
+// leader is ever authenticated individually; continuity widens it from members
+// at the snapshot instant to members at any instant while the group stayed
+// non-empty.
 //
-// The check-to-signal gap cannot be closed on macOS: there is no pidfd-style
-// handle to hold a process group of orphans open, so every stage can only list
-// and then signal. The residual is precisely the window between the final
-// listing and the kill(-pgid) syscall, and landing on an unrelated group inside
-// it needs the last original member to exit and the kernel to hand the same
-// pgid to a new group leader in that gap. Nothing narrower exists without a
-// kernel primitive; the window is not closed.
+// The converse is load-bearing and retained: a group that has been observed
+// empty is never signalled again. These are orphans, init reaps the last member
+// the instant it exits and the id is free for reuse from then on, so the SIGKILL
+// is conditional on a listing that still holds members.
+//
+// The residual is a group that empties and is entirely replaced inside one
+// killPoll gap: the same coincidence the listing-to-signal window already
+// carries, now as wide as the poll interval. It still needs the pid allocator to
+// wrap back around onto this pgid inside that gap. There is no pidfd-style handle
+// to hold a group of orphans open on macOS, so every stage can only list and then
+// signal; the window is not closed.
 func killGroup(leader member) (Action, string) {
 	pid := leader.PID
-	// Snapshotted before the SIGTERM, so every later probe is against members
-	// that were the run's own. The snapshot is trusted only because it still
-	// holds the process identify established: a listing that cannot be read, or
-	// one that does not, fails closed.
+	// Snapshotted before the SIGTERM. It is trusted only because it still holds
+	// the process identify established: a listing that cannot be read, or one
+	// that does not hold it, fails closed. This is the only authentication the
+	// group gets, so nothing is signalled until it passes.
 	original, err := listGroup(pid)
 	if err != nil {
 		return ActionUnresolved, err.Error()
@@ -331,26 +355,55 @@ func killGroup(leader member) (Action, string) {
 		return ActionUnresolved, fmt.Sprintf(
 			"process group %d holds %d member(s) the pass cannot authenticate; nothing signalled", pid, len(original))
 	}
-	signalErr := signalGroup(pid, syscall.SIGTERM)
-	survived, strangers, err := originalSurvives(pid, original)
+	var signalErr error
+	if err := signalGroup(pid, syscall.SIGTERM); err != nil {
+		if errors.Is(err, errGroupGone) {
+			// The group emptied between the snapshot and the send, and the
+			// kernel said so rather than delivering anything. Polling from here
+			// decides nothing: the id is already free, so a member a listing
+			// answers with is one the pass has no claim on.
+			return ActionDead, "group emptied before the SIGTERM was delivered"
+		}
+		signalErr = err
+	}
+	empty, last, err := groupEmpties(pid)
 	if err != nil {
 		return ActionKillFailed, err.Error()
 	}
-	// The SIGKILL goes only to a group one of the original members is still in
-	// — a descendant that ignored the SIGTERM keeps it alive after the leader
-	// is gone.
-	if !survived {
-		return unrecognised(pid, strangers, syscall.SIGTERM)
+	if empty {
+		return ActionKilled, ""
+	}
+	// Still holding members, which are the run's by continuity — a descendant
+	// that ignored the SIGTERM, or one forked after the snapshot was taken.
+	//
+	// Which of those the SIGKILL went to is recorded, because the action alone
+	// cannot be read after the fact and the two are not equally established. A
+	// group still holding a member of the snapshot cannot have been handed on at
+	// all while that member is in it, so the signal is proven to reach the run's
+	// own. A group holding none of them is the residual above: still the run's
+	// on the continuity argument, but no longer on an observed member, and an
+	// operator has no other way to see that the accepted window was the one this
+	// kill relied on.
+	continuity := ""
+	if !holdsAny(last, original) {
+		continuity = fmt.Sprintf(
+			"process group %d held no member of the pre-SIGTERM listing when the SIGKILL was sent", pid)
 	}
 	if e := signalGroup(pid, syscall.SIGKILL); e != nil {
+		if errors.Is(e, errGroupGone) {
+			// Empty at the send, so the SIGTERM had already carried the group
+			// off. The continuity detail still stands: it records what the
+			// escalation rested on, not what the last signal did.
+			return ActionKilled, continuity
+		}
 		signalErr = e
 	}
-	survived, strangers, err = originalSurvives(pid, original)
+	empty, _, err = groupEmpties(pid)
 	if err != nil {
 		return ActionKillFailed, err.Error()
 	}
-	if !survived {
-		return unrecognised(pid, strangers, syscall.SIGKILL)
+	if empty {
+		return ActionKilled, continuity
 	}
 	// A refused signal explains the survival, so it is reported over the
 	// generic text when there is one.
@@ -360,65 +413,57 @@ func killGroup(leader member) (Action, string) {
 	return ActionKillFailed, fmt.Sprintf("process group %d outlived SIGKILL", pid)
 }
 
-// unrecognised resolves the group a signal stage left without any of the run's
-// own members in it. Empty is the run gone and the only clean answer; anything
-// else is members the pass cannot authenticate — a replacement group that took
-// the id, or survivors the run forked out of a signal handler, and from here the
-// two are indistinguishable. Neither may be signalled — one is not ours, the
-// other cannot be shown to be — so the row is held per Restart's rule. The stage
-// is named because a group left unrecognised after the SIGTERM and one left
-// after the SIGKILL are different states to debug.
-func unrecognised(pid, strangers int, sig syscall.Signal) (Action, string) {
-	if strangers == 0 {
-		return ActionKilled, ""
-	}
-	return ActionUnresolved, fmt.Sprintf("process group %d holds %d unrecognised member(s) after %s",
-		pid, strangers, unix.SignalName(sig))
-}
+// errGroupGone is signalGroup's answer for ESRCH, which is the kernel reporting
+// that the group has no members: not a failed signal but the group observed
+// empty, by the one probe that cannot race the send it is part of. It is
+// distinct from nil because a group seen empty may not be signalled again — its
+// id is free for reuse from that instant, so a listing taken afterwards can be
+// answering for a group this pass never authenticated.
+var errGroupGone = errors.New("process group holds no members")
 
-// signalGroup signals the whole group. ESRCH is not a failure: the group
-// emptied between the check and the signal.
+// signalGroup signals the whole group, answering errGroupGone when the kernel
+// found nothing in it.
 func signalGroup(pid int, sig syscall.Signal) error {
 	err := sendSignal(-pid, sig)
-	if err == nil || errors.Is(err, syscall.ESRCH) {
+	if err == nil {
 		return nil
+	}
+	if errors.Is(err, syscall.ESRCH) {
+		return errGroupGone
 	}
 	return fmt.Errorf("kill group %d with %s: %w", pid, sig, err)
 }
 
-// originalSurvives polls the group for up to killGrace and reports whether any
-// of the members it held before the signals is still there, along with how many
-// members the deciding listing held. The group and not the leader: a descendant
-// that ignored the SIGTERM keeps it populated after the leader is gone, and it
-// is the one the SIGKILL is for.
-//
-// The poll stops at the first listing holding no original member, whether it is
-// empty or not. Waiting longer decides nothing: neither a replacement group that
-// took the id nor a survivor the run forked will disappear, so the count is what
-// the caller needs to tell "the run is gone" from "something is left that cannot
-// be authenticated".
+// groupEmpties polls the group for up to killGrace and reports whether it became
+// empty, along with the last listing it read when it did not. Empty is the only
+// evidence the run's processes are gone: these are not this daemon's children,
+// so there is no wait to sit on, and while the group holds anything at all it is
+// still the group the snapshot authenticated. The listing comes back so the
+// caller can say how established the members it is about to signal are, which
+// decides nothing but is the difference between the two ways a kill can land.
 //
 // A listing that fails ends the poll with the error: an unreadable listing
-// cannot establish that the run's own processes are gone, and the caller keeps
-// the row in flight rather than assuming either way.
-func originalSurvives(pid int, original []member) (bool, int, error) {
+// cannot establish that the group emptied, and the caller keeps the row in
+// flight rather than assuming either way.
+func groupEmpties(pid int) (bool, []member, error) {
 	deadline := time.Now().Add(killGrace)
 	for {
 		now, err := listGroup(pid)
 		if err != nil {
-			return false, 0, err
+			return false, nil, err
 		}
-		if !holdsAny(now, original) {
-			return false, len(now), nil
+		if len(now) == 0 {
+			return true, nil, nil
 		}
 		if time.Now().After(deadline) {
-			return true, len(now), nil
+			return false, now, nil
 		}
 		time.Sleep(killPoll)
 	}
 }
 
-// holdsAny reports whether the listing still holds one of the original members.
+// holdsAny reports whether the listing still holds one of the members the group
+// was snapshotted with.
 func holdsAny(now, original []member) bool {
 	for _, o := range original {
 		if holds(now, o) {

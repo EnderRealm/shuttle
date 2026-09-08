@@ -233,14 +233,24 @@ its kernel start time falls inside the row's `claimed_at`..`started_at` window, 
 argv names the row's `run_dir` (the `--settings` path of §7.4). A live process that
 fails one of the later checks is not the run's: it is closed without ever being
 signalled, and one that passes them all is killed by process group and then closed.
-The states left in flight are a kill that failed, since the run's own processes
-outlived the signals; a group left holding members the pass cannot recognise as the
-run's — a replacement group that took the id, or a survivor a SIGTERM handler forked —
-which it can neither authenticate nor signal; a dead leader whose group still holds
-live members, since a tool child that outlived the CLI is a run still alive; and an
+The group is authenticated once, before anything is signalled: the listing taken ahead
+of the SIGTERM has to still hold that process. Past that point every member the group
+holds is the run's, including one that appeared after the listing — a child forked in
+the window before the signal, or one a SIGTERM handler forked — because a process group
+id is the pid of the process that created it and the kernel will not hand out a pid that
+is in use as a pgid, so a group never observed empty cannot have been handed on. The
+converse bounds it: a group that has been observed empty is never signalled again, which
+is why the SIGKILL only goes to a group still holding members. The states left in flight
+are a kill that failed, since the group outlived the signals; a pre-SIGTERM listing that
+no longer holds the recorded process, which is never signalled at all; a dead leader
+whose group still holds live members, since a tool child that outlived the CLI is a run
+still alive and there is no authenticated member left to carry the group; and an
 identity lookup that errored on a live pid, including one the platform cannot answer,
 which establishes nothing either way. A dead pid is `unknown` only when the group it
-led is empty too. The one row closed on the ledger's contents rather than the
+led is empty too, and so is a live one whose group answered the SIGTERM with ESRCH:
+the kernel finding no member to signal is the group observed empty by the one probe
+that cannot race the send it is part of, so the row closes and nothing further is
+sent at that id. The one row closed on the ledger's contents rather than the
 process's is one whose data can establish nothing — no `run_dir`, or one that is not
 absolute — since no later pass could do better and holding it would wedge the agent
 forever.

@@ -93,7 +93,45 @@ func spawn(t *testing.T, argv []string, setpgid bool) *exec.Cmd {
 			cmd.Process.Kill()
 		}
 	})
+	// After the cleanup is registered, so a wait that gives up does not leave
+	// the process it was waiting on with nothing to reap it.
+	waitArgv(t, pid, argv)
 	return cmd
+}
+
+// waitArgv blocks until the kernel answers for the process with the argv this
+// fixture was started with. Start returns once the fork has happened, and the
+// argv is the identity the pass matches a run by, so a test that hands the pass
+// a pid caught before the exec gets a lookup error instead of the answer it set
+// up.
+//
+// It waits on the settings pair rather than on the lookup merely not erroring: a
+// forked child that has not exec'd yet still has an argument space, inherited
+// from this test binary, so an answering kern.procargs2 does not establish that
+// the exec has landed. A fixture carrying no settings pair has no identity to
+// wait for and falls back to the weaker condition, which is all there is.
+func waitArgv(t *testing.T, pid int, argv []string) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	dir := ""
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == settingsFlag {
+			dir = filepath.Dir(argv[i+1])
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		isRun, err := processIsRun(pid, dir)
+		if err == nil && (dir == "" || isRun) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the argv of pid %d never carried %s %s", pid, settingsFlag, filepath.Join(dir, settingsFile))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // ownedArgv is a shell leader carrying the runtime's settings argument for
@@ -338,9 +376,12 @@ func TestRestartKillsAGroupMemberThatOutlivesTheSIGTERM(t *testing.T) {
 	dir := t.TempDir()
 	child := filepath.Join(t.TempDir(), "child.pid")
 	// The trap keeps the descendant in the group through the group SIGTERM,
-	// and the loop outlives the sleep that same signal kills.
-	script := `sh -c 'trap "" TERM; while :; do sleep 0.2; done' >/dev/null 2>&1 &
-echo $! > ` + child + `
+	// and the loop outlives the sleep that same signal kills. The descendant
+	// records its own pid after installing the trap, as spawnForkSurvivor's does
+	// and for the same reason: the parent's $! is written while the child is
+	// still exec'ing, so a pass that lands on it then finds a shell the SIGTERM
+	// still kills and the group empties with no SIGKILL to assert on.
+	script := `sh -c 'trap "" TERM; echo $$ > ` + child + `; while :; do sleep 0.2; done' >/dev/null 2>&1 &
 sleep 300 &
 wait
 `
@@ -372,11 +413,16 @@ func TestRestartSendsNoSIGKILLToAGroupTheSIGTERMEmptied(t *testing.T) {
 	s := newStore(t)
 	sent := recordSignals(t)
 	dir := t.TempDir()
+	child := filepath.Join(t.TempDir(), "child.pid")
 	at := time.Now()
 	// sh forwards nothing, but the group SIGTERM reaches the sleep too and the
-	// shell dies on its wait, so the group empties on the first signal.
-	cmd := spawn(t, ownedArgv(dir, "sleep 300 & wait"), true)
+	// shell dies on its wait, so the group empties on the first signal. The
+	// child's pid file is the readiness signal: this test asserts on a group
+	// that empties, so the descendant has to be in it before the pass runs
+	// rather than forked into it while the pass is signalling.
+	cmd := spawn(t, ownedArgv(dir, "sleep 300 & echo $! > "+child+"; wait"), true)
 	leader := cmd.Process.Pid
+	readPID(t, child)
 	run := claim(t, s, "2026-09-02T04:30:00-07:00", at, leader, dir)
 
 	outcomes := restart(t, s)
@@ -386,24 +432,38 @@ func TestRestartSendsNoSIGKILLToAGroupTheSIGTERMEmptied(t *testing.T) {
 	assertReaped(t, s, run.ID)
 }
 
-// A group id reused between two probes: the run's own members are gone and an
-// unrelated process answers for the id. It is never signalled again — never
-// having observed the group empty is not continuity — and it cannot be told from
-// a survivor the run forked either, so the pass fails closed and leaves the row
-// in flight rather than reporting a kill it did not establish.
-func TestRestartFailsClosedWhenOnlyStrangersHoldTheGroup(t *testing.T) {
+// A group that answers every probe after the snapshot with a member the snapshot
+// never held, and never answers empty. Continuity carries the snapshot's
+// authentication forward, so those members are the run's and both signals go to
+// the group; nothing empties it, so the kill is recorded as failed and the row
+// stays in flight. This is where the residual sits: a group that emptied and was
+// entirely replaced inside one killPoll gap would be signalled here as if it
+// were the run's, which needs the pid allocator to wrap back around onto this
+// pgid in that gap. The stage the pass does observe empty is the one it will not
+// signal again — TestRestartSendsNoSIGKILLToAGroupTheSIGTERMEmptied.
+func TestRestartSignalsAGroupThatIsNeverObservedEmpty(t *testing.T) {
 	requireIdentity(t)
 	shortGrace(t)
 	s := newStore(t)
-	sent := recordSignals(t)
 	dir := t.TempDir()
 	at := time.Now()
 	cmd := spawn(t, ownedArgv(dir, "sleep 300 & wait"), true)
 	leader := cmd.Process.Pid
 	run := claim(t, s, "2026-09-02T04:30:00-07:00", at, leader, dir)
-	// The snapshot is the real group, so the SIGTERM goes to the run's own
-	// processes; every later listing answers with the id held by a process that
-	// started after them, which is what the reuse looks like from here.
+	// The send is stubbed along with the listing. A real signal would carry the
+	// fixture's own group off and the kernel would then answer ESRCH, which is
+	// the group observed empty — the opposite of the case under test, and it
+	// would decide the outcome before the listing got to.
+	wasSignal := sendSignal
+	sendSignal = func(int, syscall.Signal) error { return nil }
+	t.Cleanup(func() { sendSignal = wasSignal })
+	sent := recordSignals(t)
+	// The snapshot is the real group, so it holds the process identify
+	// established and the pass may signal. Every later listing answers with a
+	// member that started after the snapshot and never leaves, which is what
+	// both a descendant forked past the snapshot and a reused id look like from
+	// here — the pass does not distinguish them once it has authenticated the
+	// group and never seen it empty.
 	was := listGroup
 	calls := 0
 	listGroup = func(pgid int) ([]member, error) {
@@ -416,12 +476,11 @@ func TestRestartFailsClosedWhenOnlyStrangersHoldTheGroup(t *testing.T) {
 	t.Cleanup(func() { listGroup = was })
 
 	outcomes := restart(t, s)
-	assertOutcome(t, outcomes[0], run, ActionUnresolved, leader)
-	if !strings.Contains(outcomes[0].Detail, "unrecognised member(s) after SIGTERM") {
-		t.Fatalf("detail = %q, want the unrecognised-members reason and the stage", outcomes[0].Detail)
+	assertOutcome(t, outcomes[0], run, ActionKillFailed, leader)
+	if !strings.Contains(outcomes[0].Detail, "outlived SIGKILL") {
+		t.Fatalf("detail = %q, want the outlived-SIGKILL reason", outcomes[0].Detail)
 	}
-	assertSignals(t, sent, signal(-leader, syscall.SIGTERM))
-	waitGone(t, "the group leader", leader)
+	assertSignals(t, sent, signal(-leader, syscall.SIGTERM), signal(-leader, syscall.SIGKILL))
 	assertInFlight(t, s, run.ID)
 }
 
@@ -485,10 +544,12 @@ func TestRestartSignalsNothingWhenTheSnapshotIsEmpty(t *testing.T) {
 }
 
 // A SIGTERM handler that forks a survivor and exits: the group is left holding a
-// process that was not in the snapshot. The pass cannot authenticate it as the
-// run's, so it is never signalled and the kill counts as failed — closing the row
-// would drop the overlap guard while that process is still alive.
-func TestRestartFailsClosedWhenTheSIGTERMForksASurvivor(t *testing.T) {
+// process that was not in the snapshot. It is the run's all the same — the
+// snapshot authenticated the group and the pass has never seen it empty — so the
+// SIGKILL goes to it and the row closes. Leaving it alive is the outcome the
+// pass exists to prevent: it holds the pgid, so every later start would read the
+// group as a dead leader it cannot establish and the row would never close.
+func TestRestartKillsASurvivorTheSIGTERMHandlerForked(t *testing.T) {
 	requireIdentity(t)
 	shortGrace(t)
 	s := newStore(t)
@@ -499,66 +560,134 @@ func TestRestartFailsClosedWhenTheSIGTERMForksASurvivor(t *testing.T) {
 	run := claim(t, s, "2026-09-02T04:30:00-07:00", at, leader, dir)
 
 	outcomes := restart(t, s)
-	assertOutcome(t, outcomes[0], run, ActionUnresolved, leader)
-	if !strings.Contains(outcomes[0].Detail, "unrecognised member(s) after SIGTERM") {
-		t.Fatalf("detail = %q, want the unrecognised-members reason and the stage", outcomes[0].Detail)
-	}
-	assertSignals(t, sent, signal(-leader, syscall.SIGTERM))
-	// The leader is gone, so spawn's cleanup no longer covers the group: the
-	// survivor is killed by its own pid.
+	// Read and registered before the assertions: the leader is gone by now, so
+	// spawn's group cleanup no longer reaches the survivor, and a failed
+	// assertion below would otherwise leave it running for its full 300s.
 	forked := readPID(t, survivor)
 	killPID(t, forked)
-	if !alive(forked) {
-		t.Fatalf("the forked survivor (pid %d) was signalled", forked)
+	assertOutcome(t, outcomes[0], run, ActionKilled, leader)
+	// The survivor is not a member of the snapshot, so the SIGKILL rested on
+	// continuity rather than on an observed member: the log has to say so.
+	if !strings.Contains(outcomes[0].Detail, "held no member of the pre-SIGTERM listing") {
+		t.Fatalf("detail = %q, want the continuity stage named", outcomes[0].Detail)
 	}
-	assertInFlight(t, s, run.ID)
-}
-
-// The next daemon start over that row: the leader the ledger recorded is gone,
-// but the survivor it left behind still holds the group. A dead leader is not
-// proof the run is gone, so the row keeps the overlap guard and nothing is
-// signalled at a pid whose group cannot be authenticated — and once the survivor
-// goes the group is empty and the row finally closes.
-func TestRestartRechecksADeadLeaderWhoseSurvivorHoldsTheGroup(t *testing.T) {
-	requireIdentity(t)
-	shortGrace(t)
-	s := newStore(t)
-	dir := t.TempDir()
-	at := time.Now()
-	leader, survivor := spawnForkSurvivor(t, dir)
-	run := claim(t, s, "2026-09-02T04:30:00-07:00", at, leader, dir)
-
-	assertOutcome(t, restart(t, s)[0], run, ActionUnresolved, leader)
-	forked := readPID(t, survivor)
-	killPID(t, forked)
+	assertSignals(t, sent, signal(-leader, syscall.SIGTERM), signal(-leader, syscall.SIGKILL))
 	waitGone(t, "the group leader", leader)
-
-	sent := recordSignals(t)
-	outcomes := restart(t, s)
-	assertOutcome(t, outcomes[0], run, ActionUnresolved, leader)
-	if !strings.Contains(outcomes[0].Detail, "leader gone") {
-		t.Fatalf("detail = %q, want the leader-gone reason", outcomes[0].Detail)
-	}
-	assertSignals(t, sent)
-	if !alive(forked) {
-		t.Fatalf("the forked survivor (pid %d) was signalled", forked)
-	}
-	assertInFlight(t, s, run.ID)
-
-	if err := syscall.Kill(forked, syscall.SIGKILL); err != nil {
-		t.Fatalf("kill the survivor: %v", err)
-	}
 	waitGone(t, "the forked survivor", forked)
-	assertOutcome(t, restart(t, s)[0], run, ActionDead, leader)
-	assertSignals(t, sent)
 	assertReaped(t, s, run.ID)
 }
 
-// A leader that died leaving a descendant behind, which is the run whose CLI
-// exited while a tool child lives on. Nothing is signalled at any stage: the
-// descendant is in the run's group but carries none of the run's identity, so
-// the pass cannot establish it and the row stays in flight.
-func TestRestartSignalsNothingForADeadLeaderWithALiveDescendant(t *testing.T) {
+// A member the snapshot never held, which is the case the daemon's own restart
+// test kept surfacing: the leader forks a child in the window between the
+// listing and the kill(-pgid), so the child misses the SIGTERM and outlives the
+// leader it was forked from. Driven through the listing rather than that race,
+// so what is pinned is the decision and not the timing. The snapshot is the real
+// group, so it carries the authentication the pass requires before it signals
+// anything; every listing after it answers with a member that was never in the
+// snapshot, until the SIGKILL clears the group.
+func TestRestartKillsAMemberThatAppearedAfterTheSnapshot(t *testing.T) {
+	requireIdentity(t)
+	shortGrace(t)
+	s := newStore(t)
+	dir := t.TempDir()
+	at := time.Now()
+	cmd := spawn(t, ownedArgv(dir, "sleep 300 & wait"), true)
+	leader := cmd.Process.Pid
+	run := claim(t, s, "2026-09-02T04:30:00-07:00", at, leader, dir)
+	// Stubbed with the listing, so the group the pass reads is the scripted one
+	// throughout: a real send would empty the fixture's own group and the ESRCH
+	// that follows would resolve the row before the listing was consulted.
+	wasSignal := sendSignal
+	sendSignal = func(int, syscall.Signal) error { return nil }
+	t.Cleanup(func() { sendSignal = wasSignal })
+	sent := recordSignals(t)
+	// The leader's pid carrying a start time the process identify established
+	// cannot have, which is the idiom
+	// TestRestartSignalsNothingWhenTheSnapshotLacksTheLeader uses for a member
+	// the snapshot never held.
+	late := member{PID: leader, Start: time.Now()}
+	was := listGroup
+	snapshot := true
+	listGroup = func(pgid int) ([]member, error) {
+		if snapshot {
+			snapshot = false
+			return was(pgid)
+		}
+		// Two signals recorded is the SIGKILL, after which the group is gone.
+		if len(*sent) >= 2 {
+			return nil, nil
+		}
+		return []member{late}, nil
+	}
+	t.Cleanup(func() { listGroup = was })
+
+	outcomes := restart(t, s)
+	assertOutcome(t, outcomes[0], run, ActionKilled, leader)
+	if !strings.Contains(outcomes[0].Detail, "held no member of the pre-SIGTERM listing") {
+		t.Fatalf("detail = %q, want the continuity stage named", outcomes[0].Detail)
+	}
+	assertSignals(t, sent, signal(-leader, syscall.SIGTERM), signal(-leader, syscall.SIGKILL))
+	assertReaped(t, s, run.ID)
+}
+
+// The kernel answering ESRCH to the group SIGTERM is the group observed empty by
+// the one probe that cannot race the send it is part of: no member received the
+// signal, so the run is gone. Nothing more may be sent at that id, however
+// populated a later listing looks — from the instant the group emptied the id is
+// free for reuse, so a member answering for it is one this pass never
+// authenticated and continuity has nothing left to carry.
+func TestRestartSendsNoSIGKILLWhenTheSIGTERMFindsTheGroupGone(t *testing.T) {
+	requireIdentity(t)
+	shortGrace(t)
+	s := newStore(t)
+	dir := t.TempDir()
+	at := time.Now()
+	cmd := spawn(t, ownedArgv(dir, "sleep 300 & wait"), true)
+	leader := cmd.Process.Pid
+	run := claim(t, s, "2026-09-02T04:30:00-07:00", at, leader, dir)
+	// Installed under recordSignals, so what the pass tried is still recorded
+	// while nothing reaches the process the fixture started.
+	wasSignal := sendSignal
+	sendSignal = func(int, syscall.Signal) error { return syscall.ESRCH }
+	t.Cleanup(func() { sendSignal = wasSignal })
+	sent := recordSignals(t)
+	// Every listing past the snapshot answers with the id held by a process that
+	// started after it, which is what a replacement group looks like from here.
+	was := listGroup
+	snapshot := true
+	listGroup = func(pgid int) ([]member, error) {
+		if snapshot {
+			snapshot = false
+			return was(pgid)
+		}
+		return []member{{PID: pgid, Start: time.Now()}}, nil
+	}
+	t.Cleanup(func() { listGroup = was })
+
+	outcomes := restart(t, s)
+	assertOutcome(t, outcomes[0], run, ActionDead, leader)
+	if !strings.Contains(outcomes[0].Detail, "emptied before the SIGTERM was delivered") {
+		t.Fatalf("detail = %q, want the emptied-before-delivery reason", outcomes[0].Detail)
+	}
+	assertSignals(t, sent, signal(-leader, syscall.SIGTERM))
+	if !alive(leader) {
+		t.Fatalf("pid %d was signalled", leader)
+	}
+	assertReaped(t, s, run.ID)
+}
+
+// What a later daemon start makes of a row an earlier one could not close: the
+// leader the ledger recorded is gone and a descendant still holds the group,
+// which is the run whose CLI exited while a tool child lives on. The descendant
+// carries none of the run's identity, so the row is rechecked rather than
+// resolved and nothing is signalled at any stage; it is the group emptying that
+// finally closes it — not the pass killing anything, since a group with no
+// authenticated member in it is one continuity cannot reach.
+//
+// The pass no longer produces this state itself: a group it authenticated is one
+// it kills whole, descendants included. So it is built here directly, by killing
+// the leader by pid.
+func TestRestartRechecksADeadLeaderUntilItsGroupEmpties(t *testing.T) {
 	requireIdentity(t)
 	s := newStore(t)
 	sent := recordSignals(t)
@@ -569,8 +698,8 @@ func TestRestartSignalsNothingForADeadLeaderWithALiveDescendant(t *testing.T) {
 	leader := cmd.Process.Pid
 	descendant := readPID(t, child)
 	killPID(t, descendant)
-	// The leader alone, by pid rather than by group: the descendant is
-	// reparented and stays in the group the ledger recorded.
+	// By pid and not by group: the descendant is reparented and stays in the
+	// group the ledger recorded.
 	if err := syscall.Kill(leader, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill the leader: %v", err)
 	}
@@ -587,6 +716,14 @@ func TestRestartSignalsNothingForADeadLeaderWithALiveDescendant(t *testing.T) {
 		t.Fatalf("the descendant (pid %d) was signalled", descendant)
 	}
 	assertInFlight(t, s, run.ID)
+
+	if err := syscall.Kill(descendant, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill the descendant: %v", err)
+	}
+	waitGone(t, "the descendant", descendant)
+	assertOutcome(t, restart(t, s)[0], run, ActionDead, leader)
+	assertSignals(t, sent)
+	assertReaped(t, s, run.ID)
 }
 
 // spawnForkSurvivor starts a run leader whose SIGTERM handler forks a fresh
