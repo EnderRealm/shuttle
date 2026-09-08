@@ -13,11 +13,11 @@ var helpText = `shuttle - scheduled, sandboxed, ledgered unattended agent runs
 
 Usage: shuttle <command> [args]
 
-Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack' and
-'run' — which claims a slot and records it, or with --dry-run gathers the inputs
-and renders the prompt, since the live runner itself is not built yet. The rest
-is the phase 1 surface (docs/phase1-design.md §12) that the remaining phase 1
-tickets fill in.
+Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack',
+'install' and 'run' — which claims a slot and records it, or with --dry-run
+gathers the inputs and renders the prompt, since the live runner itself is not
+built yet. The rest is the phase 1 surface (docs/phase1-design.md §12) that the
+remaining phase 1 tickets fill in.
 
 Daemon:
   daemon                       The scheduler; launchd runs this
@@ -38,7 +38,9 @@ Operations:
   deliver --test               One test email through the configured sender
 
 Lifecycle:
-  install daemon | uninstall   launchd
+  install [daemon]             Create the state root and the reports repo;
+                                 'daemon' (the launchd job, §13) is not built yet
+  uninstall                    Remove the launchd job
   version                      Print the version string
 
 Global flags:

@@ -20,6 +20,7 @@ const (
 
 	configFile = "config.json"
 	ledgerFile = "runs.db"
+	reportsDir = "reports"
 )
 
 // Config is config.json, the §4.2 shape. Credentials are Keychain item names
@@ -32,6 +33,7 @@ type Config struct {
 	Paths     Paths     `json:"paths"`
 	Notify    Notify    `json:"notify"`
 	Limits    Limits    `json:"limits"`
+	Output    Output    `json:"output"`
 }
 
 type Email struct {
@@ -67,6 +69,13 @@ type Limits struct {
 	DailySpendUSD     float64 `json:"daily_spend_usd"`
 }
 
+// Output is §9.1's configured domain list: hosts a report may link to on top
+// of github.com and the tk store's remote. Optional; an absent key allows
+// neither more nor less than those two.
+type Output struct {
+	LinkHosts []string `json:"link_hosts"`
+}
+
 // Home returns the state root: $SHUTTLE_HOME, else ~/.shuttle.
 func Home() (string, error) {
 	if h := os.Getenv(EnvHome); h != "" {
@@ -86,6 +95,15 @@ func LedgerPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ledgerFile), nil
+}
+
+// ReportsDir returns Home()/reports, §9.3's repo.
+func ReportsDir() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, reportsDir), nil
 }
 
 // Load reads Home()/config.json. Unknown keys refuse the load, so an inline

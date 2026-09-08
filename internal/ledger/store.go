@@ -47,7 +47,7 @@ type Store struct {
 // SetMaxOpenConns(1) plus WAL is the arrangement §6 specifies, and the
 // scheduler and the run goroutines share this one *Store.
 func Open(path string) (*Store, error) {
-	if err := privateDir(filepath.Dir(path)); err != nil {
+	if err := EnsureHome(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 	// sqlite creates the database and its WAL sidecars at the process umask,
@@ -89,10 +89,12 @@ func (s *Store) Close() error { return s.db.Close() }
 // by accident. Production leaves it at time.Now.
 func (s *Store) SetClock(now func() time.Time) { s.now = now }
 
-// privateDir creates the state root if it is absent. MkdirAll applies its mode
+// EnsureHome creates the state root if it is absent. MkdirAll applies its mode
 // only to what it creates, so a root that already exists is tightened by the
-// mask rather than by the create.
-func privateDir(dir string) error {
+// mask rather than by the create. Exported because `shuttle install` lays the
+// state root down before any ledger exists (§9.3), and homeMode is the one
+// place that decides what mode it gets.
+func EnsureHome(dir string) error {
 	if err := os.MkdirAll(dir, homeMode); err != nil {
 		return err
 	}

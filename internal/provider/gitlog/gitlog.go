@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"shuttle/internal/gitenv"
 	"shuttle/internal/provider"
 	"shuttle/internal/provider/tkconfig"
 )
@@ -109,10 +110,7 @@ func gitLog(ctx context.Context, path string, w provider.Window) (string, error)
 	cmd := exec.CommandContext(ctx, "git", "-C", path, "log",
 		"--since="+w.From.Format(time.RFC3339), "--until="+w.To.Format(time.RFC3339),
 		"--all", "--decorate=short", logFormat, "--shortstat")
-	// The three git override variables are stripped, weft's CommandWorker rule:
-	// a GIT_DIR left in the daemon's environment would point every checkout's
-	// log at one repository.
-	cmd.Env = cleanEnv(os.Environ())
+	cmd.Env = gitenv.Env()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -120,20 +118,6 @@ func gitLog(ctx context.Context, path string, w provider.Window) (string, error)
 		return "", fmt.Errorf("git log: %w%s", err, tail(stderr.String()))
 	}
 	return stdout.String(), nil
-}
-
-func cleanEnv(env []string) []string {
-	out := make([]string, 0, len(env))
-	for _, kv := range env {
-		switch {
-		case strings.HasPrefix(kv, "GIT_DIR="),
-			strings.HasPrefix(kv, "GIT_WORK_TREE="),
-			strings.HasPrefix(kv, "GIT_INDEX_FILE="):
-		default:
-			out = append(out, kv)
-		}
-	}
-	return out
 }
 
 func parse(out string, w provider.Window) []commit {
