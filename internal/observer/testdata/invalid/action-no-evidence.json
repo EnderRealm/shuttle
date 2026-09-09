@@ -1,0 +1,13 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "mead",
+    "domain": "wren"
+  },
+  "id": "wren/mead/note-days-repeating",
+  "question_id": "wren/mead/days-repeating",
+  "kind": "ticket-note",
+  "ticket": "village2/show-whether-week-a0f2",
+  "body": "Seven days after the deploy the cross-window overlap reads 0.41 against a baseline of 0.62, and distinct activities 19 against 11. Same method revision, same instance, same store.",
+  "evidence": []
+}

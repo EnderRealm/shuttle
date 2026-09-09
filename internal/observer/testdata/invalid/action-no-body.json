@@ -1,0 +1,22 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "mead",
+    "domain": "wren"
+  },
+  "id": "wren/mead/note-days-repeating",
+  "question_id": "wren/mead/days-repeating",
+  "kind": "ticket-note",
+  "ticket": "village2/show-whether-week-a0f2",
+  "body": "",
+  "evidence": [
+    {
+      "kind": "sqlite",
+      "ref": "wren.sqlite#activities"
+    },
+    {
+      "kind": "notebook",
+      "ref": "wren/mead/days-repeating"
+    }
+  ]
+}

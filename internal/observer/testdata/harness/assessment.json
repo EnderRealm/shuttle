@@ -1,0 +1,60 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "shuttle",
+    "domain": "harness"
+  },
+  "question_id": "harness/shuttle/days-repeating",
+  "outcome": "effect-absent-with-sufficient-opportunity",
+  "interpretation": "Three nights ran after the restart and all three repeated a headline, so the count is unchanged at 3 against a baseline of 3. The change had the opportunity the ticket declared and did not produce the effect it declared.",
+  "evidence": {
+    "contract_version": "observer/v1",
+    "identity": {
+      "observer": "shuttle",
+      "domain": "harness"
+    },
+    "subject": {
+      "kind": "agent",
+      "instance": "daily"
+    },
+    "method": {
+      "name": "report-diff",
+      "revision": "v3"
+    },
+    "window": {
+      "start": "2026-09-05T00:00:00-07:00",
+      "end": "2026-09-08T00:00:00-07:00",
+      "timezone": "America/Los_Angeles"
+    },
+    "scope": {
+      "collection": "~/.shuttle/reports",
+      "snapshot": "git 9f2c1ab"
+    },
+    "sources": [
+      {
+        "kind": "file",
+        "ref": "~/.shuttle/reports/daily/2026-09-05.md"
+      },
+      {
+        "kind": "file",
+        "ref": "~/.shuttle/reports/daily/2026-09-06.md"
+      },
+      {
+        "kind": "file",
+        "ref": "~/.shuttle/reports/daily/2026-09-07.md"
+      }
+    ],
+    "coverage": {
+      "observed": 3,
+      "available": 3
+    },
+    "readings": [
+      {
+        "name": "repeated_headlines",
+        "value": 3,
+        "unit": "count"
+      }
+    ]
+  },
+  "at": "2026-09-08T06:00:00-07:00"
+}

@@ -1,0 +1,22 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "shuttle",
+    "domain": "harness"
+  },
+  "id": "harness/shuttle/note-days-repeating",
+  "question_id": "harness/shuttle/days-repeating",
+  "kind": "ticket-note",
+  "ticket": "shuttle/vary-report-headline-1a2b",
+  "body": "Three nights after the restart the repeated-headline count is still 3, unchanged from the baseline taken over the three nights before it. Same method revision, same reports repo.",
+  "evidence": [
+    {
+      "kind": "file",
+      "ref": "~/.shuttle/reports/daily/2026-09-07.md"
+    },
+    {
+      "kind": "notebook",
+      "ref": "harness/shuttle/days-repeating"
+    }
+  ]
+}

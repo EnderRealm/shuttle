@@ -1,0 +1,68 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "shuttle",
+    "domain": "harness"
+  },
+  "finding": {
+    "id": "harness/shuttle/subject-line-drift",
+    "question": "Do the email subject lines drift from the report's own headline?",
+    "changes": "Whether the subject is generated from the H1 or written separately, which decides where a misleading subject gets fixed."
+  },
+  "outcome": "insufficient-evidence",
+  "interpretation": "Nobody asked this. Two of three nights carried a subject that names something the report's headline does not, but the delivery rows for two nights are gone, so this is a first sighting rather than a rate.",
+  "evidence": {
+    "contract_version": "observer/v1",
+    "identity": {
+      "observer": "shuttle",
+      "domain": "harness"
+    },
+    "subject": {
+      "kind": "agent",
+      "instance": "daily"
+    },
+    "method": {
+      "name": "report-diff",
+      "revision": "v3"
+    },
+    "window": {
+      "start": "2026-09-05T00:00:00-07:00",
+      "end": "2026-09-08T00:00:00-07:00",
+      "timezone": "America/Los_Angeles"
+    },
+    "scope": {
+      "collection": "~/.shuttle/reports",
+      "snapshot": "git 9f2c1ab"
+    },
+    "sources": [
+      {
+        "kind": "file",
+        "ref": "~/.shuttle/reports/daily/2026-09-05.md"
+      },
+      {
+        "kind": "file",
+        "ref": "~/.shuttle/reports/daily/2026-09-06.md"
+      },
+      {
+        "kind": "file",
+        "ref": "~/.shuttle/reports/daily/2026-09-07.md"
+      }
+    ],
+    "coverage": {
+      "observed": 3,
+      "available": 3
+    },
+    "readings": [
+      {
+        "name": "subject_headline_mismatch",
+        "value": 2,
+        "unit": "count"
+      },
+      {
+        "name": "subject_length",
+        "unavailable": "the delivery rows for two nights were pruned before the read"
+      }
+    ]
+  },
+  "at": "2026-09-08T06:05:00-07:00"
+}

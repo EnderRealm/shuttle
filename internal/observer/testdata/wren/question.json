@@ -1,0 +1,12 @@
+{
+  "contract_version": "observer/v1",
+  "identity": { "observer": "mead", "domain": "wren" },
+  "id": "wren/mead/days-repeating",
+  "subject": { "kind": "agent", "instance": "wren-1" },
+  "question": "Are her days repeating?",
+  "reading": "loops.indicators()'s recent and prior repeat_rate and distinct activity counts, plus the cross-window overlap: repeat_rate counts repeats within a window, so a week that reuses last week's activities but says each of them once reads as no repeats at all.",
+  "changes": "Whether her days have narrowed, and whether anything we shipped against it moved the number rather than only the story we tell about it.",
+  "speed": "slow",
+  "asked": "2026-09-07T09:00:00-07:00",
+  "ticket": "village2/show-whether-week-a0f2"
+}

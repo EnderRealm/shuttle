@@ -1,0 +1,54 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "shuttle",
+    "domain": "harness"
+  },
+  "question_id": "harness/shuttle/days-repeating",
+  "ticket": "shuttle/vary-report-headline-1a2b",
+  "expected_effect": "the repeated-headline count falls to zero once the prompt names the previous report's headlines",
+  "activation": {
+    "kind": "restart",
+    "at": "2026-09-04T04:30:00-07:00",
+    "instance": "daily",
+    "reference": "daily-20260904-043000-9f2c",
+    "commit_time": "2026-09-03T16:40:00-07:00"
+  },
+  "observation": {
+    "min_duration": "72h",
+    "opportunity": "a nightly report",
+    "min_opportunities": 3
+  },
+  "evidence": {
+    "readings": [
+      "repeated_headlines"
+    ],
+    "baseline": {
+      "subject": {
+        "kind": "agent",
+        "instance": "daily"
+      },
+      "method": {
+        "name": "report-diff",
+        "revision": "v3"
+      },
+      "scope": {
+        "collection": "~/.shuttle/reports",
+        "snapshot": "git 4b81ef0"
+      },
+      "window": {
+        "start": "2026-09-01T00:00:00-07:00",
+        "end": "2026-09-04T00:00:00-07:00",
+        "timezone": "America/Los_Angeles"
+      },
+      "source": "shuttle/vary-report-headline-1a2b",
+      "readings": [
+        {
+          "name": "repeated_headlines",
+          "value": 3,
+          "unit": "count"
+        }
+      ]
+    }
+  }
+}

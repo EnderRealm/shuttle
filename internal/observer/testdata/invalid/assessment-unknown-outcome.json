@@ -1,0 +1,72 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "mead",
+    "domain": "wren"
+  },
+  "question_id": "wren/mead/days-repeating",
+  "outcome": "effect-probably-observed",
+  "interpretation": "The overlap fell and the distinct count rose over the seven days after the deploy, which is the direction the ticket declared. The mana reading is absent for the week and is not read as zero.",
+  "evidence": {
+    "contract_version": "observer/v1",
+    "identity": {
+      "observer": "mead",
+      "domain": "wren"
+    },
+    "subject": {
+      "kind": "agent",
+      "instance": "wren-1"
+    },
+    "method": {
+      "name": "loops.indicators",
+      "revision": "2026-08-07"
+    },
+    "window": {
+      "start": "2026-09-10T00:00:00-07:00",
+      "end": "2026-09-17T00:00:00-07:00",
+      "timezone": "America/Los_Angeles"
+    },
+    "scope": {
+      "collection": "wren.sqlite",
+      "snapshot": "wren-2026-09-17"
+    },
+    "sources": [
+      {
+        "kind": "sqlite",
+        "ref": "wren.sqlite#activities"
+      },
+      {
+        "kind": "ticket",
+        "ref": "village2/show-whether-week-a0f2"
+      }
+    ],
+    "unavailable": [
+      {
+        "kind": "log",
+        "ref": "chat_out-2026-09-11",
+        "reason": "the transcript was rotated before the read"
+      }
+    ],
+    "coverage": {
+      "observed": 7,
+      "available": 8
+    },
+    "readings": [
+      {
+        "name": "repeat_rate",
+        "value": 0.41,
+        "unit": "ratio"
+      },
+      {
+        "name": "distinct_activities",
+        "value": 19,
+        "unit": "count"
+      },
+      {
+        "name": "mana_spend",
+        "unavailable": "this build wrote no deep_thought rows, so the count is absent rather than zero"
+      }
+    ]
+  },
+  "at": "2026-09-17T07:00:00-07:00"
+}

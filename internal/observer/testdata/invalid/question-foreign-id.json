@@ -1,0 +1,18 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "shuttle",
+    "domain": "harness"
+  },
+  "id": "wren/mead/days-repeating",
+  "subject": {
+    "kind": "agent",
+    "instance": "daily"
+  },
+  "question": "Are the daily reports repeating?",
+  "reading": "Count the headlines in each night's report.md that already appeared in the previous night's, over the last seven reports in the reports repo.",
+  "changes": "Whether the daily agent is reading a narrowing slice of the estate or the estate itself repeated, which decides whether the prompt or the inputs get the fix.",
+  "speed": "fast",
+  "asked": "2026-09-01T21:00:00-07:00",
+  "ticket": "shuttle/vary-report-headline-1a2b"
+}
