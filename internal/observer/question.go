@@ -51,20 +51,31 @@ type Question struct {
 	Changes  string   `json:"changes"`
 	Speed    string   `json:"speed"`
 	Asked    string   `json:"asked"`
-	Ticket   string   `json:"ticket,omitempty"`
+	// Author is who asked. A question a person wrote and one a model proposed
+	// carry different authority, and a later reader has to be able to tell
+	// which of the two they are quoting — the same reason a reading and a
+	// sentence about it are kept in separate records.
+	Author Author `json:"author"`
+	Ticket string `json:"ticket,omitempty"`
 }
 
-// Experiment is what turns a ticket into feedback: the effect the change was
-// expected to have, the moment it became live for the subject, the window and
-// opportunity that must pass before an absence means anything, and the
-// readings and baseline it will be judged by. Every part is declared by the
-// worker registering it; none of it is inferred, and a missing part is pending
-// or refused rather than filled in.
+// Experiment is what makes a change answerable: the effect it was expected to
+// have, the moment it became live for the subject, the window and opportunity
+// that must pass before an absence means anything, and the readings and
+// baseline it will be judged by. Those declarations are what make it an
+// experiment — the ticket is provenance and optional exactly as it is on a
+// question, since a change somebody made by hand is as observable as one a
+// worker landed. None of it is inferred, and a missing part leaves the
+// experiment pending or is refused rather than filled in.
 type Experiment struct {
 	Envelope
-	Identity       Identity     `json:"identity"`
-	QuestionID     string       `json:"question_id"`
-	Ticket         string       `json:"ticket"`
+	Identity   Identity `json:"identity"`
+	QuestionID string   `json:"question_id"`
+	// Author is who declared the experiment: a worker registering the change
+	// it just landed, or the person who made it by hand. It is recorded rather
+	// than assumed, for the reason Question.Author is.
+	Author         Author       `json:"author"`
+	Ticket         string       `json:"ticket,omitempty"`
 	ExpectedEffect string       `json:"expected_effect"`
 	Activation     *Activation  `json:"activation"`
 	Observation    Observation  `json:"observation"`
@@ -152,10 +163,10 @@ func (q *Question) validate() error {
 	if q.Speed != SpeedFast && q.Speed != SpeedSlow {
 		return fieldErr("speed", "%q, one of %s, %s", q.Speed, SpeedFast, SpeedSlow)
 	}
-	if err := checkTimestamp("asked", q.Asked); err != nil {
+	if err := checkDay("asked", q.Asked); err != nil {
 		return err
 	}
-	return nil
+	return q.Author.validate("author")
 }
 
 func (e *Experiment) validate() error {
@@ -168,8 +179,8 @@ func (e *Experiment) validate() error {
 	if err := checkQualified("question_id", e.QuestionID, e.Identity); err != nil {
 		return err
 	}
-	if e.Ticket == "" {
-		return fieldErr("ticket", "required: an experiment answers for a change somebody made")
+	if err := e.Author.validate("author"); err != nil {
+		return err
 	}
 	if e.ExpectedEffect == "" {
 		return fieldErr("expected_effect", "required: without it there is nothing to observe and an absence means nothing")
@@ -273,6 +284,28 @@ func checkTimestamp(field, value string) error {
 	return nil
 }
 
+// dayLayout is the bare calendar date a provenance day may be written as.
+const dayLayout = "2006-01-02"
+
+// checkDay accepts either a calendar date or a full RFC3339 timestamp, for a
+// value that records which day something happened rather than an instant. What
+// was written is stored verbatim: a date is not widened into a timestamp and no
+// zone is attached to it, because a time of day nobody recorded is not the
+// contract's to invent. Where the zone changes what the value means — a window,
+// an activation, a commit time — checkTimestamp still applies.
+func checkDay(field, value string) error {
+	if value == "" {
+		return fieldErr(field, "required")
+	}
+	if _, err := time.Parse(dayLayout, value); err == nil {
+		return nil
+	}
+	if _, err := time.Parse(time.RFC3339, value); err != nil {
+		return fieldErr(field, "%q is neither a calendar date (YYYY-MM-DD) nor an RFC3339 timestamp", value)
+	}
+	return nil
+}
+
 func validateState(field, state string) error {
 	switch state {
 	case StateObserving, StateAnswered, StateRetired:
@@ -286,6 +319,7 @@ func (q *Question) clone() *Question {
 		return nil
 	}
 	out := *q
+	out.Author = q.Author.clone()
 	return &out
 }
 
@@ -294,6 +328,7 @@ func (e *Experiment) clone() *Experiment {
 		return nil
 	}
 	out := *e
+	out.Author = e.Author.clone()
 	if e.Activation != nil {
 		activation := *e.Activation
 		out.Activation = &activation

@@ -2,6 +2,7 @@
   "contract_version": "observer/v1",
   "identity": { "observer": "mead", "domain": "wren" },
   "question_id": "wren/mead/days-repeating",
+  "author": { "kind": "worker", "ref": "village2/show-whether-week-a0f2" },
   "ticket": "village2/show-whether-week-a0f2",
   "expected_effect": "the cross-window overlap falls below the baseline repeat rate, and distinct activities rise",
   "activation": {

@@ -13,5 +13,9 @@
   "reading": "loops.indicators()'s recent and prior repeat_rate and distinct activity counts, plus the cross-window overlap: repeat_rate counts repeats within a window, so a week that reuses last week's activities but says each of them once reads as no repeats at all.",
   "speed": "slow",
   "asked": "2026-09-07T09:00:00-07:00",
+  "author": {
+    "kind": "observer",
+    "ref": "mead"
+  },
   "ticket": "village2/show-whether-week-a0f2"
 }

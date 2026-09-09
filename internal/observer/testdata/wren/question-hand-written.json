@@ -1,0 +1,12 @@
+{
+  "contract_version": "observer/v1",
+  "identity": { "observer": "mead", "domain": "wren" },
+  "id": "wren/mead/unprompted-starts",
+  "subject": { "kind": "agent", "instance": "wren-1" },
+  "question": "Does she ever start something nobody asked her for?",
+  "reading": "The activities in her record whose first mention is her own rather than a message from somebody else, counted over a week of her days.",
+  "changes": "Whether she only ever answers, which decides whether the next thing we build her is another input or a reason to act on her own.",
+  "speed": "slow",
+  "asked": "2026-09-07",
+  "author": { "kind": "human", "ref": "steve" }
+}

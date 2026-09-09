@@ -5,6 +5,10 @@
     "domain": "harness"
   },
   "question_id": "harness/shuttle/days-repeating",
+  "author": {
+    "kind": "worker",
+    "ref": "shuttle/vary-report-headline-1a2b"
+  },
   "ticket": "shuttle/vary-report-headline-1a2b",
   "expected_effect": "the repeated-headline count falls to zero once the prompt names the previous report's headlines",
   "activation": {

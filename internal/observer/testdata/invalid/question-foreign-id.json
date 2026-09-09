@@ -14,5 +14,9 @@
   "changes": "Whether the daily agent is reading a narrowing slice of the estate or the estate itself repeated, which decides whether the prompt or the inputs get the fix.",
   "speed": "fast",
   "asked": "2026-09-01T21:00:00-07:00",
+  "author": {
+    "kind": "observer",
+    "ref": "mead"
+  },
   "ticket": "shuttle/vary-report-headline-1a2b"
 }

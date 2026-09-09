@@ -34,6 +34,96 @@ func TestStandingQuestionNeedsNoExperiment(t *testing.T) {
 	}
 }
 
+// Hand-written records are first-class. A question somebody asked directly and
+// an experiment somebody declared for a change they made by hand carry no
+// ticket at all: the ticket is provenance on both, and what makes the
+// experiment an experiment is the expected effect and the activation proving
+// the change went live.
+func TestHandWrittenRecordsNeedNoTicket(t *testing.T) {
+	q := mustQuestion(t, "wren", "question-hand-written.json")
+	if q.Ticket != "" {
+		t.Fatalf("ticket = %q, the fixture is meant to be hand-written with no ticket", q.Ticket)
+	}
+	if q.Author.Kind != AuthorHuman {
+		t.Fatalf("author kind = %q, want %q", q.Author.Kind, AuthorHuman)
+	}
+
+	nb := NewMemory()
+	harness := mustQuestion(t, "harness", "question.json")
+	if _, err := nb.Register(at(nb, harness.Identity, "register"), harness); err != nil {
+		t.Fatal(err)
+	}
+	exp := mustExperiment(t, "harness", "experiment-hand-declared.json")
+	if exp.Ticket != "" {
+		t.Fatalf("ticket = %q, the fixture is meant to be declared by hand with no ticket", exp.Ticket)
+	}
+	e, err := nb.Activate(at(nb, harness.Identity, "activate"), exp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.ExperimentStatus != ExperimentLive {
+		t.Fatalf("status = %q, want %q", e.ExperimentStatus, ExperimentLive)
+	}
+	if e.Experiment.Author.Kind != AuthorHuman {
+		t.Fatalf("author kind = %q, want %q", e.Experiment.Author.Kind, AuthorHuman)
+	}
+}
+
+// Who wrote a record is recorded rather than assumed. A question a person asked
+// and one the observer proposed carry different authority, so an absent author
+// and a kind outside the vocabulary are both refused naming the field — on a
+// question and an experiment alike.
+func TestAuthorIsRecordedNotAssumed(t *testing.T) {
+	q := mustQuestion(t, "wren", "question.json")
+	q.Author = Author{}
+	refusal(t, q.validate(), "author.kind")
+	q.Author = Author{Kind: "steve"}
+	refusal(t, q.validate(), "author.kind")
+
+	e := mustExperiment(t, "wren", "experiment.json")
+	e.Author = Author{}
+	refusal(t, e.validate(), "author.kind")
+	e.Author = Author{Kind: "steve"}
+	refusal(t, e.validate(), "author.kind")
+
+	// The observer's identity is not the author's: a question registered under
+	// the observer's identity is still the person's, and the notebook hands
+	// back what it was told.
+	hand := mustQuestion(t, "wren", "question-hand-written.json")
+	nb := NewMemory()
+	entry, err := nb.Register(at(nb, hand.Identity, "register"), hand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Question.Author != (Author{Kind: AuthorHuman, Ref: "steve"}) {
+		t.Fatalf("author = %+v, want the one the payload declared", entry.Question.Author)
+	}
+}
+
+// asked records the day a question entered the list, so a bare calendar date is
+// as valid as a timestamp and is stored exactly as it was written: widening it
+// into an instant would invent a time of day and a zone nobody recorded. A
+// value that is neither is still refused naming the field.
+func TestAskedRecordsTheDayVerbatim(t *testing.T) {
+	q := mustQuestion(t, "wren", "question-hand-written.json")
+	if q.Asked != "2026-09-07" {
+		t.Fatalf("asked = %q, want the bare date the fixture carries", q.Asked)
+	}
+	nb := NewMemory()
+	e, err := nb.Register(at(nb, q.Identity, "register"), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Question.Asked != q.Asked {
+		t.Fatalf("asked = %q on the stored question, want %q", e.Question.Asked, q.Asked)
+	}
+
+	q.Asked = "last Tuesday"
+	refusal(t, q.validate(), "asked")
+	q.Asked = ""
+	refusal(t, q.validate(), "asked")
+}
+
 // A commit time is not an activation. The change exists; nothing has run with
 // it yet, and the experiment stays pending rather than being dated from the
 // merge.
@@ -65,7 +155,7 @@ func TestCommitTimeIsNotActivation(t *testing.T) {
 	}
 }
 
-// Feedback on a ticket needs all four declarations. Each is refused on its own
+// Feedback on a change needs all four declarations. Each is refused on its own
 // and the refusal names it, because the alternative is a harness that fills one
 // in and reports a measurement nobody declared.
 func TestActivatingFeedbackRequiresItsDeclarations(t *testing.T) {

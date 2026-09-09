@@ -4,12 +4,15 @@ Status: written 2026-09-09 alongside `internal/observer`, which is the executabl
 half of this document. Where the two disagree the code is right and this file is
 stale. Nothing here is wired to a runner, a schedule or a CLI: the package is the
 contract, its validation, a reference notebook and two domains' fixtures.
+`observer/v1` is unreleased on those terms — no records exist under it and no
+domain adapter reads it — so a correction to the shape is still made in place; a
+version pins a shape once there are records written under it to read.
 
 An observer cannot judge a change consistently if every domain invents its own
 meaning for a window, a baseline, missing evidence or a retired question. This
 document is the part of that agreement the types cannot hold: what is fact and
 what is a reading of it, who owns which store, what is kept and for how long, and
-how a worker registers an experiment without inheriting the observer's context.
+how an experiment is registered without inheriting the observer's context.
 
 ## 1. What travels
 
@@ -19,14 +22,26 @@ A payload with no version, or one this binary does not read, is refused naming
 binary, so a record has to say which rules it was written under rather than be
 guessed at from its shape.
 
-| Payload | Is | Written by |
-|---|---|---|
-| Question | a standing question about a subject: what would answer it, what answering it would change, how fast its inputs move | the observer |
-| Experiment | a ticket's declared effect, its activation, the window and opportunity it needs, and the readings and baseline it will be judged by | the worker that made the change |
-| Bundle | recorded fact: readings over an explicit window, from named sources, out of a named snapshot, with what could not be read | the observer |
-| Assessment | one outcome and one prose interpretation, carrying the bundle it was drawn from | the observer |
-| Action | ticket-facing feedback under a stable id | the observer |
-| Receipt | what became of an action, under that same id | the observer |
+| Payload | Is | Written by | Direction |
+|---|---|---|---|
+| Question | a standing question about a subject: what would answer it, what answering it would change, how fast its inputs move | a person, a worker or the observer, recorded in `author` | into the notebook from its author |
+| Experiment | a change's declared effect, its activation, the window and opportunity it needs, and the readings and baseline it will be judged by | a person, a worker or the observer, recorded in `author` | into the notebook from its author |
+| Bundle | recorded fact: readings over an explicit window, from named sources, out of a named snapshot, with what could not be read | the observer | written into the notebook |
+| Assessment | one outcome and one prose interpretation, carrying the bundle it was drawn from | the observer | written into the notebook |
+| Action | ticket-facing feedback under a stable id | the observer | out toward the ticket store, as a proposal |
+| Receipt | what became of an action, under that same id | the observer, recording what the far store did | back from that store: `applied`, `refused` or `failed`, with its reference |
+
+`author` is a kind from a fixed vocabulary — `human`, `worker`, `observer` — and an
+optional free `ref` holding whatever identifies that author: a person's name, a
+ticket id, a run id. It is required on a question and an experiment because the
+three carry different authority, and a reader who cannot tell them apart reads a
+model's proposal as a person's decision. A ticket reference on either is
+provenance and is optional on both: many questions and experiments are written by
+hand with no ticket behind them.
+
+The direction that carries nothing at all is the one back to the subject: the
+notebook is never a prompt input for the agent being observed. Watching is one
+direction, and §4 says what that means for whoever registers an experiment.
 
 Every entry and action id is qualified `<domain>/<observer>/<name>`. That is the
 whole of the collision story: the Wren observer's `days-repeating` and the
@@ -88,11 +103,15 @@ covers the declared duration, and coverage of at least the declared number of
 opportunities. Short of any of those it is refused, since what it is describing
 is `insufficient-evidence` wearing a label it did not earn.
 
-## 4. How a worker registers an experiment
+## 4. How an experiment is registered
 
 A ticket reference on a standing question is provenance and nothing more: it says
-where the question came from. Feedback on a ticket is a different object, and it
-takes four declarations, all from the worker that made the change:
+where the question came from. Feedback on a change is a different object, and
+what makes it one is four declarations — not who wrote them. A worker registers
+an experiment for the change it just landed; a person declares one for a change
+they made by hand, often with no ticket at all. Either way the author is
+recorded in `author` rather than assumed from whoever transported the payload,
+and the same four declarations are required:
 
 1. **The expected effect** — what should become true, in the subject's own terms.
    Without it there is nothing to observe and an absence means nothing.
@@ -112,10 +131,12 @@ takes four declarations, all from the worker that made the change:
 
 Anything missing from that list is refused naming the field, or leaves the
 experiment pending. Nothing is inferred and nothing is defaulted: a harness that
-fills in a window would be reporting a measurement nobody declared.
+fills in a window would be reporting a measurement nobody declared, and one that
+stamped an unstated author with the observer's identity would be reporting a
+proposal as a decision.
 
 The registration is a payload through the adapter and that is the entire
-interface. The worker does not read the notebook, does not see the observer's
+interface. A worker does not read the notebook, does not see the observer's
 other questions, and does not learn what has already been concluded about the
 subject; it declares what its own change should do and hands that over. The
 notebook is likewise never a prompt input for the observed subject — watching is

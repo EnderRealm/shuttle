@@ -5,6 +5,10 @@
     "domain": "wren"
   },
   "question_id": "wren/mead/days-repeating",
+  "author": {
+    "kind": "worker",
+    "ref": "village2/show-whether-week-a0f2"
+  },
   "ticket": "village2/show-whether-week-a0f2",
   "activation": {
     "kind": "deployment",
