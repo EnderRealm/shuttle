@@ -1,12 +1,105 @@
 # shuttle
 
-## Setup
+A Go harness being built for scheduled, sandboxed, budgeted agent runs. Its first
+target is a daily report across the coding-agent estate, assembled from loom, tk,
+git history, and prior reports, then delivered by email.
 
-```bash
-cp .example.env .env
-# Edit .env with your values
+## Current implementation
+
+Agent validation, cron slot scheduling, the SQLite ledger, inspection commands,
+restart reaping, and prompt dry runs are implemented. The repository also contains
+the Claude runtime adapter, sandbox profile builder, output validation/application,
+and shared observer contracts.
+
+**The live runner is not wired into the CLI yet.** `run` without `--dry-run` and
+`daemon` only claim and record slots; they execute no model. A claim remains in
+flight, so later slots for that agent skip on overlap until restart handling
+settles it. Email delivery and launchd installation are still planned;
+`install daemon` explicitly refuses. Commands such as `preflight`, `pause`,
+`resume`, `prune`, `deliver`, and `uninstall` appear in the design/help text but
+are not implemented.
+
+## Build and check
+
+Requires Go 1.26. macOS is the target for Keychain, process-identity checks, and
+the planned launchd integration. Git is needed to initialize reports and collect
+repository history.
+
+```sh
+make dev
+./shuttle version
+./shuttle run --help
+go test ./...
+go vet ./...
 ```
 
-## Development
+`make dev` builds `./shuttle`. `make install` builds the binary into
+`~/.local/bin`; it does not install a service. Default tests exercise local
+fixtures, temporary stores, and stub processes. `SHUTTLE_LIVE_CLAUDE=1` enables
+a paid model test and `SHUTTLE_LIVE_SRT=1` enables real sandbox tests; leave both
+unset for ordinary checks.
 
-<!-- Add development instructions -->
+## Configure and preview a daily run
+
+From the repository root, select this checkout's agent definitions and initialize
+the state directory:
+
+```sh
+export SHUTTLE_AGENTS_DIR="$PWD/agents"
+./shuttle agents
+./shuttle install
+```
+
+State defaults to `~/.shuttle`; set `SHUTTLE_HOME` to use another directory.
+`install` creates that directory and a local `reports/` git repository with no
+remote. It does not write `config.json` or configure credentials.
+
+Create `config.json` in the state directory before a dry run. This minimal example
+supplies the daily providers' paths; replace each absolute path with your own:
+
+```json
+{
+  "paths": {
+    "loom_home": "/Users/you/.loom",
+    "loom_bin": "/Users/you/.local/bin/loom",
+    "tk_config": "/Users/you/.ticket/config.yaml"
+  }
+}
+```
+
+The daily inputs need the existing loom data and a loom executable supporting
+`work-report`, plus the tk configuration/store and its registered repositories.
+The full configuration shape, including credential **Keychain item names**, is in
+[the phase-one design](docs/phase1-design.md). Unknown config keys are rejected.
+Agent lookup uses `SHUTTLE_AGENTS_DIR`, then `config.json`'s `agents_dir`, then
+`~/code/shuttle/agents`.
+
+```sh
+./shuttle run daily --dry-run
+```
+
+A dry run gathers real local inputs and writes `run.json`, `inputs/*.json`, and
+`prompt.md` under the printed `runs/daily/<run-id>/` directory. It calls no model,
+sends no email, and writes no ledger row. `--slot YYYY-MM-DD` selects a past slot
+in the agent's trigger timezone; the report covers the preceding day. See the
+[daily manifest](agents/daily/agent.json) and [prompt](agents/daily/AGENT.md).
+
+## Inspect and debug
+
+```sh
+./shuttle status
+./shuttle runs --agent daily -n 20
+./shuttle show RUN_ID
+```
+
+Replace `RUN_ID` with a row printed by `runs`. These commands inspect the ledger
+at `<state-root>/runs.db`; they do not list dry runs. Dry-run failures name the
+provider, and its partially written run directory contains the inputs gathered
+before the failure. CLI errors and scheduler decisions go to stderr. A foreground
+`daemon` does not create `daemon.log` itself; that redirection belongs to the
+planned launchd setup.
+
+[The sandbox notes](docs/sandbox.md) describe the runtime boundary and its measured
+behavior. [The observer contract](docs/observer-contract.md) describes the shared
+question, evidence, assessment, and action records. The phase-one design includes
+remaining work as well as implemented components.
