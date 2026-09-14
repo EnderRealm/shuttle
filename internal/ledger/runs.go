@@ -312,37 +312,15 @@ func (s *Store) MarkRunning(id string, pid int, runDir string) error {
 // Complete closes a run as successful: it resets the agent's failure streak
 // and stamps last_success_at (§6.2).
 func (s *Store) Complete(id string, res Result) error {
-	now := s.timestamp()
-	return s.withTx(func(tx *sql.Tx) error {
-		agent, err := requireStatus(tx, id, StatusCompleted, StatusClaimed, StatusRunning)
-		if err != nil {
-			return err
-		}
-		if err := finishRun(tx, id, StatusCompleted, now, res, "", ""); err != nil {
-			return err
-		}
-		return recordSuccess(tx, agent, now)
-	})
+	_, err := s.CompleteEvent(id, res)
+	return err
 }
 
 // Fail closes a run as failed: it advances the streak, applies the §6.3
 // auto-pause rules and upserts the incident for the normalised error.
 func (s *Store) Fail(id, class, errText string, res Result) error {
-	now := s.timestamp()
-	signature := Signature(class, errText)
-	return s.withTx(func(tx *sql.Tx) error {
-		agent, err := requireStatus(tx, id, StatusFailed, StatusClaimed, StatusRunning)
-		if err != nil {
-			return err
-		}
-		if err := finishRun(tx, id, StatusFailed, now, res, class, signature); err != nil {
-			return err
-		}
-		if err := recordFailure(tx, agent, class, now); err != nil {
-			return err
-		}
-		return upsertIncident(tx, agent, signature, id, now)
-	})
+	_, err := s.FailEvent(id, class, errText, res)
+	return err
 }
 
 func finishRun(tx *sql.Tx, id, status, now string, res Result, class, signature string) error {

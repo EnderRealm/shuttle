@@ -3,12 +3,16 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/spf13/cobra"
 
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
+	"shuttle/internal/runner"
 )
 
 var (
@@ -54,7 +58,19 @@ func openLedger() (*ledger.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ledger.Open(path)
+	cfg, err := config.Load()
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	store, err := ledger.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	runner.ConfigureOutcomes(store, cfg, filepath.Dir(path), log.Default())
+	return store, nil
 }
 
 // formatCost applies §12: two decimals, and a run that reported no cost prints

@@ -118,6 +118,17 @@ func readDSN(path string) string {
 	return fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(2000)", path)
 }
 
+// Check requires the configured database and the schema this provider reads.
+// Unlike Run's unavailable document, preflight must name a missing requirement.
+func Check(ctx context.Context, home string) error {
+	db, err := sql.Open("sqlite", readDSN(filepath.Join(home, dbFile)))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return checkSchema(ctx, db)
+}
+
 func checkSchema(ctx context.Context, db *sql.DB) error {
 	var version string
 	err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&version)

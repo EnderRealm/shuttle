@@ -15,9 +15,10 @@ and shared observer contracts.
 `daemon` only claim and record slots; they execute no model. A claim remains in
 flight, so later slots for that agent skip on overlap until restart handling
 settles it. Email delivery and launchd installation are still planned;
-`install daemon` explicitly refuses. Commands such as `preflight`, `pause`,
-`resume`, `prune`, `deliver`, and `uninstall` appear in the design/help text but
-are not implemented.
+`install daemon` explicitly refuses. `preflight [agent]` checks declared local
+requirements without a model call, and `resume <agent>` clears a pause and its
+failure counter. `pause`, `prune`, `deliver`, and `uninstall` appear in the
+design/help text but are not implemented.
 
 ## Build and check
 
