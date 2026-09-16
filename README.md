@@ -12,14 +12,21 @@ Manual and daemon claims use the same preflight, provider, sandboxed Claude,
 classification, output-validation, and application path; every attempt retains
 its inputs, prompt, transcript, result, and applied-output record.
 
+When `config.json` contains a `weft` block, the installed daemon also hosts the
+private `weft-remote/v1` HTTP service. It reads the existing tk store, retains
+runs, stages, questions and answers in `runs.db`, supervises `weft-worker`
+segments after clients disconnect, and exposes their event stream on the
+configured loopback or Tailscale address. Replayed mutating requests are served
+from the idempotency ledger rather than launching a second worker.
+
 Email delivery is still planned; a valid report remains pending for the sender
 ticket, while `--no-deliver` records an intentional skip without losing the
 retained output. `install daemon` installs the KeepAlive launchd job and a
 companion watchdog that recovers macOS 26's deferred respawns; `uninstall`
 removes both while preserving state. `preflight [agent]` checks declared local
 requirements without a model call, and `resume <agent>` clears a pause and its
-failure counter. `pause`, `prune`, and `deliver` appear in the design/help text
-but are not implemented.
+failure counter. `pause` prevents new claims until that resume; `prune` and
+`deliver` appear in the design/help text but are not implemented.
 
 ## Build and check
 
@@ -78,6 +85,32 @@ The full configuration shape, including credential **Keychain item names**, is i
 [the phase-one design](docs/phase1-design.md). Unknown config keys are rejected.
 Agent lookup uses `SHUTTLE_AGENTS_DIR`, then `config.json`'s `agents_dir`, then
 `~/code/shuttle/agents`.
+
+Hosted weft runs add this block; the bearer token itself is a Keychain generic
+password and never appears in the file or launchd plist:
+
+```json
+{
+  "weft": {
+    "listen": "100.101.102.103:7431",
+    "keychain_item": "weft-remote-token",
+    "worker_bin": "/Users/you/.local/bin/weft-worker",
+    "weft_root": "/Users/you/.shuttle/weft",
+    "segment_timeout_seconds": 21600,
+    "sandbox": {
+      "allowed_domains": ["github.com"],
+      "allow_write": [
+        "/Users/you/Library/Caches/org.swift.swiftpm",
+        "/Users/you/Library/org.swift.swiftpm"
+      ]
+    }
+  }
+}
+```
+
+The daemon refuses a listener outside loopback or `100.64.0.0/10`, and refuses
+each segment before spawning the worker if its coding sandbox cannot be
+generated and preflighted.
 
 ```sh
 ./shuttle run daily --dry-run

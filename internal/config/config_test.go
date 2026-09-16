@@ -28,7 +28,18 @@ const sampleConfig = `{
     "loom_bin": "/Users/steve/.local/bin/loom"
   },
   "notify": { "enabled": true, "cooldown_minutes": 60 },
-  "limits": { "daily_runs_per_agent": 3, "daily_spend_usd": 10.0 }
+  "limits": { "daily_runs_per_agent": 3, "daily_spend_usd": 10.0 },
+  "weft": {
+    "listen": "100.101.102.103:7431",
+    "keychain_item": "weft-remote-token",
+    "worker_bin": "/Users/steve/.local/bin/weft-worker",
+    "weft_root": "/Users/steve/.shuttle/weft",
+    "segment_timeout_seconds": 21600,
+    "sandbox": {
+      "allowed_domains": ["github.com"],
+      "allow_write": ["/Users/steve/Library/Caches/org.swift.swiftpm"]
+    }
+  }
 }`
 
 func writeConfig(t *testing.T, body string) {
@@ -76,6 +87,10 @@ func TestLoad(t *testing.T) {
 	}
 	if c.Email.KeychainItem != "shuttle-cloudflare-token" {
 		t.Errorf("email.keychain_item = %q", c.Email.KeychainItem)
+	}
+	if c.Weft.Listen != "100.101.102.103:7431" || c.Weft.KeychainItem != "weft-remote-token" ||
+		c.Weft.SegmentTimeoutSeconds != 21600 || len(c.Weft.Sandbox.AllowWrite) != 1 {
+		t.Errorf("weft = %+v", c.Weft)
 	}
 }
 

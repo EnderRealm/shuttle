@@ -34,6 +34,7 @@ type Config struct {
 	Notify    Notify    `json:"notify"`
 	Limits    Limits    `json:"limits"`
 	Output    Output    `json:"output"`
+	Weft      Weft      `json:"weft"`
 }
 
 type Email struct {
@@ -74,6 +75,23 @@ type Limits struct {
 // neither more nor less than those two.
 type Output struct {
 	LinkHosts []string `json:"link_hosts"`
+}
+
+// Weft configures the private weft-remote/v1 service hosted by the daemon.
+// An empty Listen disables the service, which keeps phase-1 installations
+// unchanged until the block is configured.
+type Weft struct {
+	Listen                string      `json:"listen"`
+	KeychainItem          string      `json:"keychain_item"`
+	WorkerBin             string      `json:"worker_bin"`
+	Root                  string      `json:"weft_root"`
+	SegmentTimeoutSeconds int         `json:"segment_timeout_seconds"`
+	Sandbox               WeftSandbox `json:"sandbox"`
+}
+
+type WeftSandbox struct {
+	AllowedDomains []string `json:"allowed_domains"`
+	AllowWrite     []string `json:"allow_write"`
 }
 
 // Home returns the state root: $SHUTTLE_HOME, else ~/.shuttle.
@@ -160,4 +178,9 @@ func (c *Config) AnthropicKey() (string, error) {
 // EmailToken resolves the delivery token from the Keychain at use time.
 func (c *Config) EmailToken() (string, error) {
 	return keychain.Find(c.Email.KeychainItem)
+}
+
+// WeftToken resolves the remote service bearer token at daemon start.
+func (c *Config) WeftToken() (string, error) {
+	return keychain.Find(c.Weft.KeychainItem)
 }

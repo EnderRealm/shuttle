@@ -129,3 +129,24 @@ func TestAgentWithNoHistoryReadsAsZero(t *testing.T) {
 		t.Fatalf("unfired agent = %+v, want a zero row", agent)
 	}
 }
+
+func TestPauseAndResumeReservedWeftAgent(t *testing.T) {
+	s := newStore(t)
+	if err := s.Pause(WeftAgent); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.Agent(WeftAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !agent.Paused || agent.PausedReason.String != PauseManual {
+		t.Fatalf("paused agent = %+v", agent)
+	}
+	if err := s.Resume(WeftAgent); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ = s.Agent(WeftAgent)
+	if agent.Paused {
+		t.Fatalf("agent remained paused: %+v", agent)
+	}
+}

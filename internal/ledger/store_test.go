@@ -43,8 +43,8 @@ func TestOpenStampsSchemaVersion(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read marker: %v", err)
 	}
-	if v != "1" {
-		t.Fatalf("marker = %q, want \"1\"", v)
+	if v != "2" {
+		t.Fatalf("marker = %q, want \"2\"", v)
 	}
 }
 
@@ -89,13 +89,13 @@ func TestCheckVersion(t *testing.T) {
 	}{
 		{"fresh database", 0, nil},
 		{"current", schemaVersion, nil},
-		{"outdated", schemaVersion - 1, ErrSchemaOutdated},
+		{"supported migration", schemaVersion - 1, nil},
+		{"outdated", schemaVersion - 2, ErrSchemaOutdated},
 		{"too new", schemaVersion + 1, ErrSchemaTooNew},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// At schemaVersion 1 the outdated case collapses onto the fresh
-			// one: 0 is an unstamped database, not an old one.
+			// Version 0 is an unstamped database, not an old one.
 			if tt.current == 0 && tt.want == ErrSchemaOutdated {
 				t.Skip("unreachable until schemaVersion > 1")
 			}

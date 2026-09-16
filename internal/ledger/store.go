@@ -24,8 +24,8 @@ const (
 // ErrSchemaOutdated is returned by Open when the database is older than this
 // binary: the on-disk version is below schemaVersion. runs.db is not
 // disposable — it is the only record that a run happened and what it cost — so
-// the remedy is a migration in a later version, never a rebuild. At
-// schemaVersion 1 this branch is unreachable; it is the guard for the next bump.
+// the remedy is another explicit migration, never a rebuild. Only the
+// immediately preceding schema is a supported source.
 var ErrSchemaOutdated = errors.New("run ledger schema is outdated")
 
 // ErrSchemaTooNew is the mirror case: the database is newer than this binary.
@@ -151,9 +151,10 @@ func migrate(db *sql.DB) error {
 		}
 		current = n
 	}
-	// Must precede both the schema apply and the marker write: on a too-new
-	// database neither may run, or this binary downgrades the marker and then
-	// writes rows the newer schema no longer describes.
+	// Must precede both the schema apply and the marker write: on an unknown
+	// old or too-new database neither may run. Version 1 is the one supported
+	// migration; schemaSQL's IF NOT EXISTS statements add the V2 tables
+	// without rewriting the phase-1 ledger.
 	if err := checkVersion(current); err != nil {
 		return err
 	}
@@ -167,10 +168,10 @@ func migrate(db *sql.DB) error {
 	return err
 }
 
-// checkVersion is the two-way guard. A current of 0 is a fresh database: no
-// marker has been stamped yet, so it is neither outdated nor too new.
+// checkVersion is the two-way guard. A current of 0 is a fresh database and
+// version 1 is the supported migration source.
 func checkVersion(current int) error {
-	if current != 0 && current < schemaVersion {
+	if current != 0 && current < schemaVersion-1 {
 		return fmt.Errorf("%w: on disk %d, this binary writes %d", ErrSchemaOutdated, current, schemaVersion)
 	}
 	if current > schemaVersion {

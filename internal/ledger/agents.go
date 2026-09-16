@@ -10,6 +10,7 @@ import (
 const (
 	PauseStreak = "streak"
 	PauseAuth   = "auth"
+	PauseManual = "operator"
 )
 
 // maxFailureStreak is the §6.3 auto-pause threshold. The alternative is a
@@ -26,6 +27,16 @@ type Agent struct {
 	Paused        bool
 	PausedReason  sql.NullString
 	PausedAt      sql.NullString
+}
+
+// Pause prevents future claims for an agent until Resume clears it.
+func (s *Store) Pause(name string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO agents(name,paused,paused_reason,paused_at) VALUES(?,1,?,?)
+		 ON CONFLICT(name) DO UPDATE SET paused=1,paused_reason=excluded.paused_reason,paused_at=excluded.paused_at`,
+		name, PauseManual, s.timestamp(),
+	)
+	return err
 }
 
 // Agent reads an agent's ledger row. An agent that has never fired has no row;

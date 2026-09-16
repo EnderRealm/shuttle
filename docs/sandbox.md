@@ -265,14 +265,58 @@ leaves the machine, and it is the reason the SSH-agent blocker recorded in
 environment has no `SSH_AUTH_SOCK` — with no agent to reach, a pass would prove
 nothing.
 
+## Hosted coding profile
+
+Hosted `weft-remote/v1` segments use `CodingProfileJSON`, not the report profile
+above. Shuttle authors one profile before spawning `weft-worker`; the worker is
+given that path and must place every model launch behind `srt -s <profile> --`.
+The host first runs `srt -s <profile> -c true`, and records a `sandbox` failure
+without spawning the worker when the profile cannot be established.
+
+The coding profile re-allows the selected checkout, ticket store, retained run
+directory and derived worktree beneath the broad read denials. Writes are
+limited to the worktree, the code repository's Git object/ref storage, ticket
+files and tk state, Claude's subscription state, the segment temp directory and
+the configured toolchain caches. `denyWrite` takes back both repositories'
+Git configuration, hooks and indirection files, the linked worktree's gitfile,
+Claude's global `.claude.json`, commands/plugins/rules, every project's
+auto-memory directory and installed work-policy files, and every sibling
+worktree admin directory enumerated while the host's durable repository
+reservation is held. Authentication refreshes and session records under
+`~/.claude/` remain writable; executable MCP configuration and persistent
+instructions do not.
+
+Repository reservations use the checkout's symlink-resolved canonical path,
+with macOS's `/private` alias normalized the same way as the worktree
+derivation. Two tk projects that name one checkout through different aliases
+therefore contend on one reservation rather than authoring incomplete sibling
+deny lists concurrently. The lock key itself is the directory's Darwin
+device/inode identity, so case aliases on the default case-insensitive volume
+also contend even though the worker argv retains a readable canonical path.
+
+Before profile generation, an existing worktree's gitfile must name the admin
+directory derived from its basename. For a new worktree that expected admin
+name must be absent. This fails closed on the suffix Git would otherwise assign
+for a stale registration, before a worker or model is launched.
+
+The worker process starts behind a separate inherited pipe gate. Shuttle
+records the process PID in the ledger before releasing that gate; if the daemon
+dies in the start/record window, EOF closes the gate and the worker executable
+is never reached.
+
+`TestCodingProfileProtectsGitIndirectionsAndSiblingWorktrees` asserts that
+generated shape. `SHUTTLE_LIVE_SRT=1 go test ./internal/sandbox -run
+TestLiveCodingSRT` is the host-level proof: a declared worktree write succeeds
+while an attempted Git-hook write returns `Operation not permitted`.
+
 ## Running unsandboxed
 
 `shuttle run <agent> --unsafe-no-sandbox` is the only way to run a model outside
 the sandbox. There is no `"none"` sandbox kind in the manifest schema (§4.1), no
 key for it in `config.json` and no environment variable the daemon reads; the
-flag is the only input that will select an empty `claude.Options.Launcher`. No
-caller reads it yet — `shuttle run` records the claim and executes nothing until
-the runner lands. It prints one line to stderr naming the run:
+flag is the only input that will select an empty `claude.Options.Launcher`.
+Hosted weft segments have no equivalent escape hatch. The manual report flag
+prints one line to stderr naming the run:
 
 ```
 warning: --unsafe-no-sandbox: run daily-20260906-043000-3795 is exempt from the srt sandbox

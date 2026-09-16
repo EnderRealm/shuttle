@@ -18,6 +18,7 @@ import (
 	"shuttle/internal/reap"
 	"shuttle/internal/runner"
 	"shuttle/internal/schedule"
+	"shuttle/internal/weftremote"
 )
 
 // tickInterval is §5's loop: one pass every 60 seconds, plus the immediate one
@@ -80,6 +81,11 @@ two run workers active across agents.`,
 				// Closed, but its pid was never signalled either.
 				unsignalled++
 			}
+			if o.Agent == ledger.WeftAgent && o.Action != reap.ActionKillFailed && o.Action != reap.ActionUnresolved {
+				if err := store.ReconcileWeftUnknown(o.RunID); err != nil {
+					return fmt.Errorf("reconcile hosted weft run %s: %w", o.RunID, err)
+				}
+			}
 		}
 		if err != nil {
 			return err
@@ -93,6 +99,32 @@ two run workers active across agents.`,
 
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		var serviceErr <-chan error
+		cfg, err := config.Load()
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if cfg != nil && cfg.Weft.Listen != "" {
+			if err := weftremote.ValidateListen(cfg.Weft.Listen); err != nil {
+				return err
+			}
+			token, err := cfg.WeftToken()
+			if err != nil {
+				return fmt.Errorf("weft token: %w", err)
+			}
+			home, err := config.Home()
+			if err != nil {
+				return err
+			}
+			service, err := weftremote.New(cfg, store, token, home, logger)
+			if err != nil {
+				return err
+			}
+			ch := make(chan error, 1)
+			serviceErr = ch
+			go func() { ch <- service.ListenAndServe(ctx) }()
+			logger.Printf("weft service listening on %s", cfg.Weft.Listen)
+		}
 		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
 		sem := make(chan struct{}, 2)
@@ -121,6 +153,11 @@ two run workers active across agents.`,
 				workers.Wait()
 				logger.Print("daemon stop")
 				return nil
+			case err := <-serviceErr:
+				if err != nil {
+					return fmt.Errorf("weft service: %w", err)
+				}
+				serviceErr = nil
 			case <-ticker.C:
 			}
 		}

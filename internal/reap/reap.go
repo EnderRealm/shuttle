@@ -49,8 +49,10 @@ var (
 // argv (§7.4): --settings <run_dir>/settings.json. It is the run's identity,
 // because the run id is in that path.
 const (
-	settingsFlag = "--settings"
-	settingsFile = "settings.json"
+	settingsFlag       = "--settings"
+	settingsFile       = "settings.json"
+	sandboxProfileFlag = "--sandbox-profile"
+	sandboxProfileFile = "srt.json"
 )
 
 // lookupFailed prefixes the detail of a lookup that errored on a live pid, so
@@ -248,8 +250,9 @@ func identify(run *ledger.Run) (Action, member, string) {
 		return ActionUnresolved, member{}, lookupFailed + err.Error()
 	}
 	if !isRun {
-		return ActionForeign, member{}, fmt.Sprintf("process argv does not carry %s %s",
-			settingsFlag, filepath.Join(dir, settingsFile))
+		return ActionForeign, member{}, fmt.Sprintf("process argv does not carry %s %s or %s %s",
+			settingsFlag, filepath.Join(dir, settingsFile),
+			sandboxProfileFlag, filepath.Join(dir, sandboxProfileFile))
 	}
 	return actionOwned, member{PID: pid, Start: started}, ""
 }

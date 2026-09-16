@@ -55,9 +55,8 @@ func groupMembers(pgid int) ([]member, error) {
 }
 
 // processIsRun reports whether the process's argv carries the run's settings
-// argument, which is the run's identity rather than a heuristic over it: the
-// runtime launches with --settings <run_dir>/settings.json (§7.4) and the run
-// id is in that path. The two argv elements must be adjacent and the path must
+// argument or hosted worker sandbox profile. Both paths are beneath run_dir
+// and carry the run id. The two argv elements must be adjacent and the path must
 // match exactly — a process that merely mentions a file under the directory,
 // in its exec path, in some other argument or in its environment, is not the
 // run and must never be signalled.
@@ -81,8 +80,10 @@ func processIsRun(pid int, dir string) (bool, error) {
 		return false, fmt.Errorf("kern.procargs2 %d: %w", pid, err)
 	}
 	settings := filepath.Join(dir, settingsFile)
+	profile := filepath.Join(dir, sandboxProfileFile)
 	for i := 0; i+1 < len(argv); i++ {
-		if argv[i] == settingsFlag && argv[i+1] == settings {
+		if (argv[i] == settingsFlag && argv[i+1] == settings) ||
+			(argv[i] == sandboxProfileFlag && argv[i+1] == profile) {
 			return true, nil
 		}
 	}

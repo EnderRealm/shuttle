@@ -4,10 +4,9 @@ package ledger
 // means writing a migration: unlike loom's summary DB, runs.db is the only
 // record that a run happened and what it cost, so it is never rebuilt.
 //
-// schemaVersion 1: the §6 tables — runs, agents, incidents — with the unique
-// slot index that makes a second claim of the same slot a no-op and the
-// partial unique index that keeps one open incident per (agent, signature).
-const schemaVersion = 1
+// schemaVersion 1: the §6 tables — runs, agents and incidents.
+// schemaVersion 2: the weft-remote/v1 durable host records.
+const schemaVersion = 2
 
 // schemaSQL is the §6 DDL. IF NOT EXISTS throughout because Open applies it on
 // every open, guarded by the version check rather than by a migration table.
@@ -63,4 +62,107 @@ CREATE TABLE IF NOT EXISTS incidents (
   acknowledged_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS incidents_open ON incidents(agent, signature) WHERE acknowledged_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS weft_runs (
+  id              TEXT PRIMARY KEY,
+  ticket          TEXT NOT NULL,
+  project         TEXT NOT NULL,
+  repo            TEXT NOT NULL,
+  branch          TEXT NOT NULL,
+  worktree        TEXT NOT NULL,
+  base            TEXT,
+  criteria        TEXT,
+  phase           TEXT NOT NULL,
+  outcome         TEXT,
+  halt_stage      TEXT,
+  halt_reason     TEXT,
+  halt_detail     TEXT,
+  head            TEXT,
+  stopped         INTEGER NOT NULL DEFAULT 0,
+  summary         TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  ended_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS weft_runs_ticket ON weft_runs(ticket, created_at);
+
+CREATE TABLE IF NOT EXISTS weft_segments (
+  run_id          TEXT NOT NULL REFERENCES weft_runs(id),
+  segment         INTEGER NOT NULL,
+  kind            TEXT NOT NULL,
+  ledger_run_id   TEXT NOT NULL REFERENCES runs(id),
+  worker_run_id   TEXT,
+  answer_id       TEXT,
+  terminal        TEXT,
+  failure         TEXT,
+  PRIMARY KEY (run_id, segment)
+);
+
+CREATE TABLE IF NOT EXISTS weft_stages (
+  run_id          TEXT NOT NULL,
+  segment         INTEGER NOT NULL,
+  stage           TEXT NOT NULL,
+  occurrence      INTEGER NOT NULL,
+  attempt         INTEGER NOT NULL,
+  backend         TEXT,
+  state           TEXT NOT NULL,
+  session         TEXT,
+  detail          TEXT,
+  exit_code       INTEGER,
+  turns           INTEGER,
+  spend           TEXT,
+  processing_ms   INTEGER,
+  tokens          TEXT,
+  at              TEXT NOT NULL,
+  PRIMARY KEY (run_id, segment, stage, occurrence, attempt)
+);
+
+CREATE TABLE IF NOT EXISTS weft_questions (
+  id              TEXT PRIMARY KEY,
+  run_id          TEXT NOT NULL REFERENCES weft_runs(id),
+  segment         INTEGER NOT NULL,
+  stage           TEXT NOT NULL,
+  occurrence      INTEGER NOT NULL,
+  attempt         INTEGER NOT NULL,
+  text            TEXT NOT NULL,
+  asked_at        TEXT NOT NULL,
+  state           TEXT NOT NULL,
+  answer_id       TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS weft_questions_pending ON weft_questions(run_id) WHERE state = 'pending';
+
+CREATE TABLE IF NOT EXISTS weft_answers (
+  id              TEXT PRIMARY KEY,
+  question_id     TEXT NOT NULL UNIQUE REFERENCES weft_questions(id),
+  run_id          TEXT NOT NULL,
+  text            TEXT NOT NULL,
+  submitted_at    TEXT NOT NULL,
+  segment         INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS weft_events (
+  seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts              TEXT NOT NULL,
+  run_id          TEXT NOT NULL,
+  type            TEXT NOT NULL,
+  payload         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS weft_requests (
+  token_id        TEXT NOT NULL,
+  key             TEXT NOT NULL,
+  method          TEXT NOT NULL,
+  path            TEXT NOT NULL,
+  body_sha256     TEXT NOT NULL,
+  status          INTEGER NOT NULL,
+  response        TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  PRIMARY KEY (token_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS weft_repository_locks (
+  repository      TEXT PRIMARY KEY,
+  held_by_run     TEXT NOT NULL REFERENCES weft_runs(id),
+  acquired_at     TEXT NOT NULL
+);
 `
