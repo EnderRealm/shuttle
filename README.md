@@ -12,12 +12,14 @@ Manual and daemon claims use the same preflight, provider, sandboxed Claude,
 classification, output-validation, and application path; every attempt retains
 its inputs, prompt, transcript, result, and applied-output record.
 
-Email delivery and launchd installation are still planned; a valid report remains
-pending for the sender ticket, while `--no-deliver` records an intentional skip
-without losing the retained output. `install daemon` explicitly refuses.
-`preflight [agent]` checks declared local requirements without a model call, and
-`resume <agent>` clears a pause and its failure counter. `pause`, `prune`,
-`deliver`, and `uninstall` appear in the design/help text but are not implemented.
+Email delivery is still planned; a valid report remains pending for the sender
+ticket, while `--no-deliver` records an intentional skip without losing the
+retained output. `install daemon` installs the KeepAlive launchd job and a
+companion watchdog that recovers macOS 26's deferred respawns; `uninstall`
+removes both while preserving state. `preflight [agent]` checks declared local
+requirements without a model call, and `resume <agent>` clears a pause and its
+failure counter. `pause`, `prune`, and `deliver` appear in the design/help text
+but are not implemented.
 
 ## Build and check
 
@@ -34,10 +36,13 @@ go vet ./...
 ```
 
 `make dev` builds `./shuttle`. `make install` builds the binary into
-`~/.local/bin`; it does not install a service. Default tests exercise local
-fixtures, temporary stores, and stub processes. `SHUTTLE_LIVE_CLAUDE=1` enables
-a paid model test and `SHUTTLE_LIVE_SRT=1` enables real sandbox tests; leave both
-unset for ordinary checks.
+`~/.local/bin`; run `shuttle install daemon` separately to install the service.
+The daemon environment is persisted to `~/.shuttle/daemon-env` and contains
+only `SHUTTLE_HOME`, `SHUTTLE_AGENTS_DIR`, and the baked `PATH`; credentials
+remain in Keychain. Default tests exercise local fixtures, temporary stores, and
+stub processes. `SHUTTLE_LIVE_CLAUDE=1` enables a paid model test and
+`SHUTTLE_LIVE_SRT=1` enables real sandbox tests; leave both unset for ordinary
+checks.
 
 ## Configure and preview a daily run
 
@@ -96,8 +101,8 @@ Replace `RUN_ID` with a row printed by `runs`. These commands inspect the ledger
 at `<state-root>/runs.db`; they do not list dry runs. Dry-run failures name the
 provider, and its partially written run directory contains the inputs gathered
 before the failure. CLI errors and scheduler decisions go to stderr. A foreground
-`daemon` does not create `daemon.log` itself; that redirection belongs to the
-planned launchd setup.
+`daemon` does not create `daemon.log` itself; the installed launchd job redirects
+both stdout and stderr there.
 
 [The sandbox notes](docs/sandbox.md) describe the runtime boundary and its measured
 behavior. [The observer contract](docs/observer-contract.md) describes the shared

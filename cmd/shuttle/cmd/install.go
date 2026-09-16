@@ -1,12 +1,14 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"shuttle/internal/config"
+	"shuttle/internal/launchd"
 	"shuttle/internal/ledger"
 	"shuttle/internal/output"
 )
@@ -24,10 +26,8 @@ initialised as a git repository with no remote; adding one is the operator's
 choice. Both steps are idempotent, so running install against a live tree
 changes nothing.
 
-The launchd job (§13) is not installed yet.`,
-	// MaximumNArgs rather than NoArgs so `install daemon`, which the help
-	// advertises, gets the explanation below instead of cobra's generic
-	// unknown-command error.
+With the daemon argument, install also writes and bootstraps the phase-one
+launchd job (§13).`,
 	Args: cobra.MaximumNArgs(1),
 	// The errors name the path that could not be created; cobra printing them a
 	// second time, with usage, would bury them.
@@ -35,31 +35,71 @@ The launchd job (§13) is not installed yet.`,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 1 {
-			if args[0] == daemonArg {
-				return errors.New("install daemon: the launchd job (§13) is not built yet")
+			if args[0] != daemonArg {
+				return fmt.Errorf("install: unknown argument %q", args[0])
 			}
-			return fmt.Errorf("install: unknown argument %q", args[0])
 		}
-		home, err := config.Home()
-		if err != nil {
+		if err := installState(cmd); err != nil {
 			return err
 		}
-		// Through the ledger so the state root install lays down has the same
-		// 0700 the ledger requires of it, rather than a mode a later
-		// ledger.Open has to tighten.
-		if err := ledger.EnsureHome(home); err != nil {
-			return err
+		if len(args) == 1 {
+			return installDaemon(cmd)
 		}
-		reports, err := config.ReportsDir()
-		if err != nil {
-			return err
-		}
-		if err := output.InitReports(reports); err != nil {
-			return err
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "state root\t%s\nreports repo\t%s\n", home, reports)
 		return nil
 	},
+}
+
+func installState(cmd *cobra.Command) error {
+	home, err := config.Home()
+	if err != nil {
+		return err
+	}
+	// Through the ledger so the state root install lays down has the same
+	// 0700 the ledger requires of it, rather than a mode a later
+	// ledger.Open has to tighten.
+	if err := ledger.EnsureHome(home); err != nil {
+		return err
+	}
+	reports, err := config.ReportsDir()
+	if err != nil {
+		return err
+	}
+	if err := output.InitReports(reports); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "state root\t%s\nreports repo\t%s\n", home, reports)
+	return nil
+}
+
+var (
+	installLaunchAgent = launchd.Install
+	awaitLaunchAgent   = launchd.AwaitRunning
+	currentExecutable  = os.Executable
+)
+
+func installDaemon(cmd *cobra.Command) error {
+	binary, err := currentExecutable()
+	if err != nil {
+		return err
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(binary); resolveErr == nil {
+		binary = resolved
+	}
+	specs, err := launchd.DaemonSpecs(binary)
+	if err != nil {
+		return err
+	}
+	for _, spec := range specs {
+		if err := installLaunchAgent(spec); err != nil {
+			return err
+		}
+		if err := awaitLaunchAgent(spec.Label, spec.Program); err != nil {
+			return fmt.Errorf("%s: %w", spec.Label, err)
+		}
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "daemon\t%s\nwatchdog\t%s\nbinary\t%s\nlog\t%s\n",
+		specs[0].Label, specs[1].Label, specs[0].Program, specs[0].LogPath)
+	return nil
 }
 
 func init() {

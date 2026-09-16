@@ -14,9 +14,9 @@ var helpText = `shuttle - scheduled, sandboxed, ledgered unattended agent runs
 Usage: shuttle <command> [args]
 
 Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack',
-'preflight', 'resume', 'install' and 'run'. Manual and daemon claims execute the
-same retained, sandboxed pipeline; --dry-run stops after inputs and prompt. The
-rest is the phase 1 surface (docs/phase1-design.md §12) that the
+'preflight', 'resume', 'install', 'uninstall' and 'run'. Manual and daemon
+claims execute the same retained, sandboxed pipeline; --dry-run stops after
+inputs and prompt. The rest is the phase 1 surface (docs/phase1-design.md §12) that the
 remaining phase 1 tickets fill in.
 
 Daemon:
@@ -39,8 +39,8 @@ Operations:
 
 Lifecycle:
   install [daemon]             Create the state root and the reports repo;
-                                 'daemon' (the launchd job, §13) is not built yet
-  uninstall                    Remove the launchd job
+                                 'daemon' also installs the launchd jobs
+  uninstall                    Remove the daemon and watchdog jobs
   version                      Print the version string
 
 Global flags:

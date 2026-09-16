@@ -1,4 +1,4 @@
-// Package launchd installs and removes the com.shuttle.daemon launchd
-// agent. Copied from loom/internal/launchd with the label changed: write,
-// plutil -lint, bootout, wait, bootstrap with retry, kickstart.
+// Package launchd installs and removes the scheduler and its crash-recovery
+// watchdog. Its lifecycle is copied from loom/internal/launchd: write, plutil
+// lint, bootout, wait, bootstrap with retry, and kickstart.
 package launchd

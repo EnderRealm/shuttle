@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"shuttle/internal/config"
+	"shuttle/internal/launchd"
 )
 
 // install resolves its paths through config.Home(), so SHUTTLE_HOME keeps the
@@ -70,15 +73,91 @@ func TestInstallCreatesAPrivateStateRoot(t *testing.T) {
 	}
 }
 
-// The help advertises `install daemon`, so the argument has to reach an
-// explanation rather than cobra's unknown-command error (§13).
-func TestInstallDaemonIsNotBuiltYet(t *testing.T) {
+func TestInstallDaemonPersistsAndInstallsTheLaunchAgent(t *testing.T) {
 	shuttleEnv(t)
+	binary := filepath.Join(t.TempDir(), "shuttle")
+	if err := os.WriteFile(binary, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	originalExecutable := currentExecutable
+	originalInstall, originalAwait := installLaunchAgent, awaitLaunchAgent
+	currentExecutable = func() (string, error) { return binary, nil }
+	var installed []launchd.Spec
+	installLaunchAgent = func(spec launchd.Spec) error {
+		installed = append(installed, spec)
+		return nil
+	}
+	var awaited [][2]string
+	awaitLaunchAgent = func(label, program string) error {
+		awaited = append(awaited, [2]string{label, program})
+		return nil
+	}
+	t.Cleanup(func() {
+		currentExecutable = originalExecutable
+		installLaunchAgent, awaitLaunchAgent = originalInstall, originalAwait
+	})
+
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
 	rootCmd.SetArgs([]string{"install", "daemon"})
-	t.Cleanup(func() { rootCmd.SetArgs(nil) })
+	t.Cleanup(func() {
+		rootCmd.SetOut(nil)
+		rootCmd.SetArgs(nil)
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("install daemon: %v", err)
+	}
+	resolvedBinary, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(installed) != 2 ||
+		installed[0].Label != launchd.DaemonLabel ||
+		installed[1].Label != launchd.WatchdogLabel ||
+		installed[0].Program != resolvedBinary ||
+		installed[1].Program != resolvedBinary {
+		t.Fatalf("installed specs = %+v", installed)
+	}
+	wantAwaited := [][2]string{{launchd.DaemonLabel, resolvedBinary}, {launchd.WatchdogLabel, resolvedBinary}}
+	if !reflect.DeepEqual(awaited, wantAwaited) {
+		t.Fatalf("awaited = %v", awaited)
+	}
+	for _, label := range []string{launchd.DaemonLabel, launchd.WatchdogLabel} {
+		if !strings.Contains(out.String(), label) {
+			t.Fatalf("output = %q, want %s", out.String(), label)
+		}
+	}
+	home, err := config.Home()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "daemon-env"))
+	if err != nil {
+		t.Fatalf("read daemon-env: %v", err)
+	}
+	for _, want := range []string{config.EnvHome + "=" + home, config.EnvAgentsDir + "=" + os.Getenv(config.EnvAgentsDir), "PATH="} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("daemon-env = %q, want %q", data, want)
+		}
+	}
+}
+
+func TestInstallDaemonFailsWhenTheProcessDoesNotStart(t *testing.T) {
+	shuttleEnv(t)
+	originalExecutable := currentExecutable
+	originalInstall, originalAwait := installLaunchAgent, awaitLaunchAgent
+	currentExecutable = func() (string, error) { return "/bin/shuttle", nil }
+	installLaunchAgent = func(launchd.Spec) error { return nil }
+	awaitLaunchAgent = func(label, program string) error { return errors.New("no process") }
+	t.Cleanup(func() {
+		currentExecutable = originalExecutable
+		installLaunchAgent, awaitLaunchAgent = originalInstall, originalAwait
+		rootCmd.SetArgs(nil)
+	})
+	rootCmd.SetArgs([]string{"install", "daemon"})
 	err := rootCmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "not built yet") {
-		t.Fatalf("install daemon: got %v, want the launchd job named as not built yet", err)
+	if err == nil || !strings.Contains(err.Error(), launchd.DaemonLabel) || !strings.Contains(err.Error(), "no process") {
+		t.Fatalf("install daemon error = %v", err)
 	}
 }
 

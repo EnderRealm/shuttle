@@ -766,10 +766,16 @@ through the copied loom `launchd.Install` (validate, write, `plutil -lint`, boot
 wait, bootstrap with retry, kickstart): `Program` is the resolved binary,
 `Args: ["daemon"]`, `RunAtLoad`, `KeepAlive`, `ThrottleIntervalSeconds: 30`, `LogPath
 ~/.shuttle/daemon.log`, `Env: {SHUTTLE_HOME, SHUTTLE_AGENTS_DIR, PATH}` with loom's
-`canonicalPath()` list. No secret is in the plist. Tunables are persisted to
-`~/.shuttle/daemon-env` first, loom's pattern, so a later updater can re-install from
-a daemon environment carrying none of them. The binary is installed to
-`~/.local/bin/shuttle` by `make install`; releases and the updater come in phase 2.
+`canonicalPath()` list. No secret is in the plist. A companion
+`com.shuttle.daemon-watchdog.plist` runs the same binary with `Args: ["watchdog"]`
+and the same environment and log; every five seconds it kickstarts a processless
+daemon. This supplies explicit demand when macOS 26 leaves a KeepAlive respawn
+indefinitely as `pended nondemand spawn = inefficient`. `shuttle uninstall`
+removes the watchdog first, then the daemon, so the watchdog cannot revive a job
+being intentionally removed. Tunables are persisted to `~/.shuttle/daemon-env`
+first, loom's pattern, so a later updater can re-install from a daemon environment
+carrying none of them. The binary is installed to `~/.local/bin/shuttle` by
+`make install`; releases and the updater come in phase 2.
 
 ## 14. Tests
 
