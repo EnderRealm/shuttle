@@ -36,7 +36,8 @@ const (
 // Target is the slot an apply files under and the run the commit names (§9.2).
 type Target struct {
 	ReportsDir string
-	Agent      string
+	Agent      string // identity recorded in the commit subject
+	Dir        string // manifest outputs.file.dir; defaults to Agent
 	Label      string
 	RunID      string
 }
@@ -50,6 +51,7 @@ type Applied struct {
 	CommitError    string `json:"commit_error,omitempty"`
 	Subject        string `json:"subject,omitempty"`
 	DeliveryStatus string `json:"delivery_status"`
+	DeliveryError  string `json:"delivery_error,omitempty"`
 }
 
 // InitReports creates §9.3's repo: a git repository with no remote, since
@@ -78,7 +80,11 @@ func InitReports(dir string) error {
 // picks up. The report is written before the commit is attempted, so a repo
 // that refuses a commit still leaves the archive correct.
 func Apply(t Target, out *Outputs, logger *log.Logger) (*Applied, error) {
-	dir := filepath.Join(t.ReportsDir, t.Agent)
+	dirName := t.Dir
+	if dirName == "" {
+		dirName = t.Agent
+	}
+	dir := filepath.Join(t.ReportsDir, dirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}

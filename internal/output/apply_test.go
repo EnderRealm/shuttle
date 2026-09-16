@@ -129,6 +129,24 @@ func TestApplyOverwritesTheSlot(t *testing.T) {
 	}
 }
 
+func TestApplyUsesTheDeclaredFileDirectory(t *testing.T) {
+	dir, logger, _ := newReports(t)
+	target := Target{
+		ReportsDir: dir, Agent: "observer", Dir: "assessments",
+		Label: "2026-09-01", RunID: "observer-20260902-043000-8f2a",
+	}
+	applied, err := Apply(target, &Outputs{Subject: "one", Report: []byte(validReport)}, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.ReportPath != filepath.Join(dir, "assessments", "2026-09-01.md") {
+		t.Fatalf("report path = %s", applied.ReportPath)
+	}
+	if got := git(t, dir, "log", "-1", "--format=%s"); got != "observer 2026-09-01 (observer-20260902-043000-8f2a)" {
+		t.Fatalf("commit subject = %q, want the agent identity", got)
+	}
+}
+
 // An identical re-run stages nothing: a recorded no-op, not an error.
 func TestApplyIdenticalRerunIsANoOp(t *testing.T) {
 	dir, logger, logs := newReports(t)

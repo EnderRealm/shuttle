@@ -63,13 +63,16 @@ func (p Preflight) auth(ctx context.Context, def *agentdef.Definition, runDir st
 	// Reuse the checked run directory: a nested directory can exceed srt's
 	// socket limit even when the local preflight accepted its parent.
 	dir := runDir
-	so := p.sandbox(def, dir)
-	if _, err := sandbox.WriteProfile(so); err != nil {
-		return fail(ledger.ClassPreflight, err)
-	}
-	launcher, err := sandbox.Launcher(so)
-	if err != nil {
-		return fail(ledger.ClassPreflight, err)
+	var launcher []string
+	if !p.UnsafeNoSandbox {
+		so := p.sandbox(def, dir)
+		if _, err := sandbox.WriteProfile(so); err != nil {
+			return fail(ledger.ClassPreflight, err)
+		}
+		launcher, err = sandbox.Launcher(so)
+		if err != nil {
+			return fail(ledger.ClassPreflight, err)
+		}
 	}
 	transcript, err := os.OpenFile(filepath.Join(dir, "auth-transcript.ndjson"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {

@@ -309,6 +309,16 @@ func (s *Store) MarkRunning(id string, pid int, runDir string) error {
 	})
 }
 
+// SetRunDir attaches the retained artifact directory while a row is still
+// claimed. Preflight and provider failures happen before a model process
+// exists, so MarkRunning cannot be the first place this path is recorded.
+func (s *Store) SetRunDir(id, runDir string) error {
+	return s.updateOne(
+		`UPDATE runs SET run_dir = ? WHERE id = ? AND status = ?`,
+		id, runDir, id, StatusClaimed,
+	)
+}
+
 // Complete closes a run as successful: it resets the agent's failure streak
 // and stamps last_success_at (§6.2).
 func (s *Store) Complete(id string, res Result) error {

@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,8 +23,18 @@ import (
 var (
 	runSlot            string
 	runDryRun          bool
+	runNoDeliver       bool
 	runUnsafeNoSandbox bool
 )
+
+type claimedPipeline interface {
+	Run(context.Context, *agentdef.Definition, *ledger.Run, runner.Options) (*runner.RunResult, error)
+}
+
+var buildPipeline = newPipeline
+var manualRunContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+}
 
 var runCmd = &cobra.Command{
 	Use:   "run <agent>",
@@ -42,8 +55,8 @@ no history. config.json is required, since the providers read the paths in it.
 no manifest kind, no config key and no environment variable can ask for it. The
 claim is recorded either way; the flag warns, naming the run.
 
-There is no live runner yet (§7): without --dry-run this command records the
-claim and executes nothing.`,
+Without --dry-run this command records the claim, executes the shared §7
+pipeline and waits for its terminal ledger state.`,
 	Args: cobra.ExactArgs(1),
 	// The errors name the agent and the slot; cobra printing them a second
 	// time, with usage, would bury them.
@@ -91,7 +104,21 @@ claim and executes nothing.`,
 			// be matched to the ledger row afterwards.
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: --unsafe-no-sandbox: run %s is exempt from the srt sandbox\n", run.ID)
 		}
-		fmt.Println("claimed only: there is no runner yet, so nothing was executed")
+		pipeline, err := buildPipeline(store, log.New(cmd.ErrOrStderr(), "", log.LstdFlags))
+		if err != nil {
+			_ = store.Fail(run.ID, ledger.ClassPreflight, err.Error(), ledger.Result{})
+			return err
+		}
+		ctx, stop := manualRunContext(cmd.Context())
+		defer stop()
+		result, err := pipeline.Run(ctx, def, run, runner.Options{
+			UnsafeNoSandbox: runUnsafeNoSandbox,
+			NoDeliver:       runNoDeliver,
+		})
+		if err != nil {
+			return fmt.Errorf("run %s: %w", run.ID, err)
+		}
+		fmt.Printf("completed\t%s\n", result.RunDir)
 		return nil
 	},
 }
@@ -175,9 +202,30 @@ func resolveSlot(def *agentdef.Definition, now time.Time) (time.Time, error) {
 	return at, nil
 }
 
+func newPipeline(store *ledger.Store, logger *log.Logger) (claimedPipeline, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	home, err := config.Home()
+	if err != nil {
+		return nil, err
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	runner.ConfigureOutcomes(store, cfg, home, logger)
+	return &runner.Pipeline{
+		Ledger: store, Config: cfg, Home: home, HomeDir: homeDir,
+		PATH: os.Getenv("PATH"), Logger: logger,
+	}, nil
+}
+
 func init() {
 	runCmd.Flags().StringVar(&runSlot, "slot", "", "The day to run for, YYYY-MM-DD in the agent's trigger zone")
 	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Run the providers and render the prompt, stopping before the model (§8)")
+	runCmd.Flags().BoolVar(&runNoDeliver, "no-deliver", false, "Retain valid output without sending it")
 	runCmd.Flags().BoolVar(&runUnsafeNoSandbox, "unsafe-no-sandbox", false, "Run the model outside the srt sandbox (§11)")
 	rootCmd.AddCommand(runCmd)
 }

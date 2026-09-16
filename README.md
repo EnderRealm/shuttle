@@ -7,18 +7,17 @@ git history, and prior reports, then delivered by email.
 ## Current implementation
 
 Agent validation, cron slot scheduling, the SQLite ledger, inspection commands,
-restart reaping, and prompt dry runs are implemented. The repository also contains
-the Claude runtime adapter, sandbox profile builder, output validation/application,
-and shared observer contracts.
+restart reaping, prompt dry runs, and the live execution pipeline are implemented.
+Manual and daemon claims use the same preflight, provider, sandboxed Claude,
+classification, output-validation, and application path; every attempt retains
+its inputs, prompt, transcript, result, and applied-output record.
 
-**The live runner is not wired into the CLI yet.** `run` without `--dry-run` and
-`daemon` only claim and record slots; they execute no model. A claim remains in
-flight, so later slots for that agent skip on overlap until restart handling
-settles it. Email delivery and launchd installation are still planned;
-`install daemon` explicitly refuses. `preflight [agent]` checks declared local
-requirements without a model call, and `resume <agent>` clears a pause and its
-failure counter. `pause`, `prune`, `deliver`, and `uninstall` appear in the
-design/help text but are not implemented.
+Email delivery and launchd installation are still planned; a valid report remains
+pending for the sender ticket, while `--no-deliver` records an intentional skip
+without losing the retained output. `install daemon` explicitly refuses.
+`preflight [agent]` checks declared local requirements without a model call, and
+`resume <agent>` clears a pause and its failure counter. `pause`, `prune`,
+`deliver`, and `uninstall` appear in the design/help text but are not implemented.
 
 ## Build and check
 

@@ -134,6 +134,15 @@ func Run(ctx context.Context, o Options, transcript, stderrW io.Writer) (*Outcom
 	}
 	// Setpgid makes the child its own group leader, so its pid is the pgid.
 	pgid := cmd.Process.Pid
+	if o.Started != nil {
+		if err := o.Started(pgid); err != nil {
+			// The row could not be authenticated for restart handling, so no
+			// prompt may reach a process the ledger still calls claimed.
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			_ = cmd.Wait()
+			return nil, fmt.Errorf("record started process %d: %w", pgid, err)
+		}
+	}
 
 	go func() {
 		// A child that exits before reading the prompt breaks this pipe. The

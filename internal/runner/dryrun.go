@@ -57,17 +57,58 @@ type DryRunResult struct {
 // runRecord is run.json (§7.2), written before anything else so a crash leaves
 // a readable record of what the run was.
 type runRecord struct {
-	Agent   string       `json:"agent"`
-	Slot    string       `json:"slot"`
-	Trigger string       `json:"trigger"`
-	DryRun  bool         `json:"dry_run"`
-	Paths   config.Paths `json:"paths"`
+	RunID           string           `json:"run_id"`
+	Agent           string           `json:"agent"`
+	Slot            string           `json:"slot"`
+	Trigger         string           `json:"trigger"`
+	DryRun          bool             `json:"dry_run"`
+	UnsafeNoSandbox bool             `json:"unsafe_no_sandbox"`
+	Paths           config.Paths     `json:"paths"`
+	Runtime         agentdef.Runtime `json:"runtime"`
+	Inputs          []agentdef.Input `json:"inputs"`
+	Outputs         agentdef.Outputs `json:"outputs"`
+	Sandbox         agentdef.Sandbox `json:"sandbox"`
+	Argv            []string         `json:"argv,omitempty"`
+	PID             int              `json:"pid,omitempty"`
+}
+
+type preparedRun struct {
+	ID     string
+	Dir    string
+	Inputs []string
+	Prompt string
+	Window provider.Window
+	Loc    *time.Location
+	record runRecord
 }
 
 // DryRun runs the providers and renders the prompt for one slot, and stops
 // before the model (§5). It claims no ledger row: a dry run is repeatable, and
 // a row for a run that never happened would move the agent's history.
 func DryRun(ctx context.Context, def *agentdef.Definition, slot time.Time, cfg *config.Config, home string, logger *log.Logger) (*DryRunResult, error) {
+	id, err := ledger.NewRunID(def.Name, slot)
+	if err != nil {
+		return nil, err
+	}
+	run, err := prepare(def, slot, id, ledger.TriggerManual, true, false, cfg, home)
+	if err != nil {
+		return nil, err
+	}
+	if err := run.collect(ctx, def, cfg, home, logger, slot); err != nil {
+		return nil, err
+	}
+	if err := run.render(def); err != nil {
+		return nil, err
+	}
+	return &DryRunResult{
+		RunID:       run.ID,
+		Dir:         run.Dir,
+		Inputs:      run.Inputs,
+		PromptBytes: len(run.Prompt),
+	}, nil
+}
+
+func prepare(def *agentdef.Definition, slot time.Time, id, trigger string, dryRun, unsafe bool, cfg *config.Config, home string) (*preparedRun, error) {
 	if len(def.Manifest.Triggers) == 0 {
 		return nil, fmt.Errorf("%s: triggers: none", def.Dir)
 	}
@@ -82,9 +123,8 @@ func DryRun(ctx context.Context, def *agentdef.Definition, slot time.Time, cfg *
 		return nil, err
 	}
 
-	id, err := ledger.NewRunID(def.Name, slot)
-	if err != nil {
-		return nil, err
+	if filepath.Base(id) != id {
+		return nil, fmt.Errorf("run id %q is not a path segment", id)
 	}
 	dir := filepath.Join(home, "runs", def.Name, id)
 	inputsDir := filepath.Join(dir, "inputs")
@@ -94,20 +134,23 @@ func DryRun(ctx context.Context, def *agentdef.Definition, slot time.Time, cfg *
 	if err := os.MkdirAll(filepath.Join(dir, "out"), 0o755); err != nil {
 		return nil, err
 	}
-	record, err := json.MarshalIndent(runRecord{
-		Agent:   def.Name,
-		Slot:    slot.Format(time.RFC3339),
-		Trigger: ledger.TriggerManual,
-		DryRun:  true,
-		Paths:   cfg.Paths,
-	}, "", "  ")
-	if err != nil {
+	run := &preparedRun{
+		ID: id, Dir: dir, Window: day, Loc: loc,
+		record: runRecord{
+			RunID: id, Agent: def.Name, Slot: slot.Format(time.RFC3339),
+			Trigger: trigger, DryRun: dryRun, UnsafeNoSandbox: unsafe,
+			Paths: cfg.Paths, Runtime: def.Manifest.Runtime,
+			Inputs: def.Manifest.Inputs, Outputs: def.Manifest.Outputs,
+			Sandbox: def.Manifest.Sandbox,
+		},
+	}
+	if err := run.writeRecord(); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "run.json"), append(record, '\n'), 0o644); err != nil {
-		return nil, err
-	}
+	return run, nil
+}
 
+func (r *preparedRun) collect(ctx context.Context, def *agentdef.Definition, cfg *config.Config, home string, logger *log.Logger, slot time.Time) error {
 	env := provider.Env{
 		LoomHome:   cfg.Paths.LoomHome,
 		TKConfig:   cfg.Paths.TKConfig,
@@ -115,26 +158,36 @@ func DryRun(ctx context.Context, def *agentdef.Definition, slot time.Time, cfg *
 		ReportsDir: filepath.Join(home, reportsDir),
 		Logger:     logger,
 	}
-	result := &DryRunResult{RunID: id, Dir: dir}
 	for _, in := range def.Manifest.Inputs {
-		name, err := runInput(ctx, in, env, day, slot, loc, inputsDir)
+		name, err := runInput(ctx, in, env, r.Window, slot, r.Loc, filepath.Join(r.Dir, "inputs"))
 		if err != nil {
-			return nil, err
+			return err
 		}
-		result.Inputs = append(result.Inputs, name)
+		r.Inputs = append(r.Inputs, name)
 	}
+	return nil
+}
 
+func (r *preparedRun) render(def *agentdef.Definition) error {
 	prompt := def.Prompt
 	if !strings.HasSuffix(prompt, "\n") {
 		prompt += "\n"
 	}
-	prompt += "\n" + fmt.Sprintf(runContract, id, day.Label, loc.String(),
-		day.From.Format(time.RFC3339), day.To.Format(time.RFC3339))
-	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte(prompt), 0o644); err != nil {
-		return nil, err
+	prompt += "\n" + fmt.Sprintf(runContract, r.ID, r.Window.Label, r.Loc.String(),
+		r.Window.From.Format(time.RFC3339), r.Window.To.Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(r.Dir, "prompt.md"), []byte(prompt), 0o644); err != nil {
+		return err
 	}
-	result.PromptBytes = len(prompt)
-	return result, nil
+	r.Prompt = prompt
+	return nil
+}
+
+func (r *preparedRun) writeRecord() error {
+	record, err := json.MarshalIndent(r.record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(r.Dir, "run.json"), append(record, '\n'), 0o644)
 }
 
 // runInput runs one provider and writes its enveloped document, returning the

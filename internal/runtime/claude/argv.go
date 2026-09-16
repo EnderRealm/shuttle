@@ -40,6 +40,10 @@ type Options struct {
 	PATH           string // the baked PATH for the child
 	HomeDir        string // HOME for the child
 	Timezone       string // TZ for the child
+	// Started is called after the process group exists and before prompt bytes
+	// are sent. The live runner uses it to move the claimed ledger row to
+	// running with the pid that restart reconciliation authenticates.
+	Started func(pid int) error
 }
 
 // The run-directory subpaths this package owns (§7.2). The argv names the

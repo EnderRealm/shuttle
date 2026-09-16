@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
 	"shuttle/internal/reap"
+	"shuttle/internal/runner"
 	"shuttle/internal/schedule"
 )
 
@@ -36,11 +38,8 @@ SHUTTLE_AGENTS_DIR is invisible until the daemon is restarted.
 
 The restart pass runs once, at startup: a row it leaves in flight is re-checked
 only at the next daemon start, and until then that agent's slots skip on overlap.
-
-There is no runner yet (§7), so a claimed slot is recorded and nothing is
-executed. A claimed row therefore never reaches a terminal status, which means
-that after the first slot is claimed every later slot for that agent is recorded
-as skipped/overlap until the daemon is restarted and reaps it.`,
+Claimed slots execute through the same §7 pipeline as shuttle run, with at most
+two run workers active across agents.`,
 	// The load and ledger errors name the agent and the row; cobra printing
 	// them a second time, with usage, would bury them.
 	SilenceUsage:  true,
@@ -87,12 +86,31 @@ as skipped/overlap until the daemon is restarted and reaps it.`,
 		}
 		logger.Printf("daemon start: closed %d row(s) left in flight, %d not signalled (kill_failed/unresolved/foreign), watching %d agent(s)",
 			len(outcomes)-inFlight, unsignalled, len(sched.Defs))
+		pipeline, err := buildPipeline(store, logger)
+		if err != nil {
+			return err
+		}
 
 		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
+		sem := make(chan struct{}, 2)
+		var workers sync.WaitGroup
 		for {
+			auth := &runner.AuthTick{}
+			sched.Launch = func(def *agentdef.Definition, run *ledger.Run) error {
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					if _, err := pipeline.Run(ctx, def, run, runner.Options{Auth: auth}); err != nil {
+						logger.Printf("run=%s agent=%s: %v", run.ID, def.Name, err)
+					}
+				}()
+				return nil
+			}
 			// A tick that failed for one agent is logged and the loop carries
 			// on; the next pass is a minute away.
 			if err := sched.Tick(); err != nil {
@@ -100,6 +118,7 @@ as skipped/overlap until the daemon is restarted and reaps it.`,
 			}
 			select {
 			case <-ctx.Done():
+				workers.Wait()
 				logger.Print("daemon stop")
 				return nil
 			case <-ticker.C:
@@ -164,8 +183,8 @@ func newScheduler(store *ledger.Store, logger *log.Logger) (*schedule.Scheduler,
 		MaxRunsPerDay: cfg.Limits.DailyRunsPerAgent,
 		MaxSpendUSD:   cfg.Limits.DailySpendUSD,
 		Now:           time.Now,
-		// Launch stays nil until the runtime lands (§7.4): a due slot is
-		// claimed and recorded, and no model is started.
+		// The daemon and manual command attach the live pipeline after the
+		// scheduler is built; tests may leave it nil to inspect claims alone.
 		Log: logger,
 	}, nil
 }

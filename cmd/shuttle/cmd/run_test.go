@@ -2,15 +2,49 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"shuttle/internal/agentdef"
+	"shuttle/internal/ledger"
+	"shuttle/internal/runner"
 )
+
+type pipelineFunc func(context.Context, *agentdef.Definition, *ledger.Run, runner.Options) (*runner.RunResult, error)
+
+func (f pipelineFunc) Run(ctx context.Context, def *agentdef.Definition, run *ledger.Run, opts runner.Options) (*runner.RunResult, error) {
+	return f(ctx, def, run, opts)
+}
+
+func stubCompletedPipeline(t *testing.T) {
+	stubPipeline(t, nil)
+}
+
+func stubPipeline(t *testing.T, observe func(*ledger.Run, runner.Options)) {
+	t.Helper()
+	original := buildPipeline
+	buildPipeline = func(store *ledger.Store, _ *log.Logger) (claimedPipeline, error) {
+		return pipelineFunc(func(_ context.Context, _ *agentdef.Definition, run *ledger.Run, opts runner.Options) (*runner.RunResult, error) {
+			if observe != nil {
+				observe(run, opts)
+			}
+			if err := store.Complete(run.ID, ledger.Result{}); err != nil {
+				return nil, err
+			}
+			return &runner.RunResult{RunID: run.ID, RunDir: "/retained/" + run.ID}, nil
+		}), nil
+	}
+	t.Cleanup(func() { buildPipeline = original })
+}
 
 // execRun drives the command through cobra rather than calling RunE directly,
 // so the flag names and their bindings are exercised too. The flag variables
@@ -25,6 +59,7 @@ func execRun(t *testing.T, args ...string) (*bytes.Buffer, error) {
 		rootCmd.SetErr(nil)
 		rootCmd.SetArgs(nil)
 		runUnsafeNoSandbox = false
+		runNoDeliver = false
 		runDryRun = false
 		runSlot = ""
 	})
@@ -40,6 +75,7 @@ const dateLayout = "2006-01-02"
 // The flag is the only path out of the §11 sandbox, so a run that took it says
 // so and names the run, which is what ties the warning to the ledger row.
 func TestRunWarnsWhenTheSandboxIsBypassed(t *testing.T) {
+	stubCompletedPipeline(t)
 	agents := shuttleEnv(t)
 	writeAgentDir(t, agents, "daily", dailyManifest)
 	warnings, err := execRun(t, "--unsafe-no-sandbox")
@@ -65,6 +101,7 @@ func TestRunWarnsWhenTheSandboxIsBypassed(t *testing.T) {
 // Without the flag there is nothing to warn about: the sandbox is the default
 // and no other input can turn it off.
 func TestRunIsSilentWithoutTheFlag(t *testing.T) {
+	stubCompletedPipeline(t)
 	agents := shuttleEnv(t)
 	writeAgentDir(t, agents, "daily", dailyManifest)
 	warnings, err := execRun(t)
@@ -73,6 +110,70 @@ func TestRunIsSilentWithoutTheFlag(t *testing.T) {
 	}
 	if strings.Contains(warnings.String(), "unsafe-no-sandbox") {
 		t.Fatalf("stderr = %q, want no warning", warnings.String())
+	}
+}
+
+func TestRunPassesTheManualExecutionOptionsToTheSharedPipeline(t *testing.T) {
+	var got runner.Options
+	stubPipeline(t, func(run *ledger.Run, opts runner.Options) {
+		if run.TriggerKind != ledger.TriggerManual {
+			t.Errorf("trigger = %s, want manual", run.TriggerKind)
+		}
+		got = opts
+	})
+	agents := shuttleEnv(t)
+	writeAgentDir(t, agents, "daily", dailyManifest)
+	if _, err := execRun(t, "--unsafe-no-sandbox", "--no-deliver"); err != nil {
+		t.Fatal(err)
+	}
+	if !got.UnsafeNoSandbox || !got.NoDeliver {
+		t.Fatalf("options = %+v, want both explicit flags", got)
+	}
+}
+
+func TestManualRunCancellationSettlesTheClaim(t *testing.T) {
+	agents := shuttleEnv(t)
+	writeAgentDir(t, agents, "daily", dailyManifest)
+
+	originalContext := manualRunContext
+	manualRunContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		cancel()
+		return ctx, cancel
+	}
+	t.Cleanup(func() { manualRunContext = originalContext })
+
+	originalPipeline := buildPipeline
+	var cancelled bool
+	buildPipeline = func(store *ledger.Store, _ *log.Logger) (claimedPipeline, error) {
+		return pipelineFunc(func(ctx context.Context, _ *agentdef.Definition, run *ledger.Run, _ runner.Options) (*runner.RunResult, error) {
+			cancelled = errors.Is(ctx.Err(), context.Canceled)
+			err := errors.New("manual run interrupted")
+			if failErr := store.Fail(run.ID, ledger.ClassStuck, err.Error(), ledger.Result{}); failErr != nil {
+				return nil, failErr
+			}
+			return nil, err
+		}), nil
+	}
+	t.Cleanup(func() { buildPipeline = originalPipeline })
+
+	if _, err := execRun(t); err == nil || !strings.Contains(err.Error(), "manual run interrupted") {
+		t.Fatalf("run error = %v", err)
+	}
+	if !cancelled {
+		t.Fatal("the shared pipeline did not receive the cancelled manual-run context")
+	}
+	store, err := openLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runs, err := store.Runs("daily", 1)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs = %v, %v", runs, err)
+	}
+	if runs[0].Status != ledger.StatusFailed || runs[0].FailureClass.String != ledger.ClassStuck {
+		t.Fatalf("row = %+v", runs[0])
 	}
 }
 

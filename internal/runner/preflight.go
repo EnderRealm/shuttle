@@ -33,11 +33,12 @@ func (e *CheckError) Unwrap() error { return e.Err }
 // Preflight owns the local checks for one configured agent. RunDir is retained
 // by a live run; the standalone command supplies a temporary directory.
 type Preflight struct {
-	Config  *config.Config
-	Home    string
-	HomeDir string
-	PATH    string
-	findKey func(string) (string, error)
+	Config          *config.Config
+	Home            string
+	HomeDir         string
+	PATH            string
+	UnsafeNoSandbox bool
+	findKey         func(string) (string, error)
 }
 
 // Check performs no model call. The returned names include every check reached;
@@ -87,22 +88,24 @@ func (p Preflight) Check(ctx context.Context, def *agentdef.Definition, runDir s
 	}); err != nil {
 		return names, err
 	}
-	if err := check("srt", func() error {
-		if def.Manifest.Sandbox.Kind != "srt" {
-			return fmt.Errorf("unsupported sandbox %q", def.Manifest.Sandbox.Kind)
+	if !p.UnsafeNoSandbox {
+		if err := check("srt", func() error {
+			if def.Manifest.Sandbox.Kind != "srt" {
+				return fmt.Errorf("unsupported sandbox %q", def.Manifest.Sandbox.Kind)
+			}
+			if err := executable(p.Config.Paths.SRTBin); err != nil {
+				return err
+			}
+			o := p.sandbox(def, runDir)
+			if _, err := sandbox.WriteProfile(o); err != nil {
+				return err
+			}
+			bound, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return sandbox.Check(bound, o)
+		}); err != nil {
+			return names, err
 		}
-		if err := executable(p.Config.Paths.SRTBin); err != nil {
-			return err
-		}
-		o := p.sandbox(def, runDir)
-		if _, err := sandbox.WriteProfile(o); err != nil {
-			return err
-		}
-		bound, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		return sandbox.Check(bound, o)
-	}); err != nil {
-		return names, err
 	}
 	if err := check("anthropic.keychain_item", func() error {
 		_, err := p.key(p.Config.Anthropic.KeychainItem)

@@ -184,6 +184,27 @@ func TestStateMachine(t *testing.T) {
 	}
 }
 
+func TestSetRunDirRetainsPreflightArtifactsOnAClaim(t *testing.T) {
+	s := newStore(t)
+	run := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
+	if err := s.SetRunDir(run.ID, "/tmp/run-before-launch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Fail(run.ID, ClassPreflight, "missing requirement", Result{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunDir.String != "/tmp/run-before-launch" {
+		t.Fatalf("run_dir = %q, want the retained preflight directory", got.RunDir.String)
+	}
+	if err := s.SetRunDir(run.ID, "/tmp/repointed"); err == nil {
+		t.Fatal("terminal row accepted a run directory rewrite")
+	}
+}
+
 // driveTo moves a freshly claimed run into status.
 func driveTo(t *testing.T, s *Store, id, status string) {
 	t.Helper()

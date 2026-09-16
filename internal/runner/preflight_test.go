@@ -137,6 +137,21 @@ func TestPreflightMissingRequirementsNeverProbeAuth(t *testing.T) {
 	}
 }
 
+func TestUnsafeRunDoesNotRequireOrLaunchSRT(t *testing.T) {
+	p, def, dir, calls := preflightFixture(t)
+	if err := os.Remove(p.Config.Paths.SRTBin); err != nil {
+		t.Fatal(err)
+	}
+	p.UnsafeNoSandbox = true
+	if _, err := (&AuthTick{}).Check(context.Background(), p, def, dir); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil || string(data) != "model\n" {
+		t.Fatalf("direct auth probe calls = %q, %v", data, err)
+	}
+}
+
 func TestDailyPreflightSchemaConfigAndMail(t *testing.T) {
 	p, d, dir, _ := preflightFixture(t)
 	p.Config.Paths.LoomHome = dir

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"shuttle/internal/ledger"
+	"shuttle/internal/runner"
 )
 
 // dailyManifest is the smallest §4.1-valid agent.json. These tests only need it
@@ -146,6 +147,45 @@ func TestNewSchedulerCarriesConfigAndReportsABrokenDefinition(t *testing.T) {
 	}
 }
 
+func TestDaemonReapsBeforePipelineConstructionCanFail(t *testing.T) {
+	agents := shuttleEnv(t)
+	writeAgentDir(t, agents, "daily", dailyManifest)
+	store, err := openLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, ok, err := store.Claim("daily", time.Now().Add(-time.Hour), ledger.TriggerCron)
+	if err != nil || !ok {
+		t.Fatalf("claim = (%t, %v)", ok, err)
+	}
+	store.Close()
+
+	original := buildPipeline
+	buildPipeline = func(*ledger.Store, *log.Logger) (claimedPipeline, error) {
+		return nil, fmt.Errorf("pipeline configuration failed")
+	}
+	t.Cleanup(func() { buildPipeline = original })
+	var logs bytes.Buffer
+	daemonCmd.SetErr(&logs)
+	t.Cleanup(func() { daemonCmd.SetErr(nil) })
+	if err := daemonCmd.RunE(daemonCmd, nil); err == nil || !strings.Contains(err.Error(), "pipeline configuration failed") {
+		t.Fatalf("daemon error = %v", err)
+	}
+
+	store, err = openLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	got, err := store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ledger.StatusUnknown {
+		t.Fatalf("status = %s, want restart reconciliation before the pipeline failure", got.Status)
+	}
+}
+
 func TestDaemonReapsInFlightRunsBeforeTheFirstTick(t *testing.T) {
 	// The pass only signals a pid whose identity it can read from the kernel
 	// (kern.proc.pid, kern.procargs2, kern.proc.pgrp), which is darwin only;
@@ -157,6 +197,10 @@ func TestDaemonReapsInFlightRunsBeforeTheFirstTick(t *testing.T) {
 	}
 	agents := shuttleEnv(t)
 	writeAgentDir(t, agents, "daily", dailyManifest)
+	var scheduled bool
+	stubPipeline(t, func(run *ledger.Run, opts runner.Options) {
+		scheduled = run.TriggerKind == ledger.TriggerCron && opts.Auth != nil
+	})
 	// A run the previous daemon left behind: the row is running and its
 	// process is alive, in its own group as the runtime launches one and
 	// carrying --settings <run_dir>/settings.json as the runtime puts it there
@@ -235,6 +279,9 @@ func TestDaemonReapsInFlightRunsBeforeTheFirstTick(t *testing.T) {
 	daemonCmd.SetContext(ctx)
 	if err := daemonCmd.RunE(daemonCmd, nil); err != nil {
 		t.Fatalf("daemon: %v", err)
+	}
+	if !scheduled {
+		t.Fatal("the scheduled claim did not execute through the shared pipeline with its tick auth scope")
 	}
 
 	reaped := strings.Index(logs.String(), fmt.Sprintf("restart: run=%s agent=daily pid=%d action=killed", run.ID, pid))
