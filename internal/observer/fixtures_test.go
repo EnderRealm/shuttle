@@ -104,6 +104,7 @@ func TestInvalidFixturesNameTheField(t *testing.T) {
 		"assessment-foreign-evidence.json":               "evidence.identity",
 		"assessment-unknown-outcome.json":                "outcome",
 		"assessment-question-and-finding.json":           "finding",
+		"assessment-finding-no-subject.json":             "finding.subject.kind",
 		"action-no-body.json":                            "body",
 		"action-no-evidence.json":                        "evidence",
 		"action-foreign-id.json":                         "id",

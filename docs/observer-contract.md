@@ -27,7 +27,7 @@ guessed at from its shape.
 | Question | a standing question about a subject: what would answer it, what answering it would change, how fast its inputs move | a person, a worker or the observer, recorded in `author` | into the notebook from its author |
 | Experiment | a change's declared effect, its activation, the window and opportunity it needs, and the readings and baseline it will be judged by | a person, a worker or the observer, recorded in `author` | into the notebook from its author |
 | Bundle | recorded fact: readings over an explicit window, from named sources, out of a named snapshot, with what could not be read | the observer | written into the notebook |
-| Assessment | one outcome and one prose interpretation, carrying the bundle it was drawn from | the observer | written into the notebook |
+| Assessment | one outcome and one prose interpretation, carrying the bundle it was drawn from; an unprompted assessment also carries the finding that opens its entry | the observer | written into the notebook |
 | Action | ticket-facing feedback under a stable id | the observer | out toward the ticket store, as a proposal |
 | Receipt | what became of an action, under that same id | the observer, recording what the far store did | back from that store: `applied`, `refused` or `failed`, with its reference |
 
@@ -38,6 +38,12 @@ three carry different authority, and a reader who cannot tell them apart reads a
 model's proposal as a person's decision. A ticket reference on either is
 provenance and is optional on both: many questions and experiments are written by
 hand with no ticket behind them.
+
+A Question pins the subject of a standing entry. A Finding does the same for an
+entry opened by an unprompted assessment: it declares its own id, subject, question
+and consequence in that first payload. Every later assessment recorded under
+either entry shape must carry evidence about that declared subject; a different
+kind or instance is refused rather than appended to the wrong entry.
 
 The direction that carries nothing at all is the one back to the subject: the
 notebook is never a prompt input for the agent being observed. Watching is one

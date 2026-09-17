@@ -38,12 +38,13 @@ type Assessment struct {
 
 // Finding is what an unprompted observation carries instead of a question id:
 // the observer saw something nobody had asked about. It enters the notebook as
-// a new entry under the id the observer assigns, so a finding has a stable id
-// from its first mention rather than one the notebook invents on admission.
+// a new entry under the id the observer assigns and pins the subject every later
+// observation under that id must read.
 type Finding struct {
-	ID       string `json:"id"`
-	Question string `json:"question"`
-	Changes  string `json:"changes"`
+	ID       string  `json:"id"`
+	Subject  Subject `json:"subject"`
+	Question string  `json:"question"`
+	Changes  string  `json:"changes"`
 }
 
 // EntryID is the notebook entry the assessment belongs to: the question it
@@ -113,6 +114,9 @@ func (a *Assessment) validate() error {
 		return fieldErr("finding", "an assessment answers a question or opens a finding, not both")
 	case a.Finding != nil:
 		if err := checkQualified("finding.id", a.Finding.ID, a.Identity); err != nil {
+			return err
+		}
+		if err := a.Finding.Subject.validate("finding.subject"); err != nil {
 			return err
 		}
 		if a.Finding.Question == "" {

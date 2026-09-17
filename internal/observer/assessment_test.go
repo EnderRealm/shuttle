@@ -115,6 +115,12 @@ func TestAssessmentCannotSignAnotherObserversEvidence(t *testing.T) {
 	refusal(t, a.validate(), "evidence")
 }
 
+func TestFindingRequiresAValidSubject(t *testing.T) {
+	a := mustAssessment(t, "harness", "assessment-unprompted.json")
+	a.Finding.Subject.Instance = ""
+	refusal(t, a.validate(), "finding.subject.instance")
+}
+
 // An assessment against a question the notebook does not hold is refused, not
 // filed: an unprompted observation says so with a finding, which carries the
 // id it wants to be known by.

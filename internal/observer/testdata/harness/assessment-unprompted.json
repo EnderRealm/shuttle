@@ -5,7 +5,11 @@
     "domain": "harness"
   },
   "finding": {
-    "id": "harness/shuttle/subject-line-drift",
+    "id": "harness/shuttle/unprompted-pattern",
+    "subject": {
+      "kind": "agent",
+      "instance": "daily"
+    },
     "question": "Do the email subject lines drift from the report's own headline?",
     "changes": "Whether the subject is generated from the H1 or written separately, which decides where a misleading subject gets fixed."
   },

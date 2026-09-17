@@ -159,12 +159,12 @@ func (m *Memory) Record(req Request, a *Assessment) (*Entry, error) {
 			return nil, err
 		}
 	}
-	// The reading has to be of the question's subject. Nothing downstream
-	// checks this for a standing question or an insufficient-evidence outcome,
-	// so a reading of another instance would file silently under a question
-	// about this one.
-	if e.Question != nil && a.Evidence.Subject != e.Question.Subject {
-		return nil, fieldErr("evidence.subject", "%s %s, the question is about %s %s", a.Evidence.Subject.Kind, a.Evidence.Subject.Instance, e.Question.Subject.Kind, e.Question.Subject.Instance)
+	// The reading has to be of the entry's subject. Nothing downstream checks
+	// this for a standing question, a finding, or an insufficient-evidence
+	// outcome, so a reading of another instance would file silently here.
+	subject := e.subject()
+	if a.Evidence.Subject != subject {
+		return nil, fieldErr("evidence.subject", "%s %s, the entry is about %s %s", a.Evidence.Subject.Kind, a.Evidence.Subject.Instance, subject.Kind, subject.Instance)
 	}
 	if err := checkRequirements(e, a); err != nil {
 		return nil, err
@@ -183,6 +183,15 @@ func (m *Memory) Record(req Request, a *Assessment) (*Entry, error) {
 	stored := &applied{entry: snapshot(e)}
 	m.commit(req, "record", a, stored)
 	return entryOf(stored), nil
+}
+
+// subject is the one path from either entry shape to the instance its
+// observations must read.
+func (e *Entry) subject() Subject {
+	if e.Question != nil {
+		return e.Question.Subject
+	}
+	return e.Finding.Subject
 }
 
 func (m *Memory) Claim(req Request, act *Action) (*Receipt, error) {

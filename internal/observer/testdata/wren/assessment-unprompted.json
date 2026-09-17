@@ -1,0 +1,35 @@
+{
+  "contract_version": "observer/v1",
+  "identity": { "observer": "mead", "domain": "wren" },
+  "finding": {
+    "id": "wren/mead/unprompted-pattern",
+    "subject": { "kind": "agent", "instance": "wren-1" },
+    "question": "Does she ever start something nobody asked her for?",
+    "changes": "Whether she only ever answers, which decides whether the next thing we build her is another input or a reason to act on her own."
+  },
+  "outcome": "insufficient-evidence",
+  "interpretation": "Nobody asked this. One activity starts in her own record, but the first messages for two days are unavailable, so this is a first sighting rather than an answer.",
+  "evidence": {
+    "contract_version": "observer/v1",
+    "identity": { "observer": "mead", "domain": "wren" },
+    "subject": { "kind": "agent", "instance": "wren-1" },
+    "method": { "name": "loops.indicators", "revision": "2026-08-07" },
+    "window": {
+      "start": "2026-09-10T00:00:00-07:00",
+      "end": "2026-09-17T00:00:00-07:00",
+      "timezone": "America/Los_Angeles"
+    },
+    "scope": { "collection": "wren.sqlite", "snapshot": "wren-2026-09-17" },
+    "sources": [
+      { "kind": "sqlite", "ref": "wren.sqlite#activities" }
+    ],
+    "unavailable": [
+      { "kind": "log", "ref": "chat_out-2026-09-11", "reason": "the transcript was rotated before the read" }
+    ],
+    "coverage": { "observed": 7, "available": 8 },
+    "readings": [
+      { "name": "unprompted_starts", "value": 1, "unit": "count" }
+    ]
+  },
+  "at": "2026-09-17T07:05:00-07:00"
+}

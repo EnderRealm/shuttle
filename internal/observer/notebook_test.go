@@ -348,4 +348,27 @@ func TestRecordRefusesAnotherSubject(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("finding/"+OutcomeInsufficient, func(t *testing.T) {
+		nb := NewMemory()
+		first := mustAssessment(t, "harness", "assessment-unprompted.json")
+		if _, err := nb.Record(at(nb, first.Identity, "record-first"), first); err != nil {
+			t.Fatal(err)
+		}
+
+		later := mustAssessment(t, "harness", "assessment-unprompted.json")
+		later.QuestionID = first.Finding.ID
+		later.Finding = nil
+		later.Evidence.Subject.Instance = "weekly"
+		_, err := nb.Record(at(nb, first.Identity, "record-later"), later)
+		refusal(t, err, "evidence.subject")
+
+		e, err := nb.Entry(first.Finding.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(e.Observations) != 1 {
+			t.Fatalf("observations = %d, want the later reading refused", len(e.Observations))
+		}
+	})
 }

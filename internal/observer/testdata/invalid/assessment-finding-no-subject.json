@@ -1,0 +1,31 @@
+{
+  "contract_version": "observer/v1",
+  "identity": { "observer": "shuttle", "domain": "harness" },
+  "finding": {
+    "id": "harness/shuttle/unprompted-pattern",
+    "question": "Do the email subject lines drift from the report's own headline?",
+    "changes": "Whether subject generation needs to change."
+  },
+  "outcome": "insufficient-evidence",
+  "interpretation": "A first sighting.",
+  "evidence": {
+    "contract_version": "observer/v1",
+    "identity": { "observer": "shuttle", "domain": "harness" },
+    "subject": { "kind": "agent", "instance": "daily" },
+    "method": { "name": "report-diff", "revision": "v3" },
+    "window": {
+      "start": "2026-09-05T00:00:00-07:00",
+      "end": "2026-09-08T00:00:00-07:00",
+      "timezone": "America/Los_Angeles"
+    },
+    "scope": { "collection": "~/.shuttle/reports", "snapshot": "git 9f2c1ab" },
+    "sources": [
+      { "kind": "file", "ref": "~/.shuttle/reports/daily/2026-09-05.md" }
+    ],
+    "coverage": { "observed": 1, "available": 1 },
+    "readings": [
+      { "name": "subject_headline_mismatch", "value": 1, "unit": "count" }
+    ]
+  },
+  "at": "2026-09-08T06:05:00-07:00"
+}

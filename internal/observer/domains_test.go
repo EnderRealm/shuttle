@@ -56,6 +56,7 @@ func at(nb *Memory, id Identity, requestID string) Request {
 func TestDomainsDriveOneNotebook(t *testing.T) {
 	nb := NewMemory()
 	receipts := map[string]*Receipt{}
+	findings := map[string]*Entry{}
 
 	for _, domain := range []string{"wren", "harness"} {
 		t.Run(domain, func(t *testing.T) {
@@ -141,11 +142,34 @@ func TestDomainsDriveOneNotebook(t *testing.T) {
 			if len(e.InFlight) != 0 {
 				t.Fatalf("in flight = %v, want none once settled", e.InFlight)
 			}
+
+			// An unprompted finding takes the same full Record path in each
+			// domain and opens its own entry under the observer's qualified id.
+			finding := mustAssessment(t, domain, "assessment-unprompted.json")
+			e, err = nb.Record(at(nb, finding.Identity, "finding"), finding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.ID != finding.Finding.ID {
+				t.Fatalf("entry id = %q, want the finding's own id %q", e.ID, finding.Finding.ID)
+			}
+			if e.Question != nil {
+				t.Fatal("an unprompted finding was filed under a question")
+			}
+			if e.Finding.Subject != finding.Evidence.Subject {
+				t.Fatalf("entry subject = %+v, evidence is about %+v", e.Finding.Subject, finding.Evidence.Subject)
+			}
+			// insufficient-evidence never closes anything, least of all a
+			// first sighting.
+			if e.State != StateObserving {
+				t.Fatalf("state = %q, want %q", e.State, StateObserving)
+			}
+			findings[domain] = e
 		})
 	}
 
-	// Same local name under two observers, two entries, neither reachable from
-	// the other's qualified id.
+	// The same local names and raw request ids under two observers produce
+	// distinct question and finding entries.
 	wren, err := nb.Entry("wren/mead/days-repeating")
 	if err != nil {
 		t.Fatal(err)
@@ -166,22 +190,10 @@ func TestDomainsDriveOneNotebook(t *testing.T) {
 	if receipts["wren/mead/note-days-repeating"].Reference == receipts["harness/shuttle/note-days-repeating"].Reference {
 		t.Fatal("the two observers' receipts carry the same reference")
 	}
-
-	// An unprompted finding: a valid observation about something no question
-	// asked, which opens its own entry rather than being filed under one.
-	finding := mustAssessment(t, "harness", "assessment-unprompted.json")
-	e, err := nb.Record(at(nb, finding.Identity, "finding"), finding)
-	if err != nil {
-		t.Fatal(err)
+	if findings["wren"].ID == findings["harness"].ID {
+		t.Fatalf("both findings became %q", findings["wren"].ID)
 	}
-	if e.ID != finding.Finding.ID {
-		t.Fatalf("entry id = %q, want the finding's own id %q", e.ID, finding.Finding.ID)
-	}
-	if e.Question != nil {
-		t.Fatal("an unprompted finding was filed under a question")
-	}
-	// insufficient-evidence never closes anything, least of all a first sighting.
-	if e.State != StateObserving {
-		t.Fatalf("state = %q, want %q", e.State, StateObserving)
+	if findings["wren"].Identity == findings["harness"].Identity {
+		t.Fatalf("both findings are held by %v", findings["wren"].Identity)
 	}
 }
