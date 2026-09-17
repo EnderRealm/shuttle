@@ -1,0 +1,63 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "mead",
+    "domain": "wren"
+  },
+  "question_id": "wren/mead/days-repeating",
+  "outcome": "insufficient-evidence",
+  "interpretation": "The next window retained the first observation but did not contain enough evidence for another conclusion.",
+  "evidence": {
+    "contract_version": "observer/v1",
+    "identity": {
+      "observer": "mead",
+      "domain": "wren"
+    },
+    "subject": {
+      "kind": "agent",
+      "instance": "wren-1"
+    },
+    "method": {
+      "name": "loops.indicators",
+      "revision": "2026-08-07"
+    },
+    "window": {
+      "start": "2026-09-17T00:00:00-07:00",
+      "end": "2026-09-24T00:00:00-07:00",
+      "timezone": "America/Los_Angeles"
+    },
+    "scope": {
+      "collection": "wren.sqlite",
+      "snapshot": "wren-2026-09-24"
+    },
+    "sources": [
+      {
+        "kind": "sqlite",
+        "ref": "wren.sqlite#activities"
+      }
+    ],
+    "unavailable": [
+      {
+        "kind": "log",
+        "ref": "chat_out-2026-09-20",
+        "reason": "the transcript was rotated before the read"
+      }
+    ],
+    "coverage": {
+      "observed": 3,
+      "available": 7
+    },
+    "readings": [
+      {
+        "name": "repeat_rate",
+        "value": 0.43,
+        "unit": "ratio"
+      },
+      {
+        "name": "distinct_activities",
+        "unavailable": "three days did not contain activity records"
+      }
+    ]
+  },
+  "at": "2026-09-24T07:00:00-07:00"
+}

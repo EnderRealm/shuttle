@@ -1,0 +1,12 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "mead",
+    "domain": "wren"
+  },
+  "action_id": "wren/mead/note-days-repeating",
+  "status": "settled",
+  "outcome": "applied",
+  "reference": "village2/show-whether-week-a0f2#note-1",
+  "at": "2026-09-17T07:10:00-07:00"
+}

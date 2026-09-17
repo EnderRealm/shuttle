@@ -1,0 +1,76 @@
+{
+  "name": "request ids are scoped per observer",
+  "steps": [
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 0,
+        "request_id": "register"
+      },
+      "payload": "../../wren/question.json",
+      "expect": {
+        "status": "ok",
+        "revision": 1,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "boswell", "domain": "wren" },
+        "revision": 1,
+        "request_id": "register"
+      },
+      "payload": "../payloads/question-wren-boswell.json",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "entry": {
+          "id": "wren/boswell/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 0,
+        "request_id": "register"
+      },
+      "payload": "../../wren/question.json",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "entry",
+      "entry_id": "wren/boswell/days-repeating",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "entry": {
+          "id": "wren/boswell/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    }
+  ]
+}

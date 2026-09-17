@@ -1,0 +1,122 @@
+{
+  "name": "observations append without editing earlier rows",
+  "steps": [
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 0,
+        "request_id": "register"
+      },
+      "payload": "../../wren/question.json",
+      "expect": {
+        "status": "ok",
+        "revision": 1,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "activate",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 1,
+        "request_id": "activate"
+      },
+      "payload": "../../wren/experiment.json",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "experiment_status": "live",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "record",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 2,
+        "request_id": "record-first"
+      },
+      "payload": "../../wren/assessment.json",
+      "expect": {
+        "status": "ok",
+        "revision": 3,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "answered",
+          "experiment_status": "live",
+          "observations": [
+            {
+              "at": "2026-09-17T07:00:00-07:00",
+              "outcome": "effect-observed"
+            }
+          ],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "record",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 3,
+        "request_id": "record-second"
+      },
+      "payload": "../payloads/assessment-second.json",
+      "expect": {
+        "status": "ok",
+        "revision": 4,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "answered",
+          "experiment_status": "live",
+          "observations": [
+            {
+              "at": "2026-09-17T07:00:00-07:00",
+              "outcome": "effect-observed"
+            },
+            {
+              "at": "2026-09-24T07:00:00-07:00",
+              "outcome": "insufficient-evidence"
+            }
+          ],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "entry",
+      "entry_id": "wren/mead/days-repeating",
+      "expect": {
+        "status": "ok",
+        "revision": 4,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "answered",
+          "experiment_status": "live",
+          "observations": [
+            {
+              "at": "2026-09-17T07:00:00-07:00",
+              "outcome": "effect-observed"
+            },
+            {
+              "at": "2026-09-24T07:00:00-07:00",
+              "outcome": "insufficient-evidence"
+            }
+          ],
+          "in_flight": []
+        }
+      }
+    }
+  ]
+}

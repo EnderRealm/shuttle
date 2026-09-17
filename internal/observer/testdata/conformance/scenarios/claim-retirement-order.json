@@ -1,0 +1,148 @@
+{
+  "name": "claim before retirement remains settleable",
+  "steps": [
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 0,
+        "request_id": "register"
+      },
+      "payload": "../../wren/question.json",
+      "expect": {
+        "status": "ok",
+        "revision": 1,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "activate",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 1,
+        "request_id": "activate"
+      },
+      "payload": "../../wren/experiment.json",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "experiment_status": "live",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "claim",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 2,
+        "request_id": "claim"
+      },
+      "payload": "../../wren/action.json",
+      "expect": {
+        "status": "ok",
+        "revision": 3,
+        "receipt": {
+          "action_id": "wren/mead/note-days-repeating",
+          "status": "in-flight",
+          "at": "*"
+        }
+      }
+    },
+    {
+      "operation": "retire",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 3,
+        "request_id": "retire"
+      },
+      "entry_id": "wren/mead/days-repeating",
+      "reason": "the subject was archived",
+      "expect": {
+        "status": "ok",
+        "revision": 4,
+        "retirement": {
+          "entry_id": "wren/mead/days-repeating",
+          "reason": "the subject was archived",
+          "in_flight": [
+            "wren/mead/note-days-repeating"
+          ],
+          "revision": 4,
+          "at": "*"
+        }
+      }
+    },
+    {
+      "operation": "claim",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 4,
+        "request_id": "claim-later"
+      },
+      "payload": "../payloads/action-later.json",
+      "expect": {
+        "status": "refused",
+        "revision": 4,
+        "refusal": "retired"
+      }
+    },
+    {
+      "operation": "settle",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 4,
+        "request_id": "settle-later"
+      },
+      "payload": "../payloads/receipt-later-settled.json",
+      "expect": {
+        "status": "refused",
+        "revision": 4,
+        "refusal": "not-claimed"
+      }
+    },
+    {
+      "operation": "settle",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 4,
+        "request_id": "settle"
+      },
+      "payload": "../payloads/receipt-settled.json",
+      "expect": {
+        "status": "ok",
+        "revision": 5,
+        "receipt": {
+          "action_id": "wren/mead/note-days-repeating",
+          "status": "settled",
+          "outcome": "applied",
+          "reference": "village2/show-whether-week-a0f2#note-1",
+          "at": "2026-09-17T07:10:00-07:00"
+        }
+      }
+    },
+    {
+      "operation": "entry",
+      "entry_id": "wren/mead/days-repeating",
+      "expect": {
+        "status": "ok",
+        "revision": 5,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "retired",
+          "experiment_status": "live",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "boswell",
+    "domain": "wren"
+  },
+  "id": "wren/boswell/days-repeating",
+  "subject": {
+    "kind": "agent",
+    "instance": "wren-1"
+  },
+  "question": "Are her days repeating in Boswell's record?",
+  "reading": "Compare the recent and prior activity categories in Boswell's local observations.",
+  "changes": "Whether Boswell should keep collecting the same observation or revise its method.",
+  "speed": "slow",
+  "asked": "2026-09-07T09:05:00-07:00",
+  "author": {
+    "kind": "observer",
+    "ref": "boswell"
+  }
+}

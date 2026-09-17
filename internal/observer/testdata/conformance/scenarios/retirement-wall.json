@@ -1,0 +1,73 @@
+{
+  "name": "retirement refuses a later claim",
+  "steps": [
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 0,
+        "request_id": "register"
+      },
+      "payload": "../../wren/question.json",
+      "expect": {
+        "status": "ok",
+        "revision": 1,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "retire",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 1,
+        "request_id": "retire"
+      },
+      "entry_id": "wren/mead/days-repeating",
+      "reason": "the subject was archived",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "retirement": {
+          "entry_id": "wren/mead/days-repeating",
+          "reason": "the subject was archived",
+          "in_flight": [],
+          "revision": 2,
+          "at": "*"
+        }
+      }
+    },
+    {
+      "operation": "claim",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 2,
+        "request_id": "claim-later"
+      },
+      "payload": "../../wren/action.json",
+      "expect": {
+        "status": "refused",
+        "revision": 2,
+        "refusal": "retired"
+      }
+    },
+    {
+      "operation": "entry",
+      "entry_id": "wren/mead/days-repeating",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "retired",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    }
+  ]
+}

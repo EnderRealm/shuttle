@@ -2,8 +2,11 @@
 
 Status: written 2026-09-09 alongside `internal/observer`, which is the executable
 half of this document. Where the two disagree the code is right and this file is
-stale. Nothing here is wired to a runner, a schedule or a CLI: the package is the
-contract, its validation, a reference notebook and two domains' fixtures.
+stale. Nothing here is wired to a runner or a schedule: the package is the
+contract, its validation, a reference notebook, two domains' fixtures and a
+language-neutral adapter conformance suite. The domain-command transport below
+is the boundary a later runtime client will implement; this package does not
+spawn one.
 `observer/v1` is unreleased on those terms — no records exist under it and no
 domain adapter reads it — so a correction to the shape is still made in place; a
 version pins a shape once there are records written under it to read.
@@ -219,3 +222,115 @@ cache and is not rebuilt.
 - **What a domain may prune** is its own upstream source data on its own policy.
   The notebook holds no secrets and no transcript text; it holds readings,
   references and the observer's prose.
+
+## 8. Domain-command transport
+
+An adapter is a spawned domain command, configured by the operator. Shuttle
+starts it directly rather than through a shell, writes exactly one JSON request
+to stdin, closes stdin, and reads exactly one JSON response from stdout. Each
+invocation is one operation against the domain-owned notebook; persistence and
+serialization across invocations belong to the adapter. Diagnostics go to
+stderr and never share stdout with the response.
+
+Validation stays on the shuttle side of the boundary in both directions.
+Shuttle validates a payload before placing it in a request and validates a
+successful response before using it. An adapter parses JSON and implements the
+notebook behaviour, but does not reproduce `checkQualified`, `checkDay` or any
+other payload validation. There is deliberately no JSON Schema or second
+validator for an adapter to keep in sync. Mead's validation of its own TOML
+store is separate from this wire-payload validation.
+
+Every request is an object with an `operation` string. The operation names and
+their additional fields are:
+
+| Operation | Request fields | Successful stdout |
+|---|---|---|
+| `revision` | none | `{"revision":<integer>}` |
+| `entry` | `entry_id` | the Entry payload |
+| `register` | `request`, `payload` (Question) | the Entry payload |
+| `activate` | `request`, `payload` (Experiment) | the Entry payload |
+| `record` | `request`, `payload` (Assessment) | the Entry payload |
+| `claim` | `request`, `payload` (Action) | the Receipt payload |
+| `settle` | `request`, `payload` (Receipt) | the Receipt payload |
+| `retire` | `request`, `entry_id`, `reason` | a Retirement object |
+| `reopen` | `request`, `entry_id`, `condition` | the Entry payload |
+
+`request` has `identity`, `revision` and `request_id`, using the same JSON names
+as the conformance data. `payload` is the already validated `observer/v1`
+object, not a path; paths belong only to the conformance files that load those
+objects. Retirement has the fields `entry_id`, `reason`, `at`, `in_flight` and
+`revision`.
+
+Exit status carries the sentinel refusal class. On a refusal stdout is empty and
+stderr may contain a diagnostic:
+
+| Exit | Refusal |
+|---:|---|
+| 10 | stale revision (`ErrStaleRevision`) |
+| 11 | retired entry (`ErrRetired`) |
+| 12 | missing entry (`ErrNoEntry`) |
+| 13 | action was not claimed (`ErrNotClaimed`) |
+| 14 | request id reused with changed content (`ErrRequestConflict`) |
+
+Exit 0 means stdout holds the successful response. Exit 1 is an adapter or
+storage failure, not a contract refusal. A signal, timeout, malformed stdout,
+extra stdout or a payload that fails shuttle's response validation is likewise
+a runtime failure and is never translated into one of the sentinel exits.
+
+## 9. Adapter conformance
+
+The published suite is under
+`internal/observer/testdata/conformance`. `manifest.json` is the complete,
+ordered list of scenario files under `scenarios/`; the Go runner fails if the
+manifest names a missing file or the directory contains an unlisted one.
+Payload paths in a scenario are relative to its file and resolve under
+`internal/observer/testdata`, so another language reads the same JSON fixtures
+that the Go runner gives to `Memory`.
+
+A scenario has a name and ordered steps:
+
+```json
+{
+  "name": "retirement refuses a later claim",
+  "steps": [
+    {
+      "operation": "register",
+      "request": {
+        "identity": {"observer": "mead", "domain": "wren"},
+        "revision": 0,
+        "request_id": "register"
+      },
+      "payload": "../../wren/question.json",
+      "expect": {
+        "status": "ok",
+        "revision": 1,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    }
+  ]
+}
+```
+
+Each step names one of the transport operations and the outcome it must
+produce. `status` is `ok` or `refused`; a refusal also names one of
+`stale-revision`, `retired`, `no-entry`, `not-claimed` or
+`request-conflict`. `revision` is the notebook revision after the operation.
+Entry expectations project the stable protocol facts used by these scenarios:
+`id`, `state`, optional `experiment_status`, ordered observations as `at` and
+`outcome`, and ordered `in_flight` ids. Receipt and retirement expectations use
+their corresponding fields; `"at":"*"` accepts any non-empty generated
+timestamp in a direct expectation. `{"same_as":3}` means the complete outcome,
+including such a generated timestamp, must equal the third step's actual
+outcome exactly; step numbers are one-based.
+
+An adapter demonstrates conformance by running every manifested scenario
+against a fresh notebook and comparing every step in order. It must report a
+difference with the scenario name, one-based step index, operation and expected
+and actual outcomes. Passing the payload validators alone is not conformance:
+the scenarios are what exercise stale-write refusal, idempotent replay,
+request-id scoping, append-only observations and claim/retirement ordering.

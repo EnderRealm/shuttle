@@ -1,0 +1,18 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "mead",
+    "domain": "wren"
+  },
+  "id": "wren/mead/note-days-repeating-later",
+  "question_id": "wren/mead/days-repeating",
+  "kind": "ticket-note",
+  "ticket": "village2/show-whether-week-a0f2",
+  "body": "This distinct action was proposed only after retirement.",
+  "evidence": [
+    {
+      "kind": "notebook",
+      "ref": "wren/mead/days-repeating"
+    }
+  ]
+}

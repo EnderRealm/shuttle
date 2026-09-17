@@ -1,0 +1,105 @@
+{
+  "name": "request replay is idempotent and changed content conflicts",
+  "steps": [
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 0,
+        "request_id": "register"
+      },
+      "payload": "../../wren/question.json",
+      "expect": {
+        "status": "ok",
+        "revision": 1,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "activate",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 1,
+        "request_id": "activate"
+      },
+      "payload": "../../wren/experiment.json",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "experiment_status": "live",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "claim",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 2,
+        "request_id": "claim"
+      },
+      "payload": "../../wren/action.json",
+      "expect": {
+        "status": "ok",
+        "revision": 3,
+        "receipt": {
+          "action_id": "wren/mead/note-days-repeating",
+          "status": "in-flight",
+          "at": "*"
+        }
+      }
+    },
+    {
+      "operation": "claim",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 2,
+        "request_id": "claim"
+      },
+      "payload": "../../wren/action.json",
+      "expect": {
+        "same_as": 3
+      }
+    },
+    {
+      "operation": "claim",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 2,
+        "request_id": "claim"
+      },
+      "payload": "../payloads/action-changed.json",
+      "expect": {
+        "status": "refused",
+        "revision": 3,
+        "refusal": "request-conflict"
+      }
+    },
+    {
+      "operation": "entry",
+      "entry_id": "wren/mead/days-repeating",
+      "expect": {
+        "status": "ok",
+        "revision": 3,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "experiment_status": "live",
+          "observations": [],
+          "in_flight": [
+            "wren/mead/note-days-repeating"
+          ]
+        }
+      }
+    }
+  ]
+}

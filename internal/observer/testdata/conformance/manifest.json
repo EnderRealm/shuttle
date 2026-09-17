@@ -1,0 +1,10 @@
+{
+  "scenarios": [
+    "append-only-observations.json",
+    "claim-retirement-order.json",
+    "replay-and-conflict.json",
+    "request-id-scope.json",
+    "retirement-wall.json",
+    "stale-revision.json"
+  ]
+}
