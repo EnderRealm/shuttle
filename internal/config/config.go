@@ -83,11 +83,17 @@ type Output struct {
 type Weft struct {
 	Listen                string      `json:"listen"`
 	KeychainItem          string      `json:"keychain_item"`
+	OAuthKeychainItem     string      `json:"oauth_keychain_item"`
 	WorkerBin             string      `json:"worker_bin"`
 	Root                  string      `json:"weft_root"`
 	SegmentTimeoutSeconds int         `json:"segment_timeout_seconds"`
 	Sandbox               WeftSandbox `json:"sandbox"`
 }
+
+// DefaultWeftOAuthKeychainItem names the login-Keychain generic password that
+// holds the long-lived `claude setup-token` token a hosted segment inherits as
+// CLAUDE_CODE_OAUTH_TOKEN, when weft.oauth_keychain_item is unset.
+const DefaultWeftOAuthKeychainItem = "weft-claude-oauth-token"
 
 type WeftSandbox struct {
 	AllowedDomains []string `json:"allowed_domains"`
@@ -183,4 +189,14 @@ func (c *Config) EmailToken() (string, error) {
 // WeftToken resolves the remote service bearer token at daemon start.
 func (c *Config) WeftToken() (string, error) {
 	return keychain.Find(c.Weft.KeychainItem)
+}
+
+// WeftOAuthKeychainItem is the item the hosted segments' Claude OAuth token is
+// read from at launch time: the configured name, else
+// DefaultWeftOAuthKeychainItem.
+func (c *Config) WeftOAuthKeychainItem() string {
+	if c.Weft.OAuthKeychainItem != "" {
+		return c.Weft.OAuthKeychainItem
+	}
+	return DefaultWeftOAuthKeychainItem
 }

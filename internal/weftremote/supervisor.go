@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"shuttle/internal/config"
+	"shuttle/internal/keychain"
 	"shuttle/internal/ledger"
 	"shuttle/internal/sandbox"
 )
@@ -47,6 +48,8 @@ type Supervisor struct {
 	mu       sync.Mutex
 	active   map[string]*activeSegment
 	stopping map[string]bool
+	// findKey is the test seam over keychain.Find; nil reads the real Keychain.
+	findKey func(string) (string, error)
 }
 
 func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger *log.Logger, locks ...*sync.RWMutex) *Supervisor {
@@ -139,6 +142,10 @@ func (s *Supervisor) run(runID string) error {
 	if err := executable(s.cfg.Weft.WorkerBin); err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
+	oauthToken, err := s.oauthToken()
+	if err != nil {
+		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+	}
 	if err := executable(s.cfg.Paths.SRTBin); err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassSandbox, err)
 	}
@@ -157,7 +164,7 @@ func (s *Supervisor) run(runID string) error {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
 	argv := s.argv(run, segment, profilePath, answerPath)
-	env := s.environ(homeDir, runDir)
+	env := s.environ(homeDir, runDir, oauthToken)
 	if err := writeRunRecord(runDir, run, segment, argv, env, 0); err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
@@ -475,13 +482,34 @@ func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, profi
 	return argv
 }
 
-func (s *Supervisor) environ(homeDir, runDir string) []string {
+// oauthToken reads the segment's Claude credential. The coding profile denies
+// ~/Library/Keychains, so the subscription token the CLI keeps in the login
+// Keychain has to reach the worker by environment; the error names the item
+// and never the value.
+func (s *Supervisor) oauthToken() (string, error) {
+	item := s.cfg.WeftOAuthKeychainItem()
+	find := keychain.Find
+	if s.findKey != nil {
+		find = s.findKey
+	}
+	token, err := find(item)
+	if err != nil {
+		return "", fmt.Errorf("weft.oauth_keychain_item: %w", err)
+	}
+	return token, nil
+}
+
+// environ builds the worker's from-scratch environment (§4.1). The OAuth token
+// is the one secret in it: run.json records names only, and nothing else
+// under the run directory is written from this slice.
+func (s *Supervisor) environ(homeDir, runDir, oauthToken string) []string {
 	user := filepath.Base(homeDir)
 	return []string{
 		"PATH=" + workerPath, "HOME=" + homeDir, "USER=" + user, "LOGNAME=" + user,
 		"TMPDIR=" + filepath.Join(runDir, "tmp"), "CLAUDE_CODE_TMPDIR=" + filepath.Join(runDir, "tmp"),
 		"LOOM_HOME=" + s.cfg.Paths.LoomHome, "TZ=" + s.cfg.Timezone, "LANG=en_US.UTF-8",
 		"DISABLE_TELEMETRY=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+		"CLAUDE_CODE_OAUTH_TOKEN=" + oauthToken,
 	}
 }
 

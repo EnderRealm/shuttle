@@ -86,14 +86,15 @@ The full configuration shape, including credential **Keychain item names**, is i
 Agent lookup uses `SHUTTLE_AGENTS_DIR`, then `config.json`'s `agents_dir`, then
 `~/code/shuttle/agents`.
 
-Hosted weft runs add this block; the bearer token itself is a Keychain generic
-password and never appears in the file or launchd plist:
+Hosted weft runs add this block; the bearer token and the Claude OAuth token
+are Keychain generic passwords and never appear in the file or launchd plist:
 
 ```json
 {
   "weft": {
     "listen": "100.101.102.103:7431",
     "keychain_item": "weft-remote-token",
+    "oauth_keychain_item": "weft-claude-oauth-token",
     "worker_bin": "/Users/you/.local/bin/weft-worker",
     "weft_root": "/Users/you/.shuttle/weft",
     "segment_timeout_seconds": 21600,
@@ -108,9 +109,13 @@ password and never appears in the file or launchd plist:
 }
 ```
 
-The daemon refuses a listener outside loopback or `100.64.0.0/10`, and refuses
-each segment before spawning the worker if its coding sandbox cannot be
-generated and preflighted.
+`oauth_keychain_item` (default `weft-claude-oauth-token`) names a login-Keychain
+generic password holding a long-lived token from `claude setup-token`; the daemon
+reads it at each launch and hands it to the segment as `CLAUDE_CODE_OAUTH_TOKEN`,
+because the coding sandbox denies the Keychain where the CLI keeps the
+subscription credential. The daemon refuses a listener outside loopback or
+`100.64.0.0/10`, and refuses each segment before spawning the worker if that item
+is missing or if its coding sandbox cannot be generated and preflighted.
 
 ```sh
 ./shuttle run daily --dry-run

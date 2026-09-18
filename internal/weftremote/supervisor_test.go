@@ -3,6 +3,7 @@ package weftremote
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -49,6 +50,95 @@ func TestSupervisorRunsFixtureWorkerToParkedState(t *testing.T) {
 	events, _ := os.ReadFile(filepath.Join(got.Segments[0].RunDir.String, "events.ndjson"))
 	if !strings.Contains(string(events), `"event":"parked"`) {
 		t.Fatalf("events = %s", events)
+	}
+}
+
+func TestSupervisorHandsSegmentTheOAuthTokenByEnvironmentOnly(t *testing.T) {
+	f := newSupervisorFixture(t, false)
+	run := f.claim(t, "demo/worker")
+	seen := filepath.Join(f.root, "oauth-seen")
+	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, "demo/worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nif [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = '" + fixtureOAuthToken +
+		"' ]; then printf match > " + seen + "; else printf mismatch > " + seen + "; fi\n" +
+		strings.TrimPrefix(fixtureWorkerScript(worktree), "#!/bin/sh\n")
+	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.supervisor.run(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(seen); err != nil || string(data) != "match" {
+		t.Fatalf("worker environment carried the wrong CLAUDE_CODE_OAUTH_TOKEN: %q, %v", data, err)
+	}
+	runDir := run.Segments[0].RunDir.String
+	record, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded struct {
+		Environment []string `json:"environment"`
+	}
+	if err := json.Unmarshal(record, &recorded); err != nil {
+		t.Fatal(err)
+	}
+	if !oneOf("CLAUDE_CODE_OAUTH_TOKEN", recorded.Environment...) {
+		t.Fatalf("run.json environment = %v", recorded.Environment)
+	}
+	err = filepath.WalkDir(runDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), fixtureOAuthToken) {
+			t.Errorf("%s contains the OAuth token value", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSupervisorRefusesLaunchWhenOAuthItemIsMissing(t *testing.T) {
+	f := newSupervisorFixture(t, false)
+	f.cfg.Weft.OAuthKeychainItem = "missing-oauth-item"
+	run := f.claim(t, "demo/oauth-missing")
+	err := f.supervisor.run(run.ID)
+	if err == nil || !strings.Contains(err.Error(), "missing-oauth-item") {
+		t.Fatalf("run error = %v, want the item name", err)
+	}
+	got, err := f.store.GetWeftRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != ledger.WeftPhaseEnded || got.Outcome.String != "failed" ||
+		got.Segments[0].Failure.String != ledger.ClassPreflight {
+		t.Fatalf("run = %+v", got)
+	}
+	row, err := f.store.Get(got.Segments[0].LedgerRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.PID.Valid || !strings.Contains(row.ErrorSignature.String, "missing-oauth-item") {
+		t.Fatalf("segment row = %+v", row)
+	}
+	for _, name := range []string{"run.json", "events.ndjson"} {
+		if _, err := os.Stat(filepath.Join(got.Segments[0].RunDir.String, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s exists: worker launch was reached: %v", name, err)
+		}
+	}
+	if _, err := f.store.ClaimWeft(ledger.WeftLaunch{
+		Ticket: "demo/after-oauth", Project: "demo", Repo: got.Repo,
+		Branch: "demo/after-oauth", Worktree: filepath.Join(f.root, "other"),
+		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
+	}); err != nil {
+		t.Fatalf("oauth refusal did not release repository: %v", err)
 	}
 }
 
@@ -232,6 +322,11 @@ func TestWorkerCannotRunBeforePIDIsDurable(t *testing.T) {
 	}
 }
 
+const (
+	fixtureOAuthItem  = "fixture-oauth-item"
+	fixtureOAuthToken = "sk-ant-oat01-fixture-token-value"
+)
+
 type supervisorFixture struct {
 	root       string
 	store      *ledger.Store
@@ -281,6 +376,7 @@ func newSupervisorFixture(t *testing.T, refuseSandbox bool) *supervisorFixture {
 		},
 		Weft: config.Weft{
 			WorkerBin: worker, Root: filepath.Join(root, "weft"),
+			OAuthKeychainItem:     fixtureOAuthItem,
 			SegmentTimeoutSeconds: 10,
 			Sandbox:               config.WeftSandbox{AllowedDomains: []string{"github.com"}},
 		},
@@ -299,6 +395,12 @@ func newSupervisorFixture(t *testing.T, refuseSandbox bool) *supervisorFixture {
 	}
 	t.Cleanup(func() { store.Close() })
 	supervisor := NewSupervisor(cfg, store, root, log.New(io.Discard, "", 0))
+	supervisor.findKey = func(item string) (string, error) {
+		if item != fixtureOAuthItem {
+			return "", fmt.Errorf("keychain item %q: not found", item)
+		}
+		return fixtureOAuthToken, nil
+	}
 	return &supervisorFixture{root: root, store: store, cfg: cfg, supervisor: supervisor, repo: repo}
 }
 

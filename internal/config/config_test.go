@@ -32,6 +32,7 @@ const sampleConfig = `{
   "weft": {
     "listen": "100.101.102.103:7431",
     "keychain_item": "weft-remote-token",
+    "oauth_keychain_item": "weft-claude-oauth-token",
     "worker_bin": "/Users/steve/.local/bin/weft-worker",
     "weft_root": "/Users/steve/.shuttle/weft",
     "segment_timeout_seconds": 21600,
@@ -89,6 +90,7 @@ func TestLoad(t *testing.T) {
 		t.Errorf("email.keychain_item = %q", c.Email.KeychainItem)
 	}
 	if c.Weft.Listen != "100.101.102.103:7431" || c.Weft.KeychainItem != "weft-remote-token" ||
+		c.Weft.OAuthKeychainItem != "weft-claude-oauth-token" ||
 		c.Weft.SegmentTimeoutSeconds != 21600 || len(c.Weft.Sandbox.AllowWrite) != 1 {
 		t.Errorf("weft = %+v", c.Weft)
 	}
@@ -152,5 +154,16 @@ func TestAgentsDirPrecedence(t *testing.T) {
 	}
 	if got != "/tmp/agents" {
 		t.Errorf("AgentsDir = %q, want the environment override", got)
+	}
+}
+
+func TestWeftOAuthKeychainItemDefaults(t *testing.T) {
+	c := &Config{}
+	if got := c.WeftOAuthKeychainItem(); got != DefaultWeftOAuthKeychainItem {
+		t.Errorf("unset item = %q, want %q", got, DefaultWeftOAuthKeychainItem)
+	}
+	c.Weft.OAuthKeychainItem = "custom-item"
+	if got := c.WeftOAuthKeychainItem(); got != "custom-item" {
+		t.Errorf("configured item = %q", got)
 	}
 }
