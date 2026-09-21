@@ -56,7 +56,7 @@ type observerObservationReceipt struct {
 type observerApplied struct {
 	NotebookRevision int64                        `json:"notebook_revision"`
 	Observations     []observerObservationReceipt `json:"observations"`
-	Actions          []*observercontract.Action   `json:"actions_retained"`
+	Actions          []observerActionRecord       `json:"actions"`
 	Report           *output.Applied              `json:"report,omitempty"`
 	DeliveryStatus   string                       `json:"delivery_status"`
 	DeliveryError    string                       `json:"delivery_error,omitempty"`
@@ -68,6 +68,9 @@ type observerResultRecord struct {
 	AssessmentStatus string `json:"assessment_status"`
 	AssessmentCount  int    `json:"assessment_count"`
 	ActionCount      int    `json:"action_count"`
+	ActionsApplied   int    `json:"actions_applied"`
+	ActionsRefused   int    `json:"actions_refused"`
+	ActionsFailed    int    `json:"actions_failed"`
 	NotebookStatus   string `json:"notebook_status"`
 	NotebookRevision int64  `json:"notebook_revision"`
 	Silent           *bool  `json:"silent,omitempty"`
@@ -250,33 +253,11 @@ func (p *Pipeline) applyObserverAssessments(ctx context.Context, runID, runDir s
 	applied := &observerApplied{
 		NotebookRevision: state.Snapshot.Revision,
 		Observations:     []observerObservationReceipt{},
-		Actions:          append([]*observercontract.Action{}, out.Actions...),
+		Actions:          newObserverActionRecords(out.Actions),
 		DeliveryStatus:   ledger.DeliveryPending,
 	}
 	for i, assessment := range out.Assessments {
-		requestID := fmt.Sprintf("%s-assessment-%03d", runID, i+1)
-		revision := state.Snapshot.Revision + int64(i)
-		request := observercontract.Request{
-			Identity: state.Definition.Identity, Revision: revision, RequestID: requestID,
-		}
-		_, err := state.Notebook.Record(ctx, request, assessment)
-		if err != nil && !errors.Is(err, observercontract.ErrStaleRevision) &&
-			!errors.Is(err, observercontract.ErrRetired) &&
-			!errors.Is(err, observercontract.ErrRequestConflict) {
-			// The adapter may have committed before its process failed. Replay
-			// the identical request id and revision once; conforming adapters
-			// return the original outcome without a duplicate observation.
-			_, err = state.Notebook.Record(ctx, request, assessment)
-		}
-		if err != nil {
-			_ = writeObserverApplied(p, runID, runDir, applied)
-			return applied, fmt.Errorf("record assessment %d with request %s: %w", i, requestID, err)
-		}
-		applied.Observations = append(applied.Observations, observerObservationReceipt{
-			RequestID: requestID, EntryID: assessment.EntryID(), RevisionBefore: revision,
-		})
-		applied.NotebookRevision = revision + 1
-		if err := writeObserverApplied(p, runID, runDir, applied); err != nil {
+		if err := p.recordObserverAssessment(ctx, runID, runDir, state, applied, i, assessment); err != nil {
 			return applied, err
 		}
 	}
@@ -289,6 +270,55 @@ func (p *Pipeline) applyObserverAssessments(ctx context.Context, runID, runDir s
 		return applied, err
 	}
 	return applied, nil
+}
+
+// assessmentRequestID is the request id assessment index of a run is recorded
+// under, live or replayed by a reconciliation.
+func assessmentRequestID(runID string, index int) string {
+	return fmt.Sprintf("%s-assessment-%03d", runID, index+1)
+}
+
+// recordObserverAssessment records one assessment under its position's
+// request id and revision, then appends the receipt an action authorized by
+// it is admitted on. The live apply and a reconciliation replaying a record
+// that never landed share this step, so a replay carries the same id and
+// revision the run would have.
+func (p *Pipeline) recordObserverAssessment(ctx context.Context, runID, runDir string, state *observerRunState, applied *observerApplied, index int, assessment *observercontract.Assessment) error {
+	requestID := assessmentRequestID(runID, index)
+	revision := state.Snapshot.Revision + int64(index)
+	request := observercontract.Request{
+		Identity: state.Definition.Identity, Revision: revision, RequestID: requestID,
+	}
+	_, err := state.Notebook.Record(ctx, request, assessment)
+	if err != nil && !errors.Is(err, observercontract.ErrStaleRevision) &&
+		!errors.Is(err, observercontract.ErrRetired) &&
+		!errors.Is(err, observercontract.ErrRequestConflict) {
+		// The adapter may have committed before its process failed. Replay
+		// the identical request id and revision once; conforming adapters
+		// return the original outcome without a duplicate observation.
+		_, err = state.Notebook.Record(ctx, request, assessment)
+	}
+	if err != nil {
+		_ = writeObserverApplied(p, runID, runDir, applied)
+		return fmt.Errorf("record assessment %d with request %s: %w", index, requestID, err)
+	}
+	applied.Observations = append(applied.Observations, observerObservationReceipt{
+		RequestID: requestID, EntryID: assessment.EntryID(), RevisionBefore: revision,
+	})
+	applied.NotebookRevision = revision + 1
+	return writeObserverApplied(p, runID, runDir, applied)
+}
+
+// observationRecorded reports whether the assessment's record receipt is in
+// the durable apply record: the notebook admitted it under the request id its
+// position derives.
+func observationRecorded(applied *observerApplied, requestID string) bool {
+	for _, receipt := range applied.Observations {
+		if receipt.RequestID == requestID {
+			return true
+		}
+	}
+	return false
 }
 
 func writeObserverApplied(p *Pipeline, runID, runDir string, applied *observerApplied) error {

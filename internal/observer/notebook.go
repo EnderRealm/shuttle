@@ -166,7 +166,7 @@ func (m *Memory) Record(req Request, a *Assessment) (*Entry, error) {
 	if a.Evidence.Subject != subject {
 		return nil, fieldErr("evidence.subject", "%s %s, the entry is about %s %s", a.Evidence.Subject.Kind, a.Evidence.Subject.Instance, subject.Kind, subject.Instance)
 	}
-	if err := checkRequirements(e, a); err != nil {
+	if err := CheckRequirements(e, a); err != nil {
 		return nil, err
 	}
 	state, err := TransitionFrom(e.State, a.Outcome)
@@ -215,7 +215,7 @@ func (m *Memory) Claim(req Request, act *Action) (*Receipt, error) {
 		return nil, err
 	}
 	if held, ok := m.receipts[act.ID]; ok {
-		return nil, fieldErr("id", "%q is already %s", act.ID, held.Status)
+		return nil, &Error{Field: "id", Err: fmt.Errorf("%q is already %s: %w", act.ID, held.Status, ErrActionHeld)}
 	}
 	rec := &Receipt{
 		Envelope: Envelope{ContractVersion: ContractVersion},
@@ -409,12 +409,14 @@ func (r Request) validate(owner Identity) error {
 	return nil
 }
 
-// checkRequirements holds a conclusive outcome to what the experiment declared.
+// CheckRequirements holds a conclusive outcome to what the experiment declared.
 // This is the rule shuttle supplies rather than the adapter: a "no effect" read
 // before the change was live, over too short a window, or over fewer
 // opportunities than the experiment asked for, is insufficient-evidence wearing
-// a label it did not earn.
-func checkRequirements(e *Entry, a *Assessment) error {
+// a label it did not earn. It is exported because the runner re-runs it against
+// its own snapshot before an absence is allowed to reopen a ticket: the adapter
+// is domain-owned, and shuttle does not take its word that the rule was applied.
+func CheckRequirements(e *Entry, a *Assessment) error {
 	if a.Outcome == OutcomeInsufficient {
 		return nil
 	}

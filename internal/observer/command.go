@@ -187,7 +187,7 @@ func validateAssessmentAgainstEntry(entry *Entry, assessment *Assessment) error 
 			assessment.Evidence.Subject.Kind, assessment.Evidence.Subject.Instance,
 			entry.subject().Kind, entry.subject().Instance)
 	}
-	return checkRequirements(entry, assessment)
+	return CheckRequirements(entry, assessment)
 }
 
 func (c CommandNotebook) Claim(ctx context.Context, req Request, action *Action) (*Receipt, error) {
@@ -401,6 +401,8 @@ func refusalForExit(code int) error {
 		return ErrNotClaimed
 	case 14:
 		return ErrRequestConflict
+	case 15:
+		return ErrActionHeld
 	default:
 		return nil
 	}

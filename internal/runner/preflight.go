@@ -98,7 +98,7 @@ func (p Preflight) Check(ctx context.Context, def *agentdef.Definition, runDir s
 			if err != nil {
 				return err
 			}
-			if err := validateObserverRegistration(registration, def.Manifest.Runtime.Kind); err != nil {
+			if err := validateObserverRegistration(registration, def.Manifest.Runtime.Kind, p.Config.Paths.TKConfig); err != nil {
 				return err
 			}
 			return validateObserverDeniedReads(p.Config, runDir)

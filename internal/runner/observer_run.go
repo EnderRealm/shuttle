@@ -60,26 +60,17 @@ func (p *Pipeline) runObserver(
 		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
 	}
 	applied, err := p.applyObserverAssessments(ctx, row.ID, run.Dir, state, validated)
+	if err == nil {
+		err = p.applyObserverActions(ctx, row.ID, run.Dir, state, validated, applied)
+	}
 	if err != nil {
-		_ = writeObserverResult(run.Dir, observerResultRecord{
-			Collection: state.Collection.Status, EvidenceCount: len(state.Collection.Evidence),
-			AssessmentStatus: "validated", AssessmentCount: len(validated.Assessments),
-			ActionCount: len(validated.Actions), NotebookStatus: "conflict-or-failure",
-			NotebookRevision: applied.NotebookRevision, Silent: &validated.Silent,
-			Report: len(validated.Report) > 0, Detail: err.Error(),
-		})
+		_ = writeObserverResult(run.Dir, observerOutcome(state, validated, applied, "conflict-or-failure", err.Error()))
 		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
 	}
 	if err := p.prepareObserverReport(def, row, run, opts, validated, applied); err != nil {
 		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
 	}
-	if err := writeObserverResult(run.Dir, observerResultRecord{
-		Collection: state.Collection.Status, EvidenceCount: len(state.Collection.Evidence),
-		AssessmentStatus: assessmentStatus(validated), AssessmentCount: len(validated.Assessments),
-		ActionCount: len(validated.Actions), NotebookStatus: "applied",
-		NotebookRevision: applied.NotebookRevision, Silent: &validated.Silent,
-		Report: len(validated.Report) > 0,
-	}); err != nil {
+	if err := writeObserverResult(run.Dir, observerOutcome(state, validated, applied, "applied", "")); err != nil {
 		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
 	}
 
@@ -98,6 +89,18 @@ func (p *Pipeline) runObserver(
 		return runResult, fmt.Errorf("observer delivery: %w", err)
 	}
 	return runResult, nil
+}
+
+func observerOutcome(state *observerRunState, out *validatedObserverOutput, applied *observerApplied, notebookStatus, detail string) observerResultRecord {
+	result := observerResultRecord{
+		Collection: state.Collection.Status, EvidenceCount: len(state.Collection.Evidence),
+		AssessmentStatus: assessmentStatus(out), AssessmentCount: len(out.Assessments),
+		ActionCount: len(out.Actions), NotebookStatus: notebookStatus,
+		NotebookRevision: applied.NotebookRevision, Silent: &out.Silent,
+		Report: len(out.Report) > 0, Detail: detail,
+	}
+	result.ActionsApplied, result.ActionsRefused, result.ActionsFailed = observerActionCounts(applied.Actions)
+	return result
 }
 
 func assessmentStatus(out *validatedObserverOutput) string {

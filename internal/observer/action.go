@@ -1,15 +1,27 @@
 package observer
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
-// Action kinds. Both are proposals about a ticket and neither writes one: the
+// Action kinds. All three are proposals about a ticket and none writes one: the
 // notebook admits the proposal and records its receipt, and the store that owns
 // tickets is a different store with its own failure mode. That is why admission
-// and the write are ordered rather than transactional.
+// and the write are ordered rather than transactional. A reopen is its own kind
+// rather than a consequence of an outcome, so the guarded proposal is explicit
+// in the record and never implied from an assessment.
 const (
-	ActionTicketNote = "ticket-note"
-	ActionTicketOpen = "ticket-open"
+	ActionTicketNote   = "ticket-note"
+	ActionTicketOpen   = "ticket-open"
+	ActionTicketReopen = "ticket-reopen"
 )
+
+// maxTitleRunes bounds the title a ticket-open proposal carries. It becomes
+// the ticket's title verbatim, and tk does not check its shape.
+const maxTitleRunes = 120
 
 // Receipt statuses.
 const (
@@ -28,7 +40,8 @@ const (
 // domain and observer like an entry id, so two observers writing about the same
 // ticket cannot collide on one receipt. QuestionID is the entry the action
 // belongs to, which for an entry opened by an unprompted finding is that
-// finding's id.
+// finding's id. Title is the ticket a ticket-open proposal would create; the
+// finding's prose is a question, not a title.
 type Action struct {
 	Envelope
 	Identity   Identity `json:"identity"`
@@ -36,6 +49,7 @@ type Action struct {
 	QuestionID string   `json:"question_id"`
 	Kind       string   `json:"kind"`
 	Ticket     string   `json:"ticket"`
+	Title      string   `json:"title,omitempty"`
 	Body       string   `json:"body"`
 	Evidence   []Source `json:"evidence"`
 }
@@ -67,15 +81,36 @@ func (a *Action) validate() error {
 	if err := checkQualified("question_id", a.QuestionID, a.Identity); err != nil {
 		return err
 	}
-	if a.Kind != ActionTicketNote && a.Kind != ActionTicketOpen {
-		return fieldErr("kind", "%q, one of %s, %s", a.Kind, ActionTicketNote, ActionTicketOpen)
-	}
-	// A note goes on an existing ticket; opening one has no ticket yet.
-	if a.Kind == ActionTicketNote && a.Ticket == "" {
-		return fieldErr("ticket", "required for %s", ActionTicketNote)
-	}
-	if a.Kind == ActionTicketOpen && a.Ticket != "" {
-		return fieldErr("ticket", "%q, but %s opens one", a.Ticket, ActionTicketOpen)
+	switch a.Kind {
+	case ActionTicketNote, ActionTicketReopen:
+		// A note or a reopen goes on an existing ticket.
+		if a.Ticket == "" {
+			return fieldErr("ticket", "required for %s", a.Kind)
+		}
+		if a.Title != "" {
+			return fieldErr("title", "%q, but %s writes to an existing ticket", a.Title, a.Kind)
+		}
+	case ActionTicketOpen:
+		// Opening one has no ticket yet, and needs a title to open it under.
+		if a.Ticket != "" {
+			return fieldErr("ticket", "%q, but %s opens one", a.Ticket, ActionTicketOpen)
+		}
+		if a.Title == "" {
+			return fieldErr("title", "required for %s: the title of the ticket to open", ActionTicketOpen)
+		}
+		if strings.ContainsAny(a.Title, "\r\n") {
+			return fieldErr("title", "contains a newline; a ticket title is one line")
+		}
+		if utf8.RuneCountInString(a.Title) > maxTitleRunes {
+			return fieldErr("title", "is longer than %d characters", maxTitleRunes)
+		}
+		for _, r := range a.Title {
+			if !unicode.IsPrint(r) {
+				return fieldErr("title", "contains unprintable character %q", r)
+			}
+		}
+	default:
+		return fieldErr("kind", "%q, one of %s, %s, %s", a.Kind, ActionTicketNote, ActionTicketOpen, ActionTicketReopen)
 	}
 	if a.Body == "" {
 		return fieldErr("body", "required")

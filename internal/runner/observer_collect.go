@@ -19,6 +19,7 @@ import (
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
 	observercontract "shuttle/internal/observer"
+	"shuttle/internal/provider/tkconfig"
 )
 
 const (
@@ -47,8 +48,11 @@ evidence into an absence finding. An unexpected, evidence-backed observation
 may carry a Finding instead of question_id.
 
 You have no shell and no access to the domain stores. Write nothing outside out/.
-The harness validates and records assessments; it retains actions but does not
-apply ticket changes.
+The harness validates and records assessments, then applies actions only within
+the operator's configured ticket scope: a note or reopen must name the entry's
+own ticket and be authorized by this run's assessment of that entry, and a
+ticket-open must carry a title and a finding. Anything else is refused after
+you exit.
 `
 
 type observerDefinition struct {
@@ -93,11 +97,12 @@ type validatedCollection struct {
 }
 
 type observerRunState struct {
-	Definition *observerDefinition
-	Notebook   observercontract.CommandNotebook
-	Snapshot   observerSnapshot
-	Collection *validatedCollection
-	StagingDir string
+	Registration config.Observer
+	Definition   *observerDefinition
+	Notebook     observercontract.CommandNotebook
+	Snapshot     observerSnapshot
+	Collection   *validatedCollection
+	StagingDir   string
 }
 
 type observerCollectionError struct {
@@ -133,7 +138,7 @@ func observerRegistration(cfg *config.Config, def *agentdef.Definition) (config.
 	return registration, nil
 }
 
-func validateObserverRegistration(registration config.Observer, runtimeKind string) error {
+func validateObserverRegistration(registration config.Observer, runtimeKind, tkConfig string) error {
 	if registration.DataPolicy == "local-only" && runtimeKind == "claude" {
 		return fmt.Errorf("data_policy %q cannot use cloud runtime %q", registration.DataPolicy, runtimeKind)
 	}
@@ -177,7 +182,49 @@ func validateObserverRegistration(registration config.Observer, runtimeKind stri
 	if registration.TimeoutSeconds <= 0 || registration.TimeoutSeconds > 300 {
 		return fmt.Errorf("timeout_seconds: %d, must be between 1 and 300", registration.TimeoutSeconds)
 	}
+	if registration.Tickets != nil {
+		return validateObserverTickets(registration.Tickets, tkConfig)
+	}
 	return nil
+}
+
+// validateObserverTickets checks the ticket write scope and that the tk store
+// it names can be opened: a scope that names projects nothing can write to is
+// a refusal before the model runs, not a refused action after it.
+func validateObserverTickets(tickets *config.ObserverTickets, tkConfig string) error {
+	if len(tickets.Projects) == 0 {
+		return errors.New("tickets.projects: at least one project is required")
+	}
+	projects := make(map[string]bool, len(tickets.Projects))
+	for i, project := range tickets.Projects {
+		if project == "" || strings.Contains(project, "/") {
+			return fmt.Errorf("tickets.projects[%d]: %q is not a project name", i, project)
+		}
+		projects[project] = true
+	}
+	if !projects[tickets.DiscoveryProject] {
+		return fmt.Errorf("tickets.discovery_project: %q is not one of tickets.projects", tickets.DiscoveryProject)
+	}
+	if tickets.MaxDiscoveries < 0 {
+		return fmt.Errorf("tickets.max_discoveries: %d, must not be negative", tickets.MaxDiscoveries)
+	}
+	if !filepath.IsAbs(tkConfig) {
+		return fmt.Errorf("tickets: paths.tk_config %q must be an absolute path to the tk config", tkConfig)
+	}
+	if _, err := tkconfig.Load(tkConfig); err != nil {
+		return fmt.Errorf("tickets: paths.tk_config: %w", err)
+	}
+	return nil
+}
+
+// newObserverNotebook is the subprocess notebook client for one registration.
+// The run and the reconciliation of its actions build it the same way, so a
+// replay after a restart reaches the same adapter under the same environment.
+func newObserverNotebook(registration config.Observer, env []string) observercontract.CommandNotebook {
+	return observercontract.CommandNotebook{
+		Argv: registration.Notebook.Argv, Dir: registration.Notebook.WorkingDir,
+		Env: env, Timeout: time.Duration(registration.TimeoutSeconds) * time.Second,
+	}
 }
 
 func (p *Pipeline) collectObserver(ctx context.Context, def *agentdef.Definition, run *preparedRun, slot time.Time) (*observerRunState, error) {
@@ -185,7 +232,7 @@ func (p *Pipeline) collectObserver(ctx context.Context, def *agentdef.Definition
 	if err != nil {
 		return nil, err
 	}
-	if err := validateObserverRegistration(registration, def.Manifest.Runtime.Kind); err != nil {
+	if err := validateObserverRegistration(registration, def.Manifest.Runtime.Kind, p.Config.Paths.TKConfig); err != nil {
 		return nil, &observerCollectionError{Status: "invalid-configuration", Err: err}
 	}
 	rawDefinition, definition, definitionID, err := loadObserverDefinition(registration.Definition)
@@ -207,10 +254,7 @@ func (p *Pipeline) collectObserver(ctx context.Context, def *agentdef.Definition
 	}
 
 	env := domainCommandEnv(p.HomeDir, run.Loc)
-	notebook := observercontract.CommandNotebook{
-		Argv: registration.Notebook.Argv, Dir: registration.Notebook.WorkingDir,
-		Env: env, Timeout: time.Duration(registration.TimeoutSeconds) * time.Second,
-	}
+	notebook := newObserverNotebook(registration, env)
 	snapshot, err := snapshotNotebook(ctx, notebook, definition.Questions)
 	if err != nil {
 		return nil, &observerCollectionError{Status: "notebook-failed", Err: fmt.Errorf("observer notebook snapshot: %w", err)}
@@ -258,7 +302,7 @@ func (p *Pipeline) collectObserver(ctx context.Context, def *agentdef.Definition
 	}
 	complete = true
 	return &observerRunState{
-		Definition: definition, Notebook: notebook,
+		Registration: registration, Definition: definition, Notebook: notebook,
 		Snapshot: snapshot, Collection: collection, StagingDir: stagingDir,
 	}, nil
 }

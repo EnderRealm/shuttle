@@ -1,0 +1,21 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "mead",
+    "domain": "wren"
+  },
+  "id": "wren/mead/open-narrowing-days",
+  "question_id": "wren/mead/narrowing-days",
+  "kind": "ticket-open",
+  "body": "The cross-window overlap has narrowed over three consecutive weeks with no change registered against it.",
+  "evidence": [
+    {
+      "kind": "sqlite",
+      "ref": "wren.sqlite#activities"
+    },
+    {
+      "kind": "notebook",
+      "ref": "wren/mead/narrowing-days"
+    }
+  ]
+}

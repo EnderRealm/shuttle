@@ -28,6 +28,11 @@ var (
 	// request id identifies one decision; reusing it for another is refused
 	// rather than applied, or a replay could not be told from a new write.
 	ErrRequestConflict = errors.New("the request id was applied with different content")
+
+	// ErrActionHeld means the action id is already in flight or settled. An
+	// action id identifies one proposal; a new proposal is claimed under its
+	// own id rather than a second claim of one the notebook already holds.
+	ErrActionHeld = errors.New("the action id is already held")
 )
 
 // Request is the envelope every mutation carries.

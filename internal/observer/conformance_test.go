@@ -389,6 +389,8 @@ func conformanceRefusal(err error) (string, bool) {
 		return "not-claimed", true
 	case errors.Is(err, ErrRequestConflict):
 		return "request-conflict", true
+	case errors.Is(err, ErrActionHeld):
+		return "action-held", true
 	default:
 		return "", false
 	}

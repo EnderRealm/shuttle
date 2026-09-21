@@ -30,7 +30,7 @@ guessed at from its shape.
 | Experiment | a change's declared effect, its activation, the window and opportunity it needs, and the readings and baseline it will be judged by | a person, a worker or the observer, recorded in `author` | into the notebook from its author |
 | Bundle | recorded fact: readings over an explicit window, from named sources, out of a named snapshot, with what could not be read | the observer | written into the notebook |
 | Assessment | one outcome and one prose interpretation, carrying the bundle it was drawn from; an unprompted assessment also carries the finding that opens its entry | the observer | written into the notebook |
-| Action | ticket-facing feedback under a stable id | the observer | out toward the ticket store, as a proposal |
+| Action | ticket-facing feedback under a stable id: a `ticket-note` on the entry's ticket, a `ticket-reopen` of it, or a `ticket-open` carrying the title of a ticket to create | the observer | out toward the ticket store, as a proposal (§11) |
 | Receipt | what became of an action, under that same id | the observer, recording what the far store did | back from that store: `applied`, `refused` or `failed`, with its reference |
 
 `author` is a kind from a fixed vocabulary — `human`, `worker`, `observer` — and an
@@ -270,6 +270,7 @@ stderr may contain a diagnostic:
 | 12 | missing entry (`ErrNoEntry`) |
 | 13 | action was not claimed (`ErrNotClaimed`) |
 | 14 | request id reused with changed content (`ErrRequestConflict`) |
+| 15 | action id already held (`ErrActionHeld`) — a claim under an id already in flight or settled |
 
 Exit 0 means stdout holds the successful response. Exit 1 is an adapter or
 storage failure, not a contract refusal. A signal, timeout, malformed stdout,
@@ -317,8 +318,8 @@ A scenario has a name and ordered steps:
 
 Each step names one of the transport operations and the outcome it must
 produce. `status` is `ok` or `refused`; a refusal also names one of
-`stale-revision`, `retired`, `no-entry`, `not-claimed` or
-`request-conflict`. `revision` is the notebook revision after the operation.
+`stale-revision`, `retired`, `no-entry`, `not-claimed`, `request-conflict`
+or `action-held`. `revision` is the notebook revision after the operation.
 Entry expectations project the stable protocol facts used by these scenarios:
 `id`, `state`, optional `experiment_status`, ordered observations as `at` and
 `outcome`, and ordered `in_flight` ids. Receipt and retirement expectations use
@@ -356,11 +357,25 @@ in model-authored output or the agent prompt:
       "data_policy": "cloud",
       "deny_read": ["/absolute/domain/store"],
       "max_model_input_bytes": 65536,
-      "timeout_seconds": 60
+      "timeout_seconds": 60,
+      "tickets": {
+        "projects": ["shuttle"],
+        "discovery_project": "shuttle",
+        "max_discoveries": 1
+      }
     }
   }
 }
 ```
+
+`tickets` is the observer's ticket write scope and is optional. `projects` names
+the tk projects its notes and reopens may land in; `discovery_project`, one of
+them, is where a discovery is created; `max_discoveries` caps the tickets one
+run may create, and `0` refuses discoveries outright. When the block is present
+`paths.tk_config` must be an absolute path to a loadable tk config, since the
+store is opened from its `central_root` the way the tk providers open it. A
+registration without the block applies nothing: every action is retained and
+refused with the reason `ticket output is not configured for this observer`.
 
 Both commands are executed directly as argv, never through a shell, from their
 declared working directories and with a minimal environment. A registration
@@ -403,8 +418,8 @@ The first carries required `silent`, plus Assessment and proposed Action
 arrays; a non-silent run configured for email also carries a printable
 `subject` of at most 120 characters. An assessment is accepted only when its
 evidence is byte-equivalent after canonical JSON encoding to a collector
-bundle. An action is retained but not claimed or applied to tk in this
-component. Its evidence references must come from the same collection.
+bundle. An action's evidence references must come from the same collection;
+what becomes of the action after the model exits is §11.
 Delivery retry reads the original output capabilities retained in `run.json`;
 turning email on in a later agent definition cannot promote a historical
 file-only report into a message it was never validated to send.
@@ -415,7 +430,102 @@ and revision are replayed once after an uncertain adapter failure. Stale
 revisions, retired entries and changed content under a request id are surfaced;
 none is rewritten against a newer revision. `observer-result.json`,
 `observer/validated.json` and `applied.json` retain the collection outcome,
-validated output, request ids, revisions, proposed actions and optional report
-application. This is why an empty collection, unavailable source, invalid
-payload, collection failure and deliberate model silence remain different
-facts after the run.
+validated output, request ids, revisions, the per-action apply record and
+optional report application. This is why an empty collection, unavailable
+source, invalid payload, collection failure and deliberate model silence
+remain different facts after the run.
+
+## 11. Ticket actions
+
+After the assessments are recorded, shuttle applies the validated actions
+through tk's conditional action protocol — `ApplyAction` under a stable action
+id held against a precondition read from the ticket, and `CreateDiscovery`
+under a finding key — never through ordinary note or status calls, which
+cannot promise a lost response is not a second write. Authorization is
+decided by shuttle from the retained snapshot and this run's assessments
+alone; nothing in source prose, ticket text or a writer's `source` label can
+widen it, target another ticket, or stand in for a person's decision.
+
+- **Authorization.** Exactly one assessment in the run must be about the
+  action's entry, and `insufficient-evidence` authorizes nothing. A note or
+  reopen must name a standing question's own ticket — the experiment's, else
+  the question's — in a configured project; a finding opened this run has no
+  ticket and takes no note. A note follows a confirmation or an absence and
+  never changes status. A reopen needs `effect-absent-with-sufficient-opportunity`,
+  a live experiment, and the §3 sufficiency rule re-run by shuttle against the
+  snapshot entry; a pending activation, an incompatible baseline, a short
+  window or too few opportunities refuses it. A discovery needs a finding, a
+  title, and room under `max_discoveries`. An action is applied only after
+  its authorizing assessment's record receipt — the request id the notebook
+  admitted it under — is in `applied.json`; without one the action is held
+  as failed, never written.
+- **Order.** Authorize; read the store once (a reopen needs its ticket `done` —
+  `closed` is a decision and is not reopened; a discovery looks for the ticket
+  already holding its finding key, else a related one); claim in the notebook;
+  write to tk; settle the receipt. What was read — the ticket precondition, or
+  the prior or related ticket — is persisted with the claim's request id before
+  the claim is attempted, and every retry of the claim and the write is held
+  against exactly that value, never a re-read, so a ticket edited after the
+  read is refused by tk as changed even when the claim's response was lost.
+  `ErrRetired` on the claim refuses the action with no tk write, and so does
+  `ErrActionHeld`: an action id the notebook already holds, from an earlier
+  run's proposal on the same question, is refused rather than claimed again,
+  and a new proposal needs its own id. A mechanical failure ahead of the claim
+  (an unreadable ticket, a notebook that moved twice) records `failed` and
+  leaves the action at its stage for reconciliation, as does a claim the
+  adapter still fails after its replay; the remaining actions are driven
+  before the run fails. Every stage is recorded in `applied.json` with the
+  reason for a refusal or failure, and `observer-result.json` counts applied,
+  refused and failed.
+- **The reopen cap.** Every reopen is written under the fixed tk action id
+  `observer-reopen`. tk keeps one receipt per id in the ticket file, so a
+  second proposal carrying a different note is refused by the ticket itself,
+  across questions and runs, and the refusal is recorded. The cap is durable in
+  the ticket and replicates with it.
+- **Discovery.** A finding key already claimed in the project is answered by
+  the key — the same content replays, different content is refused. Otherwise
+  the discovery project is searched for a related ticket: one whose title
+  shares at least two whole-word terms of four or more characters with the
+  proposal's title and the finding's question (a heuristic, not an
+  exactly-once guarantee; body and note text do not count). One found receives
+  the evidence as a note under the action id instead of a new ticket. A created
+  ticket is `backlog`, tagged `observer`, and carries the finding's question and
+  the proposal as its description, its consequence as an unverifiable criterion,
+  and an evidence section. Its title is one printable line of at most 120
+  characters, refused at validation otherwise. Capacity under
+  `max_discoveries` is reserved at the decision, not the write: a discovery
+  counts from the moment its persisted decision is a creation — no prior
+  ticket holding the key, no related ticket — whether its claim is still
+  unresolved or its write has landed, so a later discovery in the same run is
+  refused while an earlier one is unresolved; a related note and an earlier
+  run's ticket do not count.
+- **Notes are the whole write surface.** Every note is composed by shuttle from
+  validated fields — identity, entry, outcome, run, the proposal's prose and
+  the evidence references. No path edits a description, acceptance criteria or
+  design, on any ticket. A line of the prose that tk's format would read as
+  structure — a `## ` heading, or a `**<RFC3339>**` note delimiter — is
+  escaped with a backslash before it is written, so it reads back as text and
+  the evidence and criteria composed after it survive the next write; line
+  endings are normalised the way tk's scanner reads them (`\r\n` and `\r` to
+  `\n`) before those lines are found. The discovery's criterion and every
+  evidence value — source kind and reference, window bounds, timezone,
+  snapshot — are written as one literal line with every line break collapsed
+  to a space, so none of them can open a heading, a delimiter, a further
+  criterion or a `verify:` command.
+- **Reconciliation.** Claim and settle carry request ids derived from the run
+  id and action position; tk writes carry the action id or finding key. A run
+  that lost a response, or died between stages, is resumed from the recorded
+  stage by `ReconcileObserverActions`: a claim or settle replays under its id,
+  a tk write that landed is answered `Replayed`, and a conflict — a moved
+  precondition, a different note under the reopen id — is recorded as refused
+  rather than written over. The destination is bound at the decision: the
+  tk store root and, for a discovery, the project are persisted with the
+  record before the claim, and a resume whose registration now names another
+  store or `discovery_project` does not redirect the write; it records the
+  action `failed` with both destinations and leaves it for a person. An
+  assessment without a record receipt is replayed first under its original
+  request id; one the notebook still refuses is reported as the failure it is
+  and its action stays unadmitted.
+- **Retirement.** §6's ordering holds at the apply layer: a retirement ahead of
+  the claim refuses it, and one behind it reports the action in flight while
+  the write lands and settles under its own id, leaving the question retired.

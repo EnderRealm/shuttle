@@ -108,6 +108,9 @@ func TestInvalidFixturesNameTheField(t *testing.T) {
 		"action-no-body.json":                            "body",
 		"action-no-evidence.json":                        "evidence",
 		"action-foreign-id.json":                         "id",
+		"action-unknown-kind.json":                       "kind",
+		"action-open-no-title.json":                      "title",
+		"action-open-multiline-title.json":               "title",
 	}
 	entries, err := os.ReadDir(filepath.Join("testdata", "invalid"))
 	if err != nil {

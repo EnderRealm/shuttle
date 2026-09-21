@@ -22,22 +22,41 @@ import (
 )
 
 // observerNotebookState is the stand-in adapter's store: a request log keyed
-// by observer-scoped request id, the entry each request returned, and the
-// current entries by id. CrashOnce makes the next record commit and then exit
-// without a response, the uncertain outcome the runner replays.
+// by observer-scoped request id, the response each request produced, the
+// current entries by id, and the claimed actions with their receipts. The
+// knobs stand in for what a real adapter meets: CrashOnce makes the next
+// record commit and then exit without a response, the uncertain outcome the
+// runner replays; CrashClaim and FailSettle drop that many claim and settle
+// responses (a claim commits before it is dropped, a settle does not);
+// StaleClaim refuses that many claims as stale without committing, the
+// notebook moving under the runner each time it re-reads the revision;
+// RetireBeforeClaim and RetireAfterClaim serialize a retirement of the named
+// entry just ahead of or just behind the next claim; TouchOnClaim appends to
+// the named file while the claim is admitted, a worker editing the ticket
+// between the runner's read and its write.
 type observerNotebookState struct {
-	Revision  int64                      `json:"revision"`
-	Records   int                        `json:"records"`
-	CrashOnce bool                       `json:"crash_once,omitempty"`
-	Requests  map[string]json.RawMessage `json:"requests"`
-	Responses map[string]json.RawMessage `json:"responses"`
-	Entries   map[string]json.RawMessage `json:"entries"`
+	Revision          int64                      `json:"revision"`
+	Records           int                        `json:"records"`
+	CrashOnce         bool                       `json:"crash_once,omitempty"`
+	CrashClaim        int                        `json:"crash_claim,omitempty"`
+	StaleClaim        int                        `json:"stale_claim,omitempty"`
+	FailSettle        int                        `json:"fail_settle,omitempty"`
+	RetireBeforeClaim string                     `json:"retire_before_claim,omitempty"`
+	RetireAfterClaim  string                     `json:"retire_after_claim,omitempty"`
+	TouchOnClaim      string                     `json:"touch_on_claim,omitempty"`
+	Requests          map[string]json.RawMessage `json:"requests"`
+	Responses         map[string]json.RawMessage `json:"responses"`
+	Entries           map[string]json.RawMessage `json:"entries"`
+	Actions           map[string]json.RawMessage `json:"actions"`
+	Receipts          map[string]json.RawMessage `json:"receipts"`
+	Retirements       map[string]json.RawMessage `json:"retirements"`
 }
 
 func emptyNotebookState() observerNotebookState {
 	return observerNotebookState{
 		Requests: map[string]json.RawMessage{}, Responses: map[string]json.RawMessage{},
-		Entries: map[string]json.RawMessage{},
+		Entries: map[string]json.RawMessage{}, Actions: map[string]json.RawMessage{},
+		Receipts: map[string]json.RawMessage{}, Retirements: map[string]json.RawMessage{},
 	}
 }
 
@@ -102,7 +121,8 @@ func registerObserver(t *testing.T, f *liveFixture, name string, identity observ
 
 // seedQuestion puts a standing question into the stand-in notebook as an
 // observing entry with no history, the way a person would have registered it.
-func seedQuestion(t *testing.T, o *observerFixture, question *observercontract.Question) {
+// An experiment, when given, is attached as a worker would have activated it.
+func seedQuestion(t *testing.T, o *observerFixture, question *observercontract.Question, experiment *observercontract.Experiment) {
 	t.Helper()
 	var state observerNotebookState
 	readJSONFixture(t, o.state, &state)
@@ -110,6 +130,10 @@ func seedQuestion(t *testing.T, o *observerFixture, question *observercontract.Q
 		ID: question.ID, Identity: question.Identity, Question: question,
 		State:        observercontract.StateObserving,
 		Observations: []*observercontract.Assessment{}, InFlight: []string{},
+	}
+	if experiment != nil {
+		entry.Experiment = experiment
+		entry.ExperimentStatus = experiment.Status()
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -184,6 +208,7 @@ func TestObserverPipelineRetainsAndAppliesDomainEvidence(t *testing.T) {
 		Envelope: observercontract.Envelope{ContractVersion: observercontract.ContractVersion},
 		Identity: assessment.Identity, ID: assessment.Identity.Qualify("proposed-action"),
 		QuestionID: assessment.EntryID(), Kind: observercontract.ActionTicketOpen,
+		Title:    "Investigate subject line drift",
 		Body:     "Investigate the retained unexpected finding.",
 		Evidence: []observercontract.Source{assessment.Evidence.Sources[0]},
 	}
@@ -252,6 +277,15 @@ func TestObserverPipelineRetainsAndAppliesDomainEvidence(t *testing.T) {
 	readJSONFixture(t, filepath.Join(result.RunDir, "applied.json"), &applied)
 	if len(applied.Observations) != 1 || len(applied.Actions) != 1 {
 		t.Fatalf("applied = %+v", applied)
+	}
+	// No ticket scope is registered, so the proposal is retained and refused
+	// with the reason rather than applied anywhere.
+	if a := applied.Actions[0]; a.ActionID != action.ID || a.Stage != actionStageRefused ||
+		a.Outcome != observercontract.ReceiptRefused || a.Reason != reasonTicketsNotConfigured {
+		t.Fatalf("action record = %+v, want it refused for want of a ticket scope", a)
+	}
+	if outcome.ActionsRefused != 1 || outcome.ActionsApplied != 0 || outcome.ActionsFailed != 0 {
+		t.Fatalf("observer-result.json action counts = %+v", outcome)
 	}
 	if applied.Observations[0].RequestID != run.ID+"-assessment-001" || applied.Observations[0].RevisionBefore != 0 ||
 		applied.Observations[0].EntryID != assessment.EntryID() {
@@ -410,7 +444,7 @@ func TestObserverRunCarriesStandingQuestionsAndUnpromptedFindings(t *testing.T) 
 	unprompted := harnessAssessment(t, "assessment-unprompted.json")
 	fixture := registerObserver(t, f, "fixture", question.Identity, []string{question.ID},
 		[]*observercontract.Bundle{answer.Evidence, unprompted.Evidence})
-	seedQuestion(t, fixture, question)
+	seedQuestion(t, fixture, question, nil)
 	observerAgent(f, "fixture")
 	installObserverModel(t, f, map[string]any{
 		"silent": true, "assessments": []any{answer, unprompted}, "actions": []any{},
@@ -926,7 +960,8 @@ func TestObserverOutputRejectsDuplicateActionIDs(t *testing.T) {
 		Envelope: observercontract.Envelope{ContractVersion: observercontract.ContractVersion},
 		Identity: assessment.Identity, ID: assessment.Identity.Qualify("duplicate-action"),
 		QuestionID: assessment.EntryID(), Kind: observercontract.ActionTicketOpen,
-		Body: "Investigate once.", Evidence: []observercontract.Source{assessment.Evidence.Sources[0]},
+		Title: "Investigate once", Body: "Investigate once.",
+		Evidence: []observercontract.Source{assessment.Evidence.Sources[0]},
 	}
 	runDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(runDir, "out"), 0o755); err != nil {
@@ -1304,6 +1339,17 @@ func TestObserverRunnerHelper(t *testing.T) {
 			os.Exit(82)
 		}
 		fmt.Printf(`{"status":"observed","evidence":%s,"exploration":"A bounded exploratory note."}`+"\n", evidence)
+	case mode == "collector-retire" && len(args) == 3:
+		// A person retires the question after the runner took its snapshot
+		// and before anything about it is recorded or claimed.
+		if err := retireNotebookEntry(args[1], args[2], "retired by hand during the run"); err != nil {
+			os.Exit(85)
+		}
+		evidence, err := os.ReadFile(args[0])
+		if err != nil {
+			os.Exit(82)
+		}
+		fmt.Printf(`{"status":"observed","evidence":%s,"exploration":"A bounded exploratory note."}`+"\n", evidence)
 	case mode == "notebook" && len(args) == 1:
 		runNotebookHelper(args[0], input)
 	case mode == "held-pipe":
@@ -1328,6 +1374,7 @@ func runNotebookHelper(path string, input []byte) {
 	var request struct {
 		Operation string          `json:"operation"`
 		EntryID   string          `json:"entry_id"`
+		Reason    string          `json:"reason"`
 		Request   json.RawMessage `json:"request"`
 		Payload   json.RawMessage `json:"payload"`
 	}
@@ -1339,6 +1386,33 @@ func runNotebookHelper(path string, input []byte) {
 	if err != nil || json.Unmarshal(data, &state) != nil {
 		os.Exit(85)
 	}
+	var req observercontract.Request
+	if request.Operation != "revision" && request.Operation != "entry" {
+		if json.Unmarshal(request.Request, &req) != nil {
+			os.Exit(86)
+		}
+	}
+	// The request id is checked before the revision on every mutation: a
+	// replay after an uncertain response carries the revision the caller last
+	// saw, and an identical one returns the recorded response.
+	replay := func(payload []byte) (string, bool) {
+		key := req.Identity.Qualify(req.RequestID)
+		if previous, ok := state.Requests[key]; ok {
+			if !bytes.Equal(previous, payload) {
+				os.Exit(14)
+			}
+			return key, true
+		}
+		if req.Revision != state.Revision {
+			os.Exit(10)
+		}
+		return key, false
+	}
+	commit := func(key string, payload, response []byte) {
+		state.Requests[key] = append(json.RawMessage(nil), payload...)
+		state.Responses[key] = response
+		state.Revision++
+	}
 	switch request.Operation {
 	case "revision":
 		fmt.Printf("{\"revision\":%d}\n", state.Revision)
@@ -1349,21 +1423,14 @@ func runNotebookHelper(path string, input []byte) {
 		}
 		_, _ = os.Stdout.Write(entry)
 	case "record":
-		var req observercontract.Request
 		var assessment observercontract.Assessment
-		if json.Unmarshal(request.Request, &req) != nil || json.Unmarshal(request.Payload, &assessment) != nil {
+		if json.Unmarshal(request.Payload, &assessment) != nil {
 			os.Exit(86)
 		}
-		key := req.Identity.Qualify(req.RequestID)
-		if previous, ok := state.Requests[key]; ok {
-			if !bytes.Equal(previous, request.Payload) {
-				os.Exit(14)
-			}
+		key, replayed := replay(request.Payload)
+		if replayed {
 			_, _ = os.Stdout.Write(state.Responses[key])
 			return
-		}
-		if req.Revision != state.Revision {
-			os.Exit(10)
 		}
 		entry := &observercontract.Entry{}
 		if existing, ok := state.Entries[assessment.EntryID()]; ok {
@@ -1388,10 +1455,8 @@ func runNotebookHelper(path string, input []byte) {
 			os.Exit(87)
 		}
 		entryData, _ := json.Marshal(entry)
-		state.Requests[key] = append(json.RawMessage(nil), request.Payload...)
-		state.Responses[key] = entryData
 		state.Entries[entry.ID] = entryData
-		state.Revision++
+		commit(key, request.Payload, entryData)
 		state.Records++
 		if state.CrashOnce {
 			// Committed, then died before answering: the runner sees a
@@ -1402,9 +1467,194 @@ func runNotebookHelper(path string, input []byte) {
 		}
 		writeHelperJSON(path, state)
 		_, _ = os.Stdout.Write(entryData)
+	case "claim":
+		var action observercontract.Action
+		if json.Unmarshal(request.Payload, &action) != nil {
+			os.Exit(86)
+		}
+		if state.RetireBeforeClaim != "" {
+			// Serialized just ahead of this claim: the retirement lands first
+			// and the claim below sees a retired entry.
+			retireHelperEntry(&state, state.RetireBeforeClaim, "retired ahead of the claim")
+			state.RetireBeforeClaim = ""
+			writeHelperJSON(path, state)
+		}
+		if state.StaleClaim > 0 {
+			state.StaleClaim--
+			writeHelperJSON(path, state)
+			os.Exit(10)
+		}
+		key, replayed := replay(request.Payload)
+		if replayed {
+			if state.CrashClaim > 0 {
+				state.CrashClaim--
+				writeHelperJSON(path, state)
+				os.Exit(1)
+			}
+			_, _ = os.Stdout.Write(state.Responses[key])
+			return
+		}
+		entry := &observercontract.Entry{}
+		existing, ok := state.Entries[action.QuestionID]
+		if !ok {
+			os.Exit(12)
+		}
+		if json.Unmarshal(existing, entry) != nil {
+			os.Exit(85)
+		}
+		if entry.State == observercontract.StateRetired {
+			os.Exit(11)
+		}
+		if held, ok := state.Receipts[action.ID]; ok {
+			fmt.Fprintf(os.Stderr, "id %q is already held: %s\n", action.ID, held)
+			os.Exit(15)
+		}
+		receipt := &observercontract.Receipt{
+			Envelope: observercontract.Envelope{ContractVersion: observercontract.ContractVersion},
+			Identity: action.Identity, ActionID: action.ID,
+			Status: observercontract.ReceiptInFlight, At: time.Now().UTC().Format(time.RFC3339),
+		}
+		receiptData, _ := json.Marshal(receipt)
+		entry.InFlight = append(entry.InFlight, action.ID)
+		entryData, _ := json.Marshal(entry)
+		state.Entries[entry.ID] = entryData
+		state.Actions[action.ID] = append(json.RawMessage(nil), request.Payload...)
+		state.Receipts[action.ID] = receiptData
+		commit(key, request.Payload, receiptData)
+		if state.TouchOnClaim != "" {
+			f, err := os.OpenFile(state.TouchOnClaim, os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				os.Exit(85)
+			}
+			_, _ = f.WriteString("\n**" + time.Now().UTC().Format(time.RFC3339) + "**\n\nEdited by a worker while the observer decided.\n")
+			_ = f.Close()
+			state.TouchOnClaim = ""
+		}
+		if state.RetireAfterClaim != "" {
+			// Serialized just behind this claim: the retirement reports the
+			// claim as in flight rather than pretending to recall it.
+			retireHelperEntry(&state, state.RetireAfterClaim, "retired behind the claim")
+			state.RetireAfterClaim = ""
+		}
+		if state.CrashClaim > 0 {
+			state.CrashClaim--
+			writeHelperJSON(path, state)
+			os.Exit(1)
+		}
+		writeHelperJSON(path, state)
+		_, _ = os.Stdout.Write(receiptData)
+	case "settle":
+		var receipt observercontract.Receipt
+		if json.Unmarshal(request.Payload, &receipt) != nil {
+			os.Exit(86)
+		}
+		if state.FailSettle > 0 {
+			// Died before committing: nothing changes and the caller sees a
+			// failure it must replay under the same id.
+			state.FailSettle--
+			writeHelperJSON(path, state)
+			os.Exit(1)
+		}
+		key, replayed := replay(request.Payload)
+		if replayed {
+			_, _ = os.Stdout.Write(state.Responses[key])
+			return
+		}
+		held, ok := state.Receipts[receipt.ActionID]
+		if !ok {
+			os.Exit(13)
+		}
+		var previous observercontract.Receipt
+		if json.Unmarshal(held, &previous) != nil || previous.Status == observercontract.ReceiptSettled {
+			os.Exit(1)
+		}
+		// A retired entry still settles its in-flight action; its state is
+		// not touched.
+		var action observercontract.Action
+		if json.Unmarshal(state.Actions[receipt.ActionID], &action) == nil {
+			if existing, ok := state.Entries[action.QuestionID]; ok {
+				entry := &observercontract.Entry{}
+				if json.Unmarshal(existing, entry) != nil {
+					os.Exit(85)
+				}
+				kept := make([]string, 0, len(entry.InFlight))
+				for _, id := range entry.InFlight {
+					if id != receipt.ActionID {
+						kept = append(kept, id)
+					}
+				}
+				entry.InFlight = kept
+				entryData, _ := json.Marshal(entry)
+				state.Entries[entry.ID] = entryData
+			}
+		}
+		state.Receipts[receipt.ActionID] = append(json.RawMessage(nil), request.Payload...)
+		commit(key, request.Payload, request.Payload)
+		writeHelperJSON(path, state)
+		_, _ = os.Stdout.Write(request.Payload)
+	case "retire":
+		payload, _ := json.Marshal(map[string]string{"entry_id": request.EntryID, "reason": request.Reason})
+		key, replayed := replay(payload)
+		if replayed {
+			_, _ = os.Stdout.Write(state.Responses[key])
+			return
+		}
+		if _, ok := state.Entries[request.EntryID]; !ok {
+			os.Exit(12)
+		}
+		retirement := retireHelperEntry(&state, request.EntryID, request.Reason)
+		// retireHelperEntry advanced the revision as its own commit.
+		state.Requests[key] = payload
+		state.Responses[key] = retirement
+		writeHelperJSON(path, state)
+		_, _ = os.Stdout.Write(retirement)
 	default:
 		os.Exit(88)
 	}
+}
+
+// retireHelperEntry retires an entry in the stand-in's state, reporting the
+// actions in flight at that moment, and advances the revision. The caller
+// persists the state.
+func retireHelperEntry(state *observerNotebookState, entryID, reason string) json.RawMessage {
+	entry := &observercontract.Entry{}
+	if json.Unmarshal(state.Entries[entryID], entry) != nil {
+		os.Exit(85)
+	}
+	retirement := &observercontract.Retirement{
+		EntryID: entryID, Reason: reason, At: time.Now().UTC().Format(time.RFC3339),
+		InFlight: append([]string{}, entry.InFlight...), Revision: state.Revision + 1,
+	}
+	entry.State = observercontract.StateRetired
+	entry.Retirement = retirement
+	entryData, _ := json.Marshal(entry)
+	retirementData, _ := json.Marshal(retirement)
+	state.Entries[entryID] = entryData
+	state.Retirements[entryID] = retirementData
+	state.Revision++
+	return retirementData
+}
+
+// retireNotebookEntry retires an entry directly in a state file, the way a
+// person's decision lands in the domain's store outside any run.
+func retireNotebookEntry(path, entryID, reason string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var state observerNotebookState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+	if _, ok := state.Entries[entryID]; !ok {
+		return fmt.Errorf("no entry %s", entryID)
+	}
+	retireHelperEntry(&state, entryID, reason)
+	data, err = json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 func helperArgsAfterDash() []string {

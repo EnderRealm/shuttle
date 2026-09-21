@@ -105,13 +105,25 @@ type WeftSandbox struct {
 // so they are executed directly, never through a shell, and WorkingDir is
 // explicit so daemon and manual runs behave the same.
 type Observer struct {
-	Definition         string   `json:"definition"`
-	Collector          Command  `json:"collector"`
-	Notebook           Command  `json:"notebook"`
-	DataPolicy         string   `json:"data_policy"`
-	DenyRead           []string `json:"deny_read"`
-	MaxModelInputBytes int      `json:"max_model_input_bytes"`
-	TimeoutSeconds     int      `json:"timeout_seconds"`
+	Definition         string           `json:"definition"`
+	Collector          Command          `json:"collector"`
+	Notebook           Command          `json:"notebook"`
+	DataPolicy         string           `json:"data_policy"`
+	DenyRead           []string         `json:"deny_read"`
+	MaxModelInputBytes int              `json:"max_model_input_bytes"`
+	TimeoutSeconds     int              `json:"timeout_seconds"`
+	Tickets            *ObserverTickets `json:"tickets,omitempty"`
+}
+
+// ObserverTickets is the ticket write scope of one observer: the tk projects
+// its notes and reopens may land in and its discoveries may be created in,
+// which of those a discovery is created in, and how many discoveries one run
+// may create. Absent, the observer's actions are retained and refused rather
+// than applied.
+type ObserverTickets struct {
+	Projects         []string `json:"projects"`
+	DiscoveryProject string   `json:"discovery_project"`
+	MaxDiscoveries   int      `json:"max_discoveries"`
 }
 
 type Command struct {
