@@ -46,6 +46,7 @@ type Options struct {
 	HomeDir        string   // absolute; the profile's home-relative deny paths are derived from it
 	PATH           string   // the baked PATH, for Check's own child
 	AllowedDomains []string // manifest sandbox.allowed_domains, appended to APIHost
+	DeniedRead     []string // additional harness-private paths outside RunDir
 }
 
 // ProfilePath is the generated profile, which Launcher's argv names (§7.2).
@@ -131,6 +132,7 @@ func ProfileJSON(o Options) ([]byte, error) {
 			AllowLocalBinding: false,
 		},
 	}
+	p.Filesystem.DenyRead = append(p.Filesystem.DenyRead, o.DeniedRead...)
 	return json.MarshalIndent(p, "", "  ")
 }
 
@@ -273,6 +275,18 @@ func requireLaunchable(o Options) error {
 		// is every host there is, which is the network section not applying.
 		if d == "*" {
 			return fmt.Errorf("sandbox.allowed_domains: %q would allow every host", d)
+		}
+	}
+	for _, path := range o.DeniedRead {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return fmt.Errorf("sandbox denied read path %q is not absolute and clean", path)
+		}
+		rel, err := filepath.Rel(o.RunDir, path)
+		if err != nil {
+			return fmt.Errorf("sandbox denied read path %q relative to run dir: %w", path, err)
+		}
+		if rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("sandbox denied read path %q is inside run dir %q, whose allowRead would reopen it", path, o.RunDir)
 		}
 	}
 	return nil

@@ -116,6 +116,128 @@ func ValidateReceipt(data []byte) (*Receipt, error) {
 	return &r, nil
 }
 
+// validateEntry checks a successful adapter response before the runner retains
+// or prompts from it. Entries are notebook snapshots rather than model output,
+// but they cross the same untrusted process boundary as every payload.
+func validateEntry(e *Entry) error {
+	if err := e.Identity.validate("identity"); err != nil {
+		return err
+	}
+	if err := checkQualified("id", e.ID, e.Identity); err != nil {
+		return err
+	}
+	if err := validateState("state", e.State); err != nil {
+		return err
+	}
+	if (e.Question == nil) == (e.Finding == nil) {
+		return fieldErr("question", "entry must carry exactly one of question or finding")
+	}
+	if e.Question != nil {
+		if err := e.Question.validate(); err != nil {
+			return wrapField("question", err)
+		}
+		if e.Question.ID != e.ID || e.Question.Identity != e.Identity {
+			return fieldErr("question.id", "does not identify entry %q", e.ID)
+		}
+	} else {
+		if err := checkQualified("finding.id", e.Finding.ID, e.Identity); err != nil {
+			return err
+		}
+		if e.Finding.ID != e.ID {
+			return fieldErr("finding.id", "%q does not identify entry %q", e.Finding.ID, e.ID)
+		}
+		if err := e.Finding.Subject.validate("finding.subject"); err != nil {
+			return err
+		}
+		if e.Finding.Question == "" || e.Finding.Changes == "" {
+			return fieldErr("finding", "question and changes are required")
+		}
+	}
+	if e.Experiment != nil {
+		if err := e.Experiment.validate(); err != nil {
+			return wrapField("experiment", err)
+		}
+		if e.Experiment.QuestionID != e.ID || e.Experiment.Identity != e.Identity {
+			return fieldErr("experiment.question_id", "does not identify entry %q", e.ID)
+		}
+		if e.ExperimentStatus != e.Experiment.Status() {
+			return fieldErr("experiment_status", "%q does not match experiment status %q", e.ExperimentStatus, e.Experiment.Status())
+		}
+	} else if e.ExperimentStatus != "" {
+		return fieldErr("experiment_status", "%q without an experiment", e.ExperimentStatus)
+	}
+	for i, a := range e.Observations {
+		if a == nil {
+			return fieldErr(fmt.Sprintf("observations[%d]", i), "null")
+		}
+		if err := a.validate(); err != nil {
+			return wrapField(fmt.Sprintf("observations[%d]", i), err)
+		}
+		if a.Identity != e.Identity || a.EntryID() != e.ID {
+			return fieldErr(fmt.Sprintf("observations[%d]", i), "does not belong to entry %q", e.ID)
+		}
+		if a.Evidence.Subject != e.subject() {
+			return fieldErr(fmt.Sprintf("observations[%d].evidence.subject", i),
+				"%s %s, the entry is about %s %s",
+				a.Evidence.Subject.Kind, a.Evidence.Subject.Instance,
+				e.subject().Kind, e.subject().Instance)
+		}
+	}
+	inFlight := make(map[string]bool, len(e.InFlight))
+	for i, id := range e.InFlight {
+		if err := checkQualified(fmt.Sprintf("in_flight[%d]", i), id, e.Identity); err != nil {
+			return err
+		}
+		if inFlight[id] {
+			return fieldErr(fmt.Sprintf("in_flight[%d]", i), "%q appears twice", id)
+		}
+		inFlight[id] = true
+	}
+	if e.State == StateRetired {
+		if e.Retirement == nil {
+			return fieldErr("retirement", "required for a retired entry")
+		}
+		if err := validateRetirement(e.Retirement, e.Identity); err != nil {
+			return err
+		}
+		if e.Retirement.EntryID != e.ID {
+			return fieldErr("retirement.entry_id", "%q does not identify entry %q", e.Retirement.EntryID, e.ID)
+		}
+	} else if e.Retirement != nil {
+		return fieldErr("retirement", "present while state is %q", e.State)
+	}
+	return nil
+}
+
+func validateRetirement(r *Retirement, identity Identity) error {
+	if r == nil {
+		return fieldErr("retirement", "null")
+	}
+	if err := checkQualified("retirement.entry_id", r.EntryID, identity); err != nil {
+		return err
+	}
+	if r.Reason == "" {
+		return fieldErr("retirement.reason", "required")
+	}
+	if err := checkTimestamp("retirement.at", r.At); err != nil {
+		return err
+	}
+	if r.Revision <= 0 {
+		return fieldErr("retirement.revision", "%d, must be positive", r.Revision)
+	}
+	seen := make(map[string]bool, len(r.InFlight))
+	for i, id := range r.InFlight {
+		if err := checkQualified(fmt.Sprintf("retirement.in_flight[%d]", i), id, identity); err != nil {
+			return err
+		}
+		if seen[id] {
+			return fieldErr(fmt.Sprintf("retirement.in_flight[%d]", i), "%q appears twice", id)
+		}
+		seen[id] = true
+	}
+	return nil
+}
+
 // decode reads one payload strictly: an unknown key is refused rather than
 // ignored (config.Load's rule), so a field this binary does not understand can
 // never be silently dropped from a record that is never rewritten.

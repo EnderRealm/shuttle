@@ -279,6 +279,41 @@ func TestLoadPromptBody(t *testing.T) {
 	})
 }
 
+func TestLoadObserverSelectsOperatorConfiguration(t *testing.T) {
+	manifest := replace(t,
+		`"inputs": [
+    { "provider": "loom-sessions", "args": { "window": "previous-day" } }
+  ],`,
+		`"inputs": [],
+  "observer": {"config":"harness-fixture"},`)
+	dir := writeAgent(t, t.TempDir(), "daily", manifest, "Observe the configured domain.\n")
+	def, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Manifest.Observer == nil || def.Manifest.Observer.Config != "harness-fixture" {
+		t.Fatalf("observer = %+v", def.Manifest.Observer)
+	}
+}
+
+func TestLoadObserverRefusesProviderInputsAndInvalidRegistrationNames(t *testing.T) {
+	withObserver := replace(t, `"sandbox": {`, `"observer":{"config":"harness-fixture"},"sandbox": {`)
+	dir := writeAgent(t, t.TempDir(), "daily", withObserver, "body\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "collect through their configured collector") {
+		t.Fatalf("provider input error = %v", err)
+	}
+	invalid := strings.Replace(withObserver, `"harness-fixture"`, `"../fixture"`, 1)
+	invalid = strings.Replace(invalid,
+		`"inputs": [
+    { "provider": "loom-sessions", "args": { "window": "previous-day" } }
+  ],`,
+		`"inputs": [],`, 1)
+	dir = writeAgent(t, t.TempDir(), "daily", invalid, "body\n")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "observer.config") {
+		t.Fatalf("registration name error = %v", err)
+	}
+}
+
 func TestLoadAll(t *testing.T) {
 	root := t.TempDir()
 	writeAgent(t, root, "daily", validManifest, "body\n")

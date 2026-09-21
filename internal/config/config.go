@@ -26,15 +26,16 @@ const (
 // Config is config.json, the §4.2 shape. Credentials are Keychain item names
 // only; no secret value is ever held here or in the file.
 type Config struct {
-	AgentsDir string    `json:"agents_dir"`
-	Timezone  string    `json:"timezone"`
-	Email     Email     `json:"email"`
-	Anthropic Anthropic `json:"anthropic"`
-	Paths     Paths     `json:"paths"`
-	Notify    Notify    `json:"notify"`
-	Limits    Limits    `json:"limits"`
-	Output    Output    `json:"output"`
-	Weft      Weft      `json:"weft"`
+	AgentsDir string              `json:"agents_dir"`
+	Timezone  string              `json:"timezone"`
+	Email     Email               `json:"email"`
+	Anthropic Anthropic           `json:"anthropic"`
+	Paths     Paths               `json:"paths"`
+	Notify    Notify              `json:"notify"`
+	Limits    Limits              `json:"limits"`
+	Output    Output              `json:"output"`
+	Weft      Weft                `json:"weft"`
+	Observers map[string]Observer `json:"observers,omitempty"`
 }
 
 type Email struct {
@@ -98,6 +99,24 @@ const DefaultWeftOAuthKeychainItem = "weft-claude-oauth-token"
 type WeftSandbox struct {
 	AllowedDomains []string `json:"allowed_domains"`
 	AllowWrite     []string `json:"allow_write"`
+}
+
+// Observer is one operator-owned domain integration. Commands are argv arrays
+// so they are executed directly, never through a shell, and WorkingDir is
+// explicit so daemon and manual runs behave the same.
+type Observer struct {
+	Definition         string   `json:"definition"`
+	Collector          Command  `json:"collector"`
+	Notebook           Command  `json:"notebook"`
+	DataPolicy         string   `json:"data_policy"`
+	DenyRead           []string `json:"deny_read"`
+	MaxModelInputBytes int      `json:"max_model_input_bytes"`
+	TimeoutSeconds     int      `json:"timeout_seconds"`
+}
+
+type Command struct {
+	Argv       []string `json:"argv"`
+	WorkingDir string   `json:"working_dir"`
 }
 
 // Home returns the state root: $SHUTTLE_HOME, else ~/.shuttle.

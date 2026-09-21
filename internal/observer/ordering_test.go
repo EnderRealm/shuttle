@@ -38,7 +38,8 @@ func TestRetirementBeforeClaimAdmitsNoAction(t *testing.T) {
 // and settling neither reopens the question nor admits anything else.
 func TestClaimBeforeRetirementReportsTheInFlightAction(t *testing.T) {
 	nb, q, act := seed(t)
-	rec, err := nb.Claim(at(nb, q.Identity, "claim"), act)
+	claim := at(nb, q.Identity, "claim")
+	rec, err := nb.Claim(claim, act)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +49,27 @@ func TestClaimBeforeRetirementReportsTheInFlightAction(t *testing.T) {
 	}
 	if len(ret.InFlight) != 1 || ret.InFlight[0] != act.ID {
 		t.Fatalf("in flight = %v, want %q: retirement bounds admission, it does not cancel a write already on the wire", ret.InFlight, act.ID)
+	}
+	// The retirement promised nothing about the ticket write, so the entry
+	// still carries the action as in flight rather than as cancelled.
+	e, err := nb.Entry(q.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(e.InFlight) != 1 || e.InFlight[0] != act.ID {
+		t.Fatalf("in flight = %v after retirement, want %q still out", e.InFlight, act.ID)
+	}
+
+	// A caller whose claim response was lost replays it under the same id
+	// after the retirement. That is reconciliation by receipt: the original
+	// in-flight receipt comes back, nothing new is admitted, and the
+	// retirement does not turn the replay into a refusal.
+	replayed, err := nb.Claim(claim, act)
+	if err != nil {
+		t.Fatalf("replayed claim: got %v, want the original receipt", err)
+	}
+	if replayed.Status != ReceiptInFlight || replayed.At != rec.At {
+		t.Fatalf("replayed receipt = %+v, want the original %+v", replayed, rec)
 	}
 
 	// The claimed action settles, or is reconciled by receipt, under the id it
@@ -60,7 +82,7 @@ func TestClaimBeforeRetirementReportsTheInFlightAction(t *testing.T) {
 		t.Fatalf("receipt = %+v, want it settled as %s", settled, ReceiptApplied)
 	}
 
-	e, err := nb.Entry(q.ID)
+	e, err = nb.Entry(q.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +91,17 @@ func TestClaimBeforeRetirementReportsTheInFlightAction(t *testing.T) {
 	}
 	if len(e.InFlight) != 0 {
 		t.Fatalf("in flight = %v, want the settled action cleared", e.InFlight)
+	}
+	// Settling did not reactivate the question, and nothing else can: a
+	// retired entry records no further observation and does not reopen.
+	a := mustAssessment(t, "wren", "assessment.json")
+	if _, err := nb.Record(at(nb, q.Identity, "record-after-settle"), a); !errors.Is(err, ErrRetired) {
+		t.Fatalf("record after settlement: got %v, want %v", err, ErrRetired)
+	}
+	_, err = nb.Reopen(at(nb, q.Identity, "reopen-after-settle"), q.ID, ReopenReactivated)
+	refusal(t, err, "state")
+	if e, err = nb.Entry(q.ID); err != nil || e.State != StateRetired {
+		t.Fatalf("entry after refused reopen = %+v, %v; want it still %s", e, err, StateRetired)
 	}
 
 	// Only that action. A second one is refused by the retirement, and an id
@@ -156,6 +189,18 @@ func TestConcurrentClaimAndRetirement(t *testing.T) {
 	if len(ret.InFlight) != 1 || ret.InFlight[0] != act.ID {
 		t.Fatalf("in flight = %v, want %q reported by the retirement", ret.InFlight, act.ID)
 	}
+	// Only that action: the retirement admits no other, and an unclaimed id
+	// has nothing to settle.
+	second := *act
+	second.ID = act.Identity.Qualify("note-days-repeating-2")
+	if _, err := nb.Claim(at(nb, q.Identity, "claim-2"), &second); !errors.Is(err, ErrRetired) {
+		t.Fatalf("second claim: got %v, want %v", err, ErrRetired)
+	}
+	unclaimed := settle(rec, "village2/show-whether-week-a0f2#note-2")
+	unclaimed.ActionID = second.ID
+	if _, err := nb.Settle(at(nb, q.Identity, "settle-2"), unclaimed); !errors.Is(err, ErrNotClaimed) {
+		t.Fatalf("settle of an unclaimed id: got %v, want %v", err, ErrNotClaimed)
+	}
 	if _, err := nb.Settle(at(nb, q.Identity, "settle"), settle(rec, "village2/show-whether-week-a0f2#note-1")); err != nil {
 		t.Fatalf("the in-flight action could not settle: %v", err)
 	}
@@ -165,5 +210,8 @@ func TestConcurrentClaimAndRetirement(t *testing.T) {
 	}
 	if e.State != StateRetired {
 		t.Fatalf("state = %q, want %q", e.State, StateRetired)
+	}
+	if len(e.InFlight) != 0 {
+		t.Fatalf("in flight = %v, want the settled action cleared", e.InFlight)
 	}
 }

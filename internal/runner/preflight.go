@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"shuttle/internal/agentdef"
@@ -87,6 +89,22 @@ func (p Preflight) Check(ctx context.Context, def *agentdef.Definition, runDir s
 		return cmd.Run()
 	}); err != nil {
 		return names, err
+	}
+	// Ahead of srt: the sandbox profile folds every registration's deny_read
+	// in, so a bad path must fail as observer configuration, not as srt.
+	if def.Manifest.Observer != nil {
+		if err := check("observer", func() error {
+			registration, err := observerRegistration(p.Config, def)
+			if err != nil {
+				return err
+			}
+			if err := validateObserverRegistration(registration, def.Manifest.Runtime.Kind); err != nil {
+				return err
+			}
+			return validateObserverDeniedReads(p.Config, runDir)
+		}); err != nil {
+			return names, err
+		}
 	}
 	if !p.UnsafeNoSandbox {
 		if err := check("srt", func() error {
@@ -180,7 +198,55 @@ func (p Preflight) Check(ctx context.Context, def *agentdef.Definition, runDir s
 }
 
 func (p Preflight) sandbox(def *agentdef.Definition, dir string) sandbox.Options {
-	return sandbox.Options{SRTBin: p.Config.Paths.SRTBin, RunDir: dir, HomeDir: p.HomeDir, PATH: p.PATH, AllowedDomains: def.Manifest.Sandbox.AllowedDomains}
+	options := sandbox.Options{
+		SRTBin: p.Config.Paths.SRTBin, RunDir: dir, HomeDir: p.HomeDir,
+		PATH: p.PATH, AllowedDomains: def.Manifest.Sandbox.AllowedDomains,
+	}
+	if def.Manifest.Observer != nil {
+		seen := map[string]bool{}
+		for _, path := range append([]string{observerStagingDir(dir)}, observerDeniedReads(p.Config)...) {
+			if !seen[path] {
+				options.DeniedRead = append(options.DeniedRead, path)
+				seen[path] = true
+			}
+		}
+	}
+	return options
+}
+
+func observerDeniedReads(cfg *config.Config) []string {
+	var paths []string
+	for _, registration := range cfg.Observers {
+		paths = append(paths, registration.DenyRead...)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func validateObserverDeniedReads(cfg *config.Config, runDir string) error {
+	names := make([]string, 0, len(cfg.Observers))
+	for name := range cfg.Observers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if len(cfg.Observers[name].DenyRead) == 0 {
+			return fmt.Errorf("observers.%s.deny_read: at least one domain store root is required", name)
+		}
+		for i, path := range cfg.Observers[name].DenyRead {
+			if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+				return fmt.Errorf("observers.%s.deny_read[%d]: %q must be an absolute clean path", name, i, path)
+			}
+			rel, err := filepath.Rel(runDir, path)
+			if err != nil {
+				return fmt.Errorf("observers.%s.deny_read[%d]: %q relative to run dir: %w", name, i, path, err)
+			}
+			if rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("observers.%s.deny_read[%d]: %q is inside run dir %s", name, i, path, runDir)
+			}
+		}
+	}
+	return nil
 }
 
 func (p Preflight) key(item string) (string, error) {
@@ -214,6 +280,20 @@ func directory(path string) error {
 	}
 	if !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory", path)
+	}
+	return nil
+}
+
+func regularAbsoluteFile(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("%q must be an absolute file path", path)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
 	}
 	return nil
 }

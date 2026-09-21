@@ -352,6 +352,9 @@ func TestRetryDeliveryUsesRetainedOutputWithoutRunningTheModel(t *testing.T) {
 	row, _ := f.store.Get(run.ID)
 	sender := &recordingSender{}
 	f.pipeline.Sender = sender
+	// Retry follows the retained run kind, not a selector added to the
+	// definition after this standard run completed.
+	f.def.Manifest.Observer = &agentdef.Observer{Config: "added-later"}
 	if err := f.pipeline.RetryDelivery(context.Background(), f.def, row); err != nil {
 		t.Fatal(err)
 	}

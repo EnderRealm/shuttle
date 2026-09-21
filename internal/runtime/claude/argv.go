@@ -34,6 +34,7 @@ type Options struct {
 	MaxTurns       int
 	MaxBudgetUSD   float64
 	Tools          []string
+	ReadRoots      []string // optional tool-visible roots; defaults to RunDir
 	TimeoutSeconds int
 	APIKey         string
 	Prompt         string // the rendered prompt.md text
@@ -133,8 +134,8 @@ func SettingsJSON(o Options) ([]byte, error) {
 	for _, tool := range o.Tools {
 		// requireLaunchable refused every tool without a rule above, so the
 		// allow list is complete or the launch never happened.
-		rule, _ := toolRule(o, tool)
-		s.Permissions.Allow = append(s.Permissions.Allow, rule)
+		rules, _ := toolRules(o, tool)
+		s.Permissions.Allow = append(s.Permissions.Allow, rules...)
 	}
 	return json.MarshalIndent(s, "", "  ")
 }
@@ -142,15 +143,23 @@ func SettingsJSON(o Options) ([]byte, error) {
 // toolRule is the settings.json allow rule for one manifest tool, and with it
 // the set of tools phase 1 knows: a tool with no rule is one --tools would
 // name with nothing allowing it, which fails mid-run rather than at launch.
-func toolRule(o Options, tool string) (string, bool) {
+func toolRules(o Options, tool string) ([]string, bool) {
 	switch tool {
 	case "Read", "Glob", "Grep":
-		return fmt.Sprintf("%s(%s/**)", tool, o.RunDir), true
+		roots := o.ReadRoots
+		if len(roots) == 0 {
+			roots = []string{o.RunDir}
+		}
+		rules := make([]string, 0, len(roots))
+		for _, root := range roots {
+			rules = append(rules, fmt.Sprintf("%s(%s/**)", tool, root))
+		}
+		return rules, true
 	case "Write":
 		// out/ only: it is the one directory the model may write (§7.2).
-		return fmt.Sprintf("Write(%s/**)", o.OutDir()), true
+		return []string{fmt.Sprintf("Write(%s/**)", o.OutDir())}, true
 	}
-	return "", false
+	return nil, false
 }
 
 // requireLaunchable is the contract the argv, the environment and the settings
@@ -185,8 +194,17 @@ func requireLaunchable(o Options) error {
 	// agree on what a valid Options is: an argv naming a tool the permission
 	// document cannot express is not a launchable one.
 	for _, tool := range o.Tools {
-		if _, ok := toolRule(o, tool); !ok {
+		if _, ok := toolRules(o, tool); !ok {
 			return fmt.Errorf("tools: %q has no permission rule in phase 1", tool)
+		}
+	}
+	for _, root := range o.ReadRoots {
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("read root %q is not absolute", root)
+		}
+		rel, err := filepath.Rel(o.RunDir, root)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("read root %q is outside run dir %q", root, o.RunDir)
 		}
 	}
 	if o.MaxTurns <= 0 {

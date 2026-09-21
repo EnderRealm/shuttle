@@ -68,8 +68,18 @@ type runRecord struct {
 	Inputs          []agentdef.Input `json:"inputs"`
 	Outputs         agentdef.Outputs `json:"outputs"`
 	Sandbox         agentdef.Sandbox `json:"sandbox"`
+	Observer        *observerRecord  `json:"observer,omitempty"`
 	Argv            []string         `json:"argv,omitempty"`
 	PID             int              `json:"pid,omitempty"`
+}
+
+type observerRecord struct {
+	Config             string `json:"config"`
+	ContractVersion    string `json:"contract_version"`
+	DefinitionRevision string `json:"definition_revision"`
+	DefinitionSHA256   string `json:"definition_sha256"`
+	NotebookRevision   int64  `json:"notebook_revision"`
+	EvidenceStatus     string `json:"evidence_status"`
 }
 
 type preparedRun struct {
@@ -94,11 +104,32 @@ func DryRun(ctx context.Context, def *agentdef.Definition, slot time.Time, cfg *
 	if err != nil {
 		return nil, err
 	}
-	if err := run.collect(ctx, def, cfg, home, logger, slot); err != nil {
-		return nil, err
-	}
-	if err := run.render(def); err != nil {
-		return nil, err
+	if def.Manifest.Observer != nil {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		pipeline := &Pipeline{
+			Config: cfg, Home: home, HomeDir: homeDir, PATH: os.Getenv("PATH"), Logger: logger,
+		}
+		state, err := pipeline.collectObserver(ctx, def, run, slot)
+		if err != nil {
+			return nil, err
+		}
+		if err := run.renderObserver(def, state); err != nil {
+			_ = promoteObserverEvidence(state.StagingDir, run.Dir)
+			return nil, err
+		}
+		if err := promoteObserverEvidence(state.StagingDir, run.Dir); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := run.collect(ctx, def, cfg, home, logger, slot); err != nil {
+			return nil, err
+		}
+		if err := run.render(def); err != nil {
+			return nil, err
+		}
 	}
 	return &DryRunResult{
 		RunID:       run.ID,

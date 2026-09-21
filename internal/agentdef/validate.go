@@ -64,6 +64,14 @@ func (m *Manifest) validate(dirName string) error {
 				i, in.Provider, strings.Join(AllowedProviders, ", "))
 		}
 	}
+	if m.Observer != nil {
+		if !NameRE.MatchString(m.Observer.Config) {
+			return fmt.Errorf("observer.config: %q must match %s", m.Observer.Config, NameRE)
+		}
+		if len(m.Inputs) != 0 {
+			return errors.New("inputs: observer agents collect through their configured collector, not input providers")
+		}
+	}
 	if err := m.Outputs.validate(); err != nil {
 		return err
 	}

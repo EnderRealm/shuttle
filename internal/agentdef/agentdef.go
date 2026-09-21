@@ -42,6 +42,7 @@ type Manifest struct {
 	Inputs      []Input   `json:"inputs"`
 	Outputs     Outputs   `json:"outputs"`
 	Sandbox     Sandbox   `json:"sandbox"`
+	Observer    *Observer `json:"observer,omitempty"`
 }
 
 type Runtime struct {
@@ -84,6 +85,13 @@ type FileOutput struct {
 type Sandbox struct {
 	Kind           string   `json:"kind"`
 	AllowedDomains []string `json:"allowed_domains"`
+}
+
+// Observer selects one operator-configured domain observer. Executable paths
+// stay in config.json; an agent definition can select a registration but
+// cannot introduce a command for the harness to execute.
+type Observer struct {
+	Config string `json:"config"`
 }
 
 // Definition is one agent directory: its manifest and its prompt body.

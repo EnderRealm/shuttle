@@ -129,6 +129,9 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 		}
 		return nil, p.fail(run, row.ID, class, err, ledger.Result{}, record)
 	}
+	if def.Manifest.Observer != nil {
+		return p.runObserver(ctx, preflight, def, row, run, opts, record, slot)
+	}
 	if err := run.collect(ctx, def, p.Config, p.Home, p.logger(), slot); err != nil {
 		class := ledger.ClassProvider
 		var providerErr *provider.Error
@@ -141,64 +144,9 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
 	}
 
-	key, err := preflight.key(p.Config.Anthropic.KeychainItem)
+	_, result, record, class, err := p.executeRuntime(ctx, preflight, def, row, run, opts, record)
 	if err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
-	}
-	var launcher []string
-	if !opts.UnsafeNoSandbox {
-		launcher, err = sandbox.Launcher(preflight.sandbox(def, run.Dir))
-		if err != nil {
-			return nil, p.fail(run, row.ID, ledger.ClassSandbox, err, ledger.Result{}, record)
-		}
-	}
-	runtimeOptions := claude.Options{
-		Bin: p.Config.Paths.ClaudeBin, Launcher: launcher, RunDir: run.Dir,
-		Auth: def.Manifest.Runtime.Auth, Model: def.Manifest.Runtime.Model,
-		MaxTurns: def.Manifest.Runtime.MaxTurns, MaxBudgetUSD: def.Manifest.Runtime.MaxBudgetUSD,
-		Tools: def.Manifest.Runtime.Tools, TimeoutSeconds: def.Manifest.Runtime.TimeoutSeconds,
-		APIKey: key, Prompt: run.Prompt, PATH: p.PATH, HomeDir: p.HomeDir,
-		Timezone: run.Loc.String(),
-	}
-	run.record.Argv, err = claude.Argv(runtimeOptions)
-	if err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
-	}
-	if err := run.writeRecord(); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
-	}
-
-	transcript, err := os.OpenFile(filepath.Join(run.Dir, transcriptFile), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
-	}
-	stderr, err := os.OpenFile(filepath.Join(run.Dir, stderrFile), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		_ = transcript.Close()
-		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
-	}
-	runtimeOptions.Started = func(pid int) error {
-		run.record.PID = pid
-		if err := run.writeRecord(); err != nil {
-			return err
-		}
-		return p.Ledger.MarkRunning(row.ID, pid, run.Dir)
-	}
-	outcome, launchErr := claude.Run(ctx, runtimeOptions, transcript, stderr)
-	transcriptCloseErr := transcript.Close()
-	stderrCloseErr := stderr.Close()
-	if launchErr != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassDied, launchErr, ledger.Result{}, record)
-	}
-	result := ledgerResult(outcome)
-	record = recordFromOutcome(record, outcome)
-	for _, evidenceErr := range []error{outcome.TranscriptErr, outcome.StderrErr, transcriptCloseErr, stderrCloseErr} {
-		if evidenceErr != nil {
-			return nil, p.fail(run, row.ID, ledger.ClassDied, fmt.Errorf("retain runtime evidence: %w", evidenceErr), result, record)
-		}
-	}
-	if outcome.Class != "" {
-		return nil, p.fail(run, row.ID, outcome.Class, errors.New(outcome.Detail), result, record)
+		return nil, p.fail(run, row.ID, class, err, result, record)
 	}
 
 	validated, err := output.Validate(filepath.Join(run.Dir, "out"))
@@ -245,6 +193,80 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 	return runResult, nil
 }
 
+func (p *Pipeline) executeRuntime(
+	ctx context.Context,
+	preflight Preflight,
+	def *agentdef.Definition,
+	row *ledger.Run,
+	run *preparedRun,
+	opts Options,
+	record resultRecord,
+) (*claude.Outcome, ledger.Result, resultRecord, string, error) {
+	key, err := preflight.key(p.Config.Anthropic.KeychainItem)
+	if err != nil {
+		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+	}
+	var launcher []string
+	if !opts.UnsafeNoSandbox {
+		launcher, err = sandbox.Launcher(preflight.sandbox(def, run.Dir))
+		if err != nil {
+			return nil, ledger.Result{}, record, ledger.ClassSandbox, err
+		}
+	}
+	runtimeOptions := claude.Options{
+		Bin: p.Config.Paths.ClaudeBin, Launcher: launcher, RunDir: run.Dir,
+		Auth: def.Manifest.Runtime.Auth, Model: def.Manifest.Runtime.Model,
+		MaxTurns: def.Manifest.Runtime.MaxTurns, MaxBudgetUSD: def.Manifest.Runtime.MaxBudgetUSD,
+		Tools: def.Manifest.Runtime.Tools, TimeoutSeconds: def.Manifest.Runtime.TimeoutSeconds,
+		APIKey: key, Prompt: run.Prompt, PATH: p.PATH, HomeDir: p.HomeDir,
+		Timezone: run.Loc.String(),
+	}
+	if def.Manifest.Observer != nil {
+		runtimeOptions.ReadRoots = []string{filepath.Join(run.Dir, "inputs")}
+	}
+	run.record.Argv, err = claude.Argv(runtimeOptions)
+	if err != nil {
+		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+	}
+	if err := run.writeRecord(); err != nil {
+		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+	}
+
+	transcript, err := os.OpenFile(filepath.Join(run.Dir, transcriptFile), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+	}
+	stderr, err := os.OpenFile(filepath.Join(run.Dir, stderrFile), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		_ = transcript.Close()
+		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+	}
+	runtimeOptions.Started = func(pid int) error {
+		run.record.PID = pid
+		if err := run.writeRecord(); err != nil {
+			return err
+		}
+		return p.Ledger.MarkRunning(row.ID, pid, run.Dir)
+	}
+	outcome, launchErr := claude.Run(ctx, runtimeOptions, transcript, stderr)
+	transcriptCloseErr := transcript.Close()
+	stderrCloseErr := stderr.Close()
+	if launchErr != nil {
+		return nil, ledger.Result{}, record, ledger.ClassDied, launchErr
+	}
+	result := ledgerResult(outcome)
+	record = recordFromOutcome(record, outcome)
+	for _, evidenceErr := range []error{outcome.TranscriptErr, outcome.StderrErr, transcriptCloseErr, stderrCloseErr} {
+		if evidenceErr != nil {
+			return outcome, result, record, ledger.ClassDied, fmt.Errorf("retain runtime evidence: %w", evidenceErr)
+		}
+	}
+	if outcome.Class != "" {
+		return outcome, result, record, outcome.Class, errors.New(outcome.Detail)
+	}
+	return outcome, result, record, "", nil
+}
+
 func (p *Pipeline) apply(target output.Target, out *output.Outputs, logger *log.Logger) (*output.Applied, error) {
 	// Every agent archives into one reports repository. Its Git index is a
 	// process-wide mutable resource, so daemon workers may prepare/model in
@@ -262,6 +284,43 @@ func (p *Pipeline) RetryDelivery(ctx context.Context, def *agentdef.Definition, 
 	}
 	if row.Status != ledger.StatusCompleted || !row.RunDir.Valid {
 		return fmt.Errorf("run %s: retained output is not available from a completed run", row.ID)
+	}
+	recordData, err := os.ReadFile(filepath.Join(row.RunDir.String, "run.json"))
+	if err != nil {
+		return err
+	}
+	var retained runRecord
+	if err := json.Unmarshal(recordData, &retained); err != nil {
+		return fmt.Errorf("retained run.json: %w", err)
+	}
+	if retained.Observer != nil {
+		// An observer retry delivers under the capabilities the run retained,
+		// not whatever the definition says now.
+		retainedDef := *def
+		retainedDef.Manifest.Outputs = retained.Outputs
+		retainedDef.Manifest.Observer = &agentdef.Observer{Config: retained.Observer.Config}
+		validated, err := loadValidatedObserverOutput(row.RunDir.String)
+		if err != nil {
+			return err
+		}
+		eligible := observerDeliveryEligible(&retainedDef, validated)
+		if eligible {
+			if err := validateObserverSubject(validated.Subject); err != nil {
+				return err
+			}
+		}
+		data, err := os.ReadFile(filepath.Join(row.RunDir.String, appliedFileName()))
+		if err != nil {
+			return err
+		}
+		var applied observerApplied
+		if err := json.Unmarshal(data, &applied); err != nil {
+			return err
+		}
+		if eligible {
+			applied.DeliveryStatus = ledger.DeliveryPending
+		}
+		return p.deliverObserverReport(ctx, &retainedDef, row, &preparedRun{Dir: row.RunDir.String}, validated, &applied)
 	}
 	validated, err := output.Validate(filepath.Join(row.RunDir.String, "out"))
 	if err != nil {

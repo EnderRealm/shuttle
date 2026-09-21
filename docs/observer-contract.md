@@ -2,11 +2,10 @@
 
 Status: written 2026-09-09 alongside `internal/observer`, which is the executable
 half of this document. Where the two disagree the code is right and this file is
-stale. Nothing here is wired to a runner or a schedule: the package is the
-contract, its validation, a reference notebook, two domains' fixtures and a
-language-neutral adapter conformance suite. The domain-command transport below
-is the boundary a later runtime client will implement; this package does not
-spawn one.
+stale. The contract package contains validation, a reference notebook, two
+domains' fixtures, the language-neutral conformance suite and the subprocess
+notebook client. `internal/runner` wires that client and the collector boundary
+to the same manual and scheduled pipeline used by the daily agent.
 `observer/v1` is unreleased on those terms — no records exist under it and no
 domain adapter reads it — so a correction to the shape is still made in place; a
 version pins a shape once there are records written under it to read.
@@ -334,3 +333,89 @@ difference with the scenario name, one-based step index, operation and expected
 and actual outcomes. Passing the payload validators alone is not conformance:
 the scenarios are what exercise stale-write refusal, idempotent replay,
 request-id scoping, append-only observations and claim/retirement ordering.
+
+## 10. Shuttle observer runs
+
+An observer agent selects a named operator registration with
+`"observer":{"config":"<name>"}`. The registration lives in `config.json`, not
+in model-authored output or the agent prompt:
+
+```json
+{
+  "observers": {
+    "mead": {
+      "definition": "/absolute/path/to/observer.json",
+      "collector": {
+        "argv": ["/absolute/path/to/collector", "collect"],
+        "working_dir": "/absolute/domain/root"
+      },
+      "notebook": {
+        "argv": ["/absolute/path/to/notebook-adapter"],
+        "working_dir": "/absolute/domain/root"
+      },
+      "data_policy": "cloud",
+      "deny_read": ["/absolute/domain/store"],
+      "max_model_input_bytes": 65536,
+      "timeout_seconds": 60
+    }
+  }
+}
+```
+
+Both commands are executed directly as argv, never through a shell, from their
+declared working directories and with a minimal environment. A registration
+marked `local-only` is refused before a Claude run or auth probe; adding a local
+runtime is separate work. Every registration names at least one absolute domain
+store root in `deny_read`; every observer run denies the union across all
+registrations, so a cloud observer cannot read another observer's local-only
+store. A denied root inside the run directory is refused because the
+run-directory allowance would reopen it. The observer definition is strict
+`observer-run/v1` JSON with `revision`, `identity`, `questions` and
+`instructions`. Question ids select notebook entries; an empty list is valid
+for an exploratory observer.
+
+Before model execution Shuttle takes a stable notebook snapshot by reading the
+revision, each configured entry and the revision again. It retries a moving
+snapshot three times. The collector receives one `collect` request containing
+the run, window, definition identity/revision and that snapshot. Its successful
+response is:
+
+```json
+{"status":"observed|empty|unavailable","evidence":[],"exploration":"..."}
+```
+
+Every evidence item is validated as a Bundle and must carry the configured
+identity. `empty` carries no bundle. `unavailable` carries a bundle that names
+an unavailable source or reading. The complete definition, notebook snapshot
+and collector response remain under `observer/`; `inputs/observer.json` is a
+separate bounded presentation. Bounding drops globally oldest history, then
+evidence from the end, then truncates exploratory prose, and records those
+losses rather than truncating JSON. Observer-run Read, Glob and Grep
+permissions cover only `inputs/`. Full definition, notebook and evidence
+artifacts remain in a sibling staging directory covered by the sandbox's
+`~/.shuttle` denial while the model runs, then move atomically under
+`observer/` after the model process exits. The model therefore cannot bypass
+the bounded presentation through its cwd even if its tool runtime grants
+default reads there.
+
+The model may write only `out/observer.json` and an optional `out/report.md`.
+The first carries required `silent`, plus Assessment and proposed Action
+arrays; a non-silent run configured for email also carries a printable
+`subject` of at most 120 characters. An assessment is accepted only when its
+evidence is byte-equivalent after canonical JSON encoding to a collector
+bundle. An action is retained but not claimed or applied to tk in this
+component. Its evidence references must come from the same collection.
+Delivery retry reads the original output capabilities retained in `run.json`;
+turning email on in a later agent definition cannot promote a historical
+file-only report into a message it was never validated to send.
+
+Validated assessments are recorded through the notebook adapter with request
+ids derived from the immutable run id and assessment position. The same request
+and revision are replayed once after an uncertain adapter failure. Stale
+revisions, retired entries and changed content under a request id are surfaced;
+none is rewritten against a newer revision. `observer-result.json`,
+`observer/validated.json` and `applied.json` retain the collection outcome,
+validated output, request ids, revisions, proposed actions and optional report
+application. This is why an empty collection, unavailable source, invalid
+payload, collection failure and deliberate model silence remain different
+facts after the run.

@@ -46,9 +46,9 @@ var (
 // observer that issued it: two observers picking the same natural id never
 // meet.
 type Request struct {
-	Identity  Identity
-	Revision  int64
-	RequestID string
+	Identity  Identity `json:"identity"`
+	Revision  int64    `json:"revision"`
+	RequestID string   `json:"request_id"`
 }
 
 // Retirement is what an explicit retirement returns. InFlight names the actions
@@ -58,27 +58,27 @@ type Request struct {
 // the wire. Those actions may still settle, or be reconciled by receipt under
 // the same id, and neither reactivates the question.
 type Retirement struct {
-	EntryID  string
-	Reason   string
-	At       string
-	InFlight []string
-	Revision int64
+	EntryID  string   `json:"entry_id"`
+	Reason   string   `json:"reason"`
+	At       string   `json:"at"`
+	InFlight []string `json:"in_flight"`
+	Revision int64    `json:"revision"`
 }
 
 // Entry is one line of the notebook: the question or unprompted finding, the
 // experiment attached to it, its state, the observations recorded against it in
 // order, and the actions still in flight.
 type Entry struct {
-	ID               string
-	Identity         Identity
-	Question         *Question
-	Finding          *Finding
-	Experiment       *Experiment
-	ExperimentStatus string
-	State            string
-	Observations     []*Assessment
-	InFlight         []string
-	Retirement       *Retirement
+	ID               string        `json:"id"`
+	Identity         Identity      `json:"identity"`
+	Question         *Question     `json:"question,omitempty"`
+	Finding          *Finding      `json:"finding,omitempty"`
+	Experiment       *Experiment   `json:"experiment,omitempty"`
+	ExperimentStatus string        `json:"experiment_status,omitempty"`
+	State            string        `json:"state"`
+	Observations     []*Assessment `json:"observations"`
+	InFlight         []string      `json:"in_flight"`
+	Retirement       *Retirement   `json:"retirement,omitempty"`
 }
 
 func (r *Retirement) clone() *Retirement {

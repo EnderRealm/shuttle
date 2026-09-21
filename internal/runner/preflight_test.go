@@ -14,6 +14,7 @@ import (
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
+	"shuttle/internal/observer"
 )
 
 func preflightFixture(t *testing.T) (Preflight, *agentdef.Definition, string, string) {
@@ -150,6 +151,93 @@ func TestUnsafeRunDoesNotRequireOrLaunchSRT(t *testing.T) {
 	if err != nil || string(data) != "model\n" {
 		t.Fatalf("direct auth probe calls = %q, %v", data, err)
 	}
+}
+
+func TestObserverPreflightRefusesLocalOnlyDataBeforeCloudAuth(t *testing.T) {
+	p, def, dir, calls := preflightFixture(t)
+	def.Manifest.Inputs = nil
+	def.Manifest.Observer = &agentdef.Observer{Config: "local"}
+	definition := observerDefinition{
+		ContractVersion: observerRunVersion, Revision: "r1",
+		Identity: observerIdentity("harness", "local"), Questions: []string{},
+		Instructions: "Keep local evidence local.",
+	}
+	definitionPath := filepath.Join(dir, "definition.json")
+	if err := writeJSON(definitionPath, definition, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := config.Command{Argv: []string{p.Config.Paths.ClaudeBin}, WorkingDir: dir}
+	p.Config.Observers = map[string]config.Observer{
+		"local": {
+			Definition: definitionPath, Collector: command, Notebook: command,
+			DataPolicy: "local-only", DenyRead: []string{dir + "-domain-store"},
+			MaxModelInputBytes: 4096, TimeoutSeconds: 10,
+		},
+	}
+	_, err := (&AuthTick{}).Check(context.Background(), p, def, dir)
+	var check *CheckError
+	if !errors.As(err, &check) || check.Name != "observer" || !strings.Contains(err.Error(), "local-only") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(calls); !os.IsNotExist(err) {
+		t.Fatalf("cloud auth probe ran for local-only observer: %v", err)
+	}
+}
+
+func TestObserverPreflightValidatesEveryRegistrationsDenyRead(t *testing.T) {
+	p, def, dir, calls := preflightFixture(t)
+	def.Manifest.Inputs = nil
+	def.Manifest.Observer = &agentdef.Observer{Config: "selected"}
+	definition := observerDefinition{
+		ContractVersion: observerRunVersion, Revision: "r1",
+		Identity: observerIdentity("harness", "selected"), Questions: []string{},
+		Instructions: "Observe the harness.",
+	}
+	definitionPath := filepath.Join(dir, "definition.json")
+	if err := writeJSON(definitionPath, definition, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := config.Command{Argv: []string{p.Config.Paths.ClaudeBin}, WorkingDir: dir}
+	registration := func(policy string, denyRead []string) config.Observer {
+		return config.Observer{
+			Definition: definitionPath, Collector: command, Notebook: command,
+			DataPolicy: policy, DenyRead: denyRead,
+			MaxModelInputBytes: 4096, TimeoutSeconds: 10,
+		}
+	}
+	for _, test := range []struct {
+		name      string
+		policy    string
+		denyRead  []string
+		wantField string
+		want      string
+	}{
+		{name: "relative", policy: "cloud", denyRead: []string{"relative/store"}, wantField: "deny_read[0]", want: "absolute clean path"},
+		{name: "unclean", policy: "cloud", denyRead: []string{dir + "-other-store/../store"}, wantField: "deny_read[0]", want: "absolute clean path"},
+		{name: "inside run dir", policy: "cloud", denyRead: []string{filepath.Join(dir, "inputs")}, wantField: "deny_read[0]", want: "inside run dir"},
+		{name: "local-only omitted", policy: "local-only", denyRead: nil, wantField: "deny_read:", want: "at least one domain store root"},
+		{name: "local-only empty", policy: "local-only", denyRead: []string{}, wantField: "deny_read:", want: "at least one domain store root"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p.Config.Observers = map[string]config.Observer{
+				"selected":  registration("cloud", []string{dir + "-domain-store"}),
+				"unrelated": registration(test.policy, test.denyRead),
+			}
+			_, err := (&AuthTick{}).Check(context.Background(), p, def, dir)
+			var check *CheckError
+			if !errors.As(err, &check) || check.Name != "observer" ||
+				!strings.Contains(err.Error(), "observers.unrelated."+test.wantField) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v", err)
+			}
+			if _, err := os.Stat(calls); !os.IsNotExist(err) {
+				t.Fatalf("cloud auth probe ran for invalid observer configuration: %v", err)
+			}
+		})
+	}
+}
+
+func observerIdentity(domain, name string) observer.Identity {
+	return observer.Identity{Domain: domain, Observer: name}
 }
 
 func TestDailyPreflightSchemaConfigAndMail(t *testing.T) {
