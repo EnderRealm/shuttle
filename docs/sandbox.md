@@ -276,14 +276,19 @@ without spawning the worker when the profile cannot be established.
 The coding profile re-allows the selected checkout, ticket store, retained run
 directory and derived worktree beneath the broad read denials. Writes are
 limited to the worktree, the code repository's Git object/ref storage, ticket
-files and tk state, Claude's subscription state, the segment temp directory and
-the configured toolchain caches. `denyWrite` takes back both repositories'
-Git configuration, hooks and indirection files, the linked worktree's gitfile,
-Claude's global `.claude.json`, commands/plugins/rules, every project's
-auto-memory directory and installed work-policy files, and every sibling
-worktree admin directory enumerated while the host's durable repository
-reservation is held. Authentication refreshes and session records under
-`~/.claude/` remain writable; executable MCP configuration and persistent
+files and tk state, Claude's subscription state, the segment temp directory,
+the per-user Darwin temp directory and the configured toolchain caches. The
+per-user temp directory is `confstr(_CS_DARWIN_USER_TEMP_DIR)` (what `getconf
+DARWIN_USER_TEMP_DIR` prints), resolved to its `/private/var/folders/.../T`
+path: SwiftPM's build service stages its build-manifest writes there and `swift
+test` creates its build temp there, both ignoring `TMPDIR`, so without it
+`swift build --disable-sandbox` fails with `EPERM`. `denyWrite` takes back
+both repositories' Git configuration, hooks and indirection files, the linked
+worktree's gitfile, Claude's global `.claude.json`, commands/plugins/rules,
+every project's auto-memory directory and installed work-policy files, and
+every sibling worktree admin directory enumerated while the host's durable
+repository reservation is held. Authentication refreshes and session records
+under `~/.claude/` remain writable; executable MCP configuration and persistent
 instructions do not.
 
 Repository reservations use the checkout's symlink-resolved canonical path,

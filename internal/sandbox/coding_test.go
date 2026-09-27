@@ -95,6 +95,7 @@ func TestCodingProfileProtectsGitIndirectionsAndSiblingWorktrees(t *testing.T) {
 	o := CodingOptions{
 		SRTBin: "/usr/local/bin/srt", RunDir: runDir, HomeDir: root, PATH: testPATH,
 		Repo: repo, TicketsRoot: tickets, Worktree: worktree,
+		UserTempDir:    filepath.Join(root, "user-temp"),
 		AllowedDomains: []string{"github.com"},
 		AllowWrite:     []string{filepath.Join(root, "swift-cache")},
 	}
@@ -126,13 +127,45 @@ func TestCodingProfileProtectsGitIndirectionsAndSiblingWorktrees(t *testing.T) {
 			t.Errorf("denyWrite does not contain %s", want)
 		}
 	}
-	for _, want := range []string{worktree, filepath.Join(repo, ".git"), tickets, filepath.Join(root, "swift-cache")} {
+	for _, want := range []string{worktree, filepath.Join(repo, ".git"), tickets, filepath.Join(root, "user-temp"), filepath.Join(root, "swift-cache")} {
 		if !slices.Contains(got.Filesystem.AllowWrite, want) {
 			t.Errorf("allowWrite does not contain %s", want)
 		}
 	}
+	if !slices.Contains(got.Filesystem.DenyRead, filepath.Join(root, "Library", "Keychains")) {
+		t.Errorf("denyRead does not contain %s", filepath.Join(root, "Library", "Keychains"))
+	}
 	if !slices.Equal(got.Network.AllowedDomains, []string{APIHost, platformHost, "github.com"}) {
 		t.Fatalf("allowed domains = %v", got.Network.AllowedDomains)
+	}
+}
+
+func TestUserTempDirIsResolvedAndClean(t *testing.T) {
+	dir, err := UserTempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(dir) || dir != filepath.Clean(dir) {
+		t.Fatalf("user temp dir %q is not a clean absolute path", dir)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != dir {
+		t.Fatalf("user temp dir %q resolves to %q", dir, resolved)
+	}
+}
+
+func TestCodingProfileRefusesMissingUserTempDir(t *testing.T) {
+	root := shortCodingRoot(t)
+	_, err := CodingProfileJSON(CodingOptions{
+		SRTBin: "/usr/local/bin/srt", RunDir: filepath.Join(root, "run"),
+		HomeDir: root, PATH: testPATH, Repo: filepath.Join(root, "repo"),
+		TicketsRoot: filepath.Join(root, "tickets"), Worktree: filepath.Join(root, "worktree"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "user temp dir") {
+		t.Fatalf("profile error = %v, want user temp dir refusal", err)
 	}
 }
 
@@ -142,6 +175,7 @@ func TestCheckCodingRefusesMissingSandbox(t *testing.T) {
 		SRTBin: filepath.Join(root, "missing-srt"), RunDir: filepath.Join(root, "run"),
 		HomeDir: root, PATH: testPATH, Repo: filepath.Join(root, "repo"),
 		TicketsRoot: filepath.Join(root, "tickets"), Worktree: filepath.Join(root, "worktree"),
+		UserTempDir: filepath.Join(root, "user-temp"),
 	}
 	admin := filepath.Join(o.Repo, ".git", "worktrees", filepath.Base(o.Worktree))
 	for _, dir := range []string{o.RunDir, o.Repo, o.TicketsRoot, o.Worktree, admin} {
@@ -174,6 +208,7 @@ func TestCodingProfileRefusesOccupiedExpectedAdminName(t *testing.T) {
 		SRTBin: "/usr/local/bin/srt", RunDir: filepath.Join(root, "run"),
 		HomeDir: root, PATH: testPATH, Repo: repo,
 		TicketsRoot: filepath.Join(root, "tickets"), Worktree: worktree,
+		UserTempDir: filepath.Join(root, "user-temp"),
 	})
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("profile error = %v, want occupied admin refusal", err)
@@ -231,9 +266,13 @@ func TestLiveCodingSRT(t *testing.T) {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	userTemp, err := UserTempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	o := CodingOptions{
 		SRTBin: bin, RunDir: runDir, HomeDir: home, PATH: testPATH,
-		Repo: repo, TicketsRoot: tickets, Worktree: worktree,
+		Repo: repo, TicketsRoot: tickets, Worktree: worktree, UserTempDir: userTemp,
 	}
 	if _, err := WriteCodingProfile(o); err != nil {
 		t.Fatal(err)
@@ -243,6 +282,16 @@ func TestLiveCodingSRT(t *testing.T) {
 	}
 	if code, stderr := codingExec(o, "touch "+filepath.Join(worktree, "allowed")); code != 0 {
 		t.Fatalf("declared worktree write failed: %s", stderr)
+	}
+	userTempFile := filepath.Join(userTemp, "shuttle-live-"+filepath.Base(root))
+	t.Cleanup(func() { os.Remove(userTempFile) })
+	if code, stderr := codingExec(o, "touch "+userTempFile+" && rm "+userTempFile); code != 0 {
+		t.Fatalf("user temp dir write failed: %s", stderr)
+	}
+	userTempSibling := filepath.Join(filepath.Dir(userTemp), "shuttle-live-"+filepath.Base(root))
+	t.Cleanup(func() { os.Remove(userTempSibling) })
+	if code, stderr := codingExec(o, "touch "+userTempSibling); code == 0 || !strings.Contains(stderr, "Operation not permitted") {
+		t.Fatalf("user temp dir sibling write returned %d: %s", code, stderr)
 	}
 	commit := "printf committed > " + filepath.Join(worktree, "committed.txt") +
 		" && git -C " + worktree + " add committed.txt" +

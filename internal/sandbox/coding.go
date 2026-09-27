@@ -28,6 +28,7 @@ type CodingOptions struct {
 	Repo           string
 	TicketsRoot    string
 	Worktree       string
+	UserTempDir    string
 	AllowedDomains []string
 	AllowWrite     []string
 }
@@ -127,6 +128,9 @@ func CodingProfileJSON(o CodingOptions) ([]byte, error) {
 		filepath.Join(o.HomeDir, ".ticket", "state"),
 		filepath.Join(o.HomeDir, ".claude"),
 		o.tmpDir(),
+		// SwiftPM's build service stages atomic writes and swift test's
+		// build temp under confstr's per-user temp dir, ignoring TMPDIR.
+		o.UserTempDir,
 	}
 	for _, path := range o.AllowWrite {
 		if !slices.Contains(allowWrite, path) {
@@ -237,6 +241,7 @@ func requireCoding(o CodingOptions) error {
 	for name, path := range map[string]string{
 		"srt bin": o.SRTBin, "run dir": o.RunDir, "home dir": o.HomeDir,
 		"repository": o.Repo, "tickets root": o.TicketsRoot, "worktree": o.Worktree,
+		"user temp dir": o.UserTempDir,
 	} {
 		if !filepath.IsAbs(path) || path != filepath.Clean(path) {
 			return fmt.Errorf("%s %q is not a clean absolute path", name, path)

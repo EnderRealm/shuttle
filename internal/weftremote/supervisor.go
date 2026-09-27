@@ -133,9 +133,14 @@ func (s *Supervisor) run(runID string) error {
 	if err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
+	userTempDir, err := sandbox.UserTempDir()
+	if err != nil {
+		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+	}
 	coding := sandbox.CodingOptions{
 		SRTBin: s.cfg.Paths.SRTBin, RunDir: runDir, HomeDir: homeDir, PATH: workerPath,
 		Repo: run.Repo, TicketsRoot: catalog.config.CentralRoot, Worktree: run.Worktree,
+		UserTempDir:    userTempDir,
 		AllowedDomains: s.cfg.Weft.Sandbox.AllowedDomains,
 		AllowWrite:     s.cfg.Weft.Sandbox.AllowWrite,
 	}
