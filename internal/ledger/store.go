@@ -37,8 +37,9 @@ var ErrSchemaTooNew = errors.New("run ledger schema is newer than this binary")
 
 // Store is the run ledger, ~/.shuttle/runs.db.
 type Store struct {
-	// OnTerminal receives each committed completion/failure before the write
-	// returns. Configure it before sharing the store. Notification failures
+	// OnTerminal receives each committed completion/failure, and each
+	// delivery auth incident, before the write returns. Configure it before
+	// sharing the store. Notification failures
 	// must be logged by the callback, never undo a terminal ledger write.
 	OnTerminal func(Event)
 	db         *sql.DB

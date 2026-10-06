@@ -16,6 +16,7 @@ import (
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/deliver"
 	"shuttle/internal/ledger"
 	observercontract "shuttle/internal/observer"
 	"shuttle/internal/output"
@@ -1191,12 +1192,15 @@ func TestObserverRetryDeliveryHonorsEligibilityAndClearsFailures(t *testing.T) {
 		wantSend       bool
 		priorError     string
 		removeSelector bool
+		sendErr        error
 	}{
 		{name: "silent", silent: true, email: true},
 		{name: "historical file-only", report: true, retryEmail: true},
 		{name: "no-deliver retry", email: true, report: true, wantSend: true},
 		{name: "failed retry", email: true, report: true, wantSend: true, priorError: "temporary failure"},
 		{name: "selector removed", email: true, report: true, wantSend: true, removeSelector: true},
+		{name: "auth rejected", email: true, report: true, wantSend: true, priorError: "temporary failure",
+			sendErr: &deliver.Error{Status: 401, Detail: "10000 Authentication error"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newLiveFixture(t, "success")
@@ -1261,7 +1265,7 @@ func TestObserverRetryDeliveryHonorsEligibilityAndClearsFailures(t *testing.T) {
 			if err := f.store.SetDelivery(run.ID, status, test.priorError); err != nil {
 				t.Fatal(err)
 			}
-			sender := &recordingSender{}
+			sender := &recordingSender{err: test.sendErr}
 			f.pipeline.Sender = sender
 			if test.retryEmail {
 				f.def.Manifest.Outputs.Email = &agentdef.EmailOutput{Max: 1}
@@ -1270,11 +1274,21 @@ func TestObserverRetryDeliveryHonorsEligibilityAndClearsFailures(t *testing.T) {
 				f.def.Manifest.Observer = nil
 			}
 			row, _ := f.store.Get(run.ID)
-			if err := f.pipeline.RetryDelivery(context.Background(), f.def, row); err != nil {
-				t.Fatal(err)
+			if err := f.pipeline.RetryDelivery(context.Background(), f.def, row); !errors.Is(err, test.sendErr) {
+				t.Fatalf("retry = %v, want %v", err, test.sendErr)
 			}
 			if got := len(sender.messages); got != boolInt(test.wantSend) {
 				t.Fatalf("sent %d messages, want %t", got, test.wantSend)
+			}
+			if test.sendErr != nil {
+				row, _ := f.store.Get(run.ID)
+				incidents, err := f.store.OpenIncidents()
+				if row.Status != ledger.StatusCompleted || row.DeliveryStatus.String != ledger.DeliveryFailed ||
+					!strings.Contains(row.DeliveryError.String, "HTTP 401") ||
+					err != nil || len(incidents) != 1 || !strings.HasPrefix(incidents[0].Signature, ledger.IncidentDeliveryAuth) {
+					t.Fatalf("row = %+v, incidents = %+v, %v", row, incidents, err)
+				}
+				return
 			}
 			if test.priorError != "" {
 				var after observerApplied

@@ -1,6 +1,10 @@
 package ledger
 
-import "database/sql"
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+)
 
 // Event is the committed transition relevant to notifications. It is computed
 // inside the terminal write's transaction, so concurrent writers cannot claim
@@ -82,6 +86,46 @@ func (s *Store) FailEvent(id, class, errText string, res Result) (Event, error) 
 			}
 			event.PausedReason = reason.String
 		}
+		return nil
+	})
+	if err != nil {
+		return Event{}, err
+	}
+	if s.OnTerminal != nil {
+		s.OnTerminal(event)
+	}
+	return event, nil
+}
+
+// IncidentDeliveryAuth prefixes the signature of an incident opened because
+// the email provider rejected the delivery credential (§10.1). It is not a
+// §7.6 failure class: the run completed and only its email failed.
+const IncidentDeliveryAuth = "delivery_auth"
+
+// DeliveryAuthIncident opens, or counts a repeat of, the incident for a run
+// whose delivery was refused on its credential. The run's status, the agent's
+// streak and its pause are untouched: the model did its work, and the fix is
+// the token rather than the agent (§6.1).
+func (s *Store) DeliveryAuthIncident(id, errText string) (Event, error) {
+	var event Event
+	err := s.withTx(func(tx *sql.Tx) error {
+		var agent string
+		err := tx.QueryRow(`SELECT agent FROM runs WHERE id = ?`, id).Scan(&agent)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("run %s: not in the ledger", id)
+		}
+		if err != nil {
+			return err
+		}
+		event = Event{Agent: agent, RunID: id, Class: IncidentDeliveryAuth, Signature: Signature(IncidentDeliveryAuth, errText)}
+		if err := upsertIncident(tx, agent, event.Signature, id, s.timestamp()); err != nil {
+			return err
+		}
+		var count int
+		if err := tx.QueryRow(`SELECT id, count FROM incidents WHERE agent = ? AND signature = ? AND acknowledged_at IS NULL`, agent, event.Signature).Scan(&event.IncidentID, &count); err != nil {
+			return err
+		}
+		event.NewIncident = count == 1
 		return nil
 	})
 	if err != nil {

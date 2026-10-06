@@ -45,6 +45,10 @@ func (n *Notifier) Notify(ctx context.Context, event ledger.Event) (bool, error)
 	case event.Recovered:
 		kind = notifyRecovered
 		body = fmt.Sprintf("%s recovered. Run %s completed.", event.Agent, event.RunID)
+	case event.Class == ledger.IncidentDeliveryAuth:
+		// The agent is neither failed nor paused: only the email token is.
+		kind = notifyAuth
+		body = fmt.Sprintf("%s report not delivered: %s. Incident %d; run %s completed. Repair the email token.", event.Agent, event.Signature, event.IncidentID, event.RunID)
 	case event.Class == ledger.ClassAuth:
 		kind = notifyAuth
 		body += " Paused for auth; repair the credential, then shuttle resume " + event.Agent + "."

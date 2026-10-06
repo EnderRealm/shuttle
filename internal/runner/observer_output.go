@@ -398,6 +398,9 @@ func (p *Pipeline) deliverObserverReport(ctx context.Context, def *agentdef.Defi
 		if recordErr := writeObserverApplied(p, row.ID, run.Dir, applied); recordErr != nil {
 			return errors.Join(err, recordErr)
 		}
+		if incidentErr := p.openDeliveryAuthIncident(row.ID, err); incidentErr != nil {
+			return errors.Join(err, incidentErr)
+		}
 		return err
 	}
 	applied.DeliveryStatus = ledger.DeliveryDelivered

@@ -218,7 +218,7 @@ func newPipeline(store *ledger.Store, logger *log.Logger) (claimedPipeline, erro
 	runner.ConfigureOutcomes(store, cfg, home, logger)
 	return &runner.Pipeline{
 		Ledger: store, Config: cfg, Home: home, HomeDir: homeDir,
-		PATH: os.Getenv("PATH"), Logger: logger,
+		PATH: os.Getenv("PATH"), Logger: logger, Sender: runner.NewSender(cfg, logger),
 	}, nil
 }
 

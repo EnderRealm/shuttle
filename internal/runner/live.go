@@ -358,6 +358,9 @@ func (p *Pipeline) deliver(ctx context.Context, def *agentdef.Definition, runID,
 		if recordErr := p.recordApplied(runID, runDir, applied); recordErr != nil {
 			return errors.Join(err, recordErr)
 		}
+		if incidentErr := p.openDeliveryAuthIncident(runID, err); incidentErr != nil {
+			return errors.Join(err, incidentErr)
+		}
 		return err
 	}
 	applied.DeliveryStatus = ledger.DeliveryDelivered
