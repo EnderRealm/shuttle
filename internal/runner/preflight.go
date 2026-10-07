@@ -40,6 +40,7 @@ type Preflight struct {
 	HomeDir         string
 	PATH            string
 	UnsafeNoSandbox bool
+	NoDeliver       bool
 	findKey         func(string) (string, error)
 }
 
@@ -172,7 +173,9 @@ func (p Preflight) Check(ctx context.Context, def *agentdef.Definition, runDir s
 			return names, err
 		}
 	}
-	if out := def.Manifest.Outputs.Email; out != nil && out.Max > 0 {
+	// A --no-deliver run never sends, so the sender's configuration is not a
+	// requirement; it can then be iterated before delivery is set up (§10.1).
+	if out := def.Manifest.Outputs.Email; out != nil && out.Max > 0 && !p.NoDeliver {
 		if err := check("output.email", func() error {
 			e := p.Config.Email
 			if e.Provider != "cloudflare" || e.AccountID == "" || e.From == "" || len(e.To) == 0 {

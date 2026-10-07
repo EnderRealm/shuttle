@@ -112,7 +112,7 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 	}
 	preflight := Preflight{
 		Config: p.Config, Home: p.Home, HomeDir: p.HomeDir, PATH: p.PATH,
-		UnsafeNoSandbox: opts.UnsafeNoSandbox, findKey: p.FindKey,
+		UnsafeNoSandbox: opts.UnsafeNoSandbox, NoDeliver: opts.NoDeliver, findKey: p.FindKey,
 	}
 	auth := opts.Auth
 	if auth == nil {

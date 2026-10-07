@@ -506,7 +506,8 @@ Once per run, before any provider: `claude` binary is executable at the configur
 path and `claude --version` runs; `srt` is present and `srt -s <profile> -c true`
 exits 0 (0.24 s measured); the Keychain items resolve; `summaries.db` opens read-only
 and its schema is version 4 or later; `~/.ticket/config.yaml` parses and `central_root`
-exists; the Cloudflare token resolves (delivery is not attempted here). An auth
+exists; the Cloudflare token resolves (delivery is not attempted here), except on a
+`--no-deliver` run, which never sends. An auth
 preflight, `claude --bare -p ping --model haiku --max-turns 1 --output-format json`
 with a 60 s timeout, runs once per daemon tick that has a due slot, not per run, and
 its cost is a rounding error. Any preflight failure is a `failed` run with the

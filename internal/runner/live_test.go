@@ -277,6 +277,52 @@ func TestPipelinePreflightFailureSpendsNothingAndUsesFailurePolicy(t *testing.T)
 	}
 }
 
+// The sender is set up by hand after the agent is iterated live (§10.1), so a
+// run that will not send must not require its account or from address.
+func TestPipelineEmailPreflightFollowsNoDeliver(t *testing.T) {
+	incomplete := func(f *liveFixture) {
+		f.pipeline.Config.Email.AccountID = ""
+		f.pipeline.Config.Email.From = ""
+	}
+	t.Run("no-deliver", func(t *testing.T) {
+		f := newLiveFixture(t, "success")
+		incomplete(f)
+		sender := &recordingSender{}
+		f.pipeline.Sender = sender
+		run := f.claim(t, ledger.TriggerManual)
+		if _, err := f.pipeline.Run(context.Background(), f.def, run, Options{NoDeliver: true}); err != nil {
+			t.Fatal(err)
+		}
+		if calls := readCalls(t, f.calls); calls != 2 {
+			t.Fatalf("model calls = %d, want one auth probe and one run", calls)
+		}
+		row, _ := f.store.Get(run.ID)
+		if row.Status != ledger.StatusCompleted || row.DeliveryStatus.String != ledger.DeliverySkipped {
+			t.Fatalf("row = %+v", row)
+		}
+		if len(sender.messages) != 0 {
+			t.Fatalf("no-deliver run sent %d messages", len(sender.messages))
+		}
+	})
+	t.Run("delivering", func(t *testing.T) {
+		f := newLiveFixture(t, "success")
+		incomplete(f)
+		run := f.claim(t, ledger.TriggerManual)
+		_, err := f.pipeline.Run(context.Background(), f.def, run, Options{})
+		var check *CheckError
+		if !errors.As(err, &check) || check.Name != "output.email" {
+			t.Fatalf("err = %v, want the output.email preflight check", err)
+		}
+		if _, err := os.Stat(f.calls); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("model was called before preflight completed: %v", err)
+		}
+		row, _ := f.store.Get(run.ID)
+		if row.Status != ledger.StatusFailed || row.FailureClass.String != ledger.ClassPreflight || row.CostUSD.Valid {
+			t.Fatalf("row = %+v", row)
+		}
+	})
+}
+
 func TestPipelineFileOnlyRunNeedsNoEmailConfiguration(t *testing.T) {
 	f := newLiveFixture(t, "silent")
 	f.def.Manifest.Outputs.Email = nil
