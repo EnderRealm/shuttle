@@ -62,7 +62,8 @@ CREATE TABLE commits (
 func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 // newDB builds a schema-4 summaries.db under a temp loom home and returns the
-// home. version is what schema_meta records, so a test can build an outdated one.
+// home. version is what schema_meta records, so a test can build an outdated or
+// a later one; populate can alter the tables to match.
 func newDB(t *testing.T, version string, populate func(*sql.DB)) string {
 	t.Helper()
 	home := t.TempDir()
@@ -126,11 +127,65 @@ func TestMissingDatabaseIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestSchemaOtherThanFourIsRefused(t *testing.T) {
-	home := newDB(t, "3", nil)
+func TestSchemaBelowFourIsRefused(t *testing.T) {
+	for _, version := range []string{"3", "four"} {
+		home := newDB(t, version, nil)
+		_, err := Run(context.Background(), testEnv(t, home), nil, testWindow(t))
+		if err == nil || !strings.Contains(err.Error(), "schema version "+version) {
+			t.Fatalf("err = %v, want one naming the version found", err)
+		}
+	}
+}
+
+// A later schema is read as long as the columns are still there; a missing one
+// fails both the run and preflight by name.
+func TestMissingColumnIsRefused(t *testing.T) {
+	home := newDB(t, "12", func(db *sql.DB) {
+		if _, err := db.Exec(`ALTER TABLE commits DROP COLUMN subject`); err != nil {
+			t.Fatal(err)
+		}
+	})
 	_, err := Run(context.Background(), testEnv(t, home), nil, testWindow(t))
-	if err == nil || !strings.Contains(err.Error(), "schema version 3") {
-		t.Fatalf("err = %v, want one naming the version found", err)
+	if err == nil || !strings.Contains(err.Error(), "commits.subject") {
+		t.Fatalf("Run err = %v, want one naming the missing column", err)
+	}
+	if err := Check(context.Background(), home); err == nil || !strings.Contains(err.Error(), "commits.subject") {
+		t.Fatalf("Check err = %v, want one naming the missing column", err)
+	}
+}
+
+// From loom v8 a subagent is its own row naming its parent. Its usage is on
+// that row only, so it counts toward the totals but not as a session.
+func TestChildSessionsAddUsageButAreNotSessions(t *testing.T) {
+	w := testWindow(t)
+	inside := w.From.Add(9 * time.Hour)
+	remote := "git@github.com:steve/shuttle.git"
+	home := newDB(t, "12", func(db *sql.DB) {
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN parent_session_id TEXT`); err != nil {
+			t.Fatal(err)
+		}
+		insertSession(t, db, "claude", "parent", "shuttle", "", "", remote, inside, 4, 9, 1, 100, 200, 300)
+		insertSession(t, db, "claude", "child", "shuttle", "", "", remote, inside.Add(time.Minute), 2, 3, 1, 10, 20, 30)
+		// An empty parent is a top-level session, as NULL is.
+		insertSession(t, db, "codex", "empty", "shuttle", "", "", remote, inside.Add(time.Hour), 1, 1, 0, 1, 2, 3)
+		if _, err := db.Exec(`UPDATE sessions SET parent_session_id = CASE session_id WHEN 'child' THEN 'parent' WHEN 'empty' THEN '' END`); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	doc := run(t, home)
+	if len(doc.Repos) != 1 {
+		t.Fatalf("repos = %+v, want one", doc.Repos)
+	}
+	r := doc.Repos[0]
+	if r.Sessions != 2 || len(r.SessionList) != 2 || r.SessionList[0].SessionID != "parent" || r.SessionList[1].SessionID != "empty" {
+		t.Errorf("sessions = %d %+v, want the two top-level sessions only", r.Sessions, r.SessionList)
+	}
+	if r.Turns != 7 || r.ToolCalls != 13 || r.Errors != 2 {
+		t.Errorf("counts = %+v, want the child's included", r)
+	}
+	if r.Tokens != (tokens{Input: 111, Output: 222, CacheRead: 333}) {
+		t.Errorf("tokens = %+v, want the child's included", r.Tokens)
 	}
 }
 

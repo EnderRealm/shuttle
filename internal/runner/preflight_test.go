@@ -248,7 +248,11 @@ func TestDailyPreflightSchemaConfigAndMail(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT); INSERT INTO schema_meta VALUES('schema_version','4')`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT); INSERT INTO schema_meta VALUES('schema_version','4');
+		CREATE TABLE sessions(agent, session_id, project, cwd, cwd_raw, git_remote, start_time,
+			turn_count, tool_call_count, error_count, input_tokens, output_tokens, cache_read_tokens);
+		CREATE TABLE turns(agent, session_id, idx, user_message);
+		CREATE TABLE commits(committed_at, git_remote, cwd, commit_hash, branch, subject)`); err != nil {
 		t.Fatal(err)
 	}
 	p.Config.Paths.LoomBin = p.Config.Paths.ClaudeBin
@@ -265,7 +269,7 @@ func TestDailyPreflightSchemaConfigAndMail(t *testing.T) {
 	if _, err := p.Check(context.Background(), d, dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE schema_meta SET value='5'`); err != nil {
+	if _, err := db.Exec(`UPDATE schema_meta SET value='3'`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := p.Check(context.Background(), d, dir); err == nil || !strings.Contains(err.Error(), "input.loom-sessions") {

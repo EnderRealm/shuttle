@@ -505,7 +505,7 @@ EOF with no `result` is `no_result` (exit 0) or `died` (non-zero).
 Once per run, before any provider: `claude` binary is executable at the configured
 path and `claude --version` runs; `srt` is present and `srt -s <profile> -c true`
 exits 0 (0.24 s measured); the Keychain items resolve; `summaries.db` opens read-only
-and its schema is version 4; `~/.ticket/config.yaml` parses and `central_root`
+and its schema is version 4 or later; `~/.ticket/config.yaml` parses and `central_root`
 exists; the Cloudflare token resolves (delivery is not attempted here). An auth
 preflight, `claude --bare -p ping --model haiku --max-turns 1 --output-format json`
 with a 60 s timeout, runs once per daemon tick that has a due slot, not per run, and
@@ -551,7 +551,7 @@ the agent's timezone that ends at or before the slot's date. A 04:30 slot on
 
 Opens `<loom_home>/summaries.db` read-only (`mode=ro`, `busy_timeout(2000)`, the
 same DSN loom's own read paths use) and refuses to run if `schema_meta.version` is
-not 4. Selects sessions whose `start_time` falls in the window, grouped by
+below 4. Selects sessions whose `start_time` falls in the window, grouped by
 repository using loom's precedence (`git_remote`, then `cwd_raw`, then `cwd`, then
 the `project` slug, normalised with the same rules as `NormalizeRemote`). Per
 repository: session count, turn count, tool-call count, error count, token totals
@@ -559,7 +559,11 @@ repository: session count, turn count, tool-call count, error count, token total
 and per session the first 300 characters of the first `turns.user_message` as the
 session's stated intent. Nothing from `tool_calls.result_summary` or assistant text
 is included; the bundle stays small and the intent line is enough for the model to
-say what the session was for.
+say what the session was for. A later schema is read as long as every column the
+provider reads is still there; a missing one fails the provider by name. A row with
+`parent_session_id` set (loom v8 and later) is a subagent: its counts and tokens go
+to its repository's totals, since loom records a subagent's usage on its row alone,
+but it is not a session of its own.
 
 Missing database: the provider writes `{"available": false}` and the run continues,
 as loom's `View.Available` does; a summary that says "loom was unavailable" is

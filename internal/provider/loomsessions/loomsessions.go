@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,10 +24,15 @@ import (
 const (
 	dbFile = "summaries.db"
 
-	// wantSchema is the only schema this provider reads. loom's v4 added the
+	// minSchema is the oldest schema this provider reads. loom's v4 added the
 	// commits table; a v3 database has no column to read them from, so the
-	// provider refuses rather than reporting a day with no commits in it.
-	wantSchema = "4"
+	// provider refuses rather than reporting a day with no commits in it. A
+	// later version is read as long as every column in readColumns survives.
+	minSchema = 4
+
+	// parentColumn marks a subagent's session (loom v8 and later). Older
+	// databases lack it, and every row in them is a top-level session.
+	parentColumn = "parent_session_id"
 
 	// intentRunes bounds the session intent. The first user message is enough
 	// for the model to say what a session was for, and the bundle has a 40 KB
@@ -35,6 +41,18 @@ const (
 
 	unknownRepo = "unknown"
 )
+
+// readColumns is every column this provider reads, checked by name because
+// loom migrates its schema without this provider's knowledge.
+var readColumns = []struct {
+	table   string
+	columns []string
+}{
+	{"sessions", []string{"agent", "session_id", "project", "cwd", "cwd_raw", "git_remote", "start_time",
+		"turn_count", "tool_call_count", "error_count", "input_tokens", "output_tokens", "cache_read_tokens"}},
+	{"turns", []string{"agent", "session_id", "idx", "user_message"}},
+	{"commits", []string{"committed_at", "git_remote", "cwd", "commit_hash", "branch", "subject"}},
+}
 
 // unavailable is the document a missing database yields (§8.2): the run
 // continues, because a summary that says loom was unavailable is better than
@@ -91,12 +109,13 @@ func Run(ctx context.Context, env provider.Env, _ map[string]any, w provider.Win
 		return nil, err
 	}
 	defer db.Close()
-	if err := checkSchema(ctx, db); err != nil {
+	hasParent, err := checkSchema(ctx, db)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 
 	repos := map[string]*repo{}
-	if err := readSessions(ctx, db, w, repos); err != nil {
+	if err := readSessions(ctx, db, w, hasParent, repos); err != nil {
 		return nil, err
 	}
 	if err := readCommits(ctx, db, w, repos); err != nil {
@@ -126,25 +145,64 @@ func Check(ctx context.Context, home string) error {
 		return err
 	}
 	defer db.Close()
-	return checkSchema(ctx, db)
+	_, err = checkSchema(ctx, db)
+	return err
 }
 
-func checkSchema(ctx context.Context, db *sql.DB) error {
+// checkSchema refuses a database older than minSchema or missing a column the
+// provider reads, and reports whether sessions carries parentColumn.
+func checkSchema(ctx context.Context, db *sql.DB) (bool, error) {
 	var version string
 	err := db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
-		return errors.New("schema_meta: no schema_version")
+		return false, errors.New("schema_meta: no schema_version")
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if version != wantSchema {
-		return fmt.Errorf("schema version %s: this provider reads version %s", version, wantSchema)
+	if n, err := strconv.Atoi(version); err != nil || n < minSchema {
+		return false, fmt.Errorf("schema version %s: this provider reads version %d or later", version, minSchema)
 	}
-	return nil
+	var hasParent bool
+	for _, t := range readColumns {
+		have, err := tableColumns(ctx, db, t.table)
+		if err != nil {
+			return false, err
+		}
+		for _, c := range t.columns {
+			if !have[c] {
+				return false, fmt.Errorf("schema version %s: %s.%s is missing", version, t.table, c)
+			}
+		}
+		if t.table == "sessions" {
+			hasParent = have[parentColumn]
+		}
+	}
+	return hasParent, nil
 }
 
-func readSessions(ctx context.Context, db *sql.DB, w provider.Window, repos map[string]*repo) error {
+func tableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	have := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		have[name] = true
+	}
+	return have, rows.Err()
+}
+
+func readSessions(ctx context.Context, db *sql.DB, w provider.Window, hasParent bool, repos map[string]*repo) error {
+	parent := "NULL"
+	if hasParent {
+		parent = parentColumn
+	}
 	// The bounds narrow the scan to the index; they are widened by a second on
 	// each side because RFC3339Nano is variable width — a whole second renders
 	// without a fraction, and '.' sorts below 'Z', so a string comparison alone
@@ -152,7 +210,7 @@ func readSessions(ctx context.Context, db *sql.DB, w provider.Window, repos map[
 	// the parsed instant.
 	rows, err := db.QueryContext(ctx, `SELECT agent, session_id, project, cwd, cwd_raw, git_remote,
 			start_time, turn_count, tool_call_count, error_count,
-			input_tokens, output_tokens, cache_read_tokens
+			input_tokens, output_tokens, cache_read_tokens, `+parent+`
 		FROM sessions WHERE start_time >= ? AND start_time < ? ORDER BY start_time`,
 		bound(w.From.Add(-time.Second)), bound(w.To.Add(time.Second)))
 	if err != nil {
@@ -167,9 +225,10 @@ func readSessions(ctx context.Context, db *sql.DB, w provider.Window, repos map[
 			project, cwd, cwdRaw, gitRemote sql.NullString
 			turns, toolCalls, errCount      sql.NullInt64
 			inputTok, outputTok, cacheTok   sql.NullInt64
+			parentID                        sql.NullString
 		)
 		if err := rows.Scan(&s.Agent, &s.SessionID, &project, &cwd, &cwdRaw, &gitRemote,
-			&s.StartTime, &turns, &toolCalls, &errCount, &inputTok, &outputTok, &cacheTok); err != nil {
+			&s.StartTime, &turns, &toolCalls, &errCount, &inputTok, &outputTok, &cacheTok, &parentID); err != nil {
 			return err
 		}
 		start, err := time.Parse(time.RFC3339Nano, s.StartTime)
@@ -179,13 +238,18 @@ func readSessions(ctx context.Context, db *sql.DB, w provider.Window, repos map[
 			continue
 		}
 		r := group(repos, identity(gitRemote.String, cwdRaw.String, cwd.String, project.String))
-		r.Sessions++
 		r.Turns += int(turns.Int64)
 		r.ToolCalls += int(toolCalls.Int64)
 		r.Errors += int(errCount.Int64)
 		r.Tokens.Input += int(inputTok.Int64)
 		r.Tokens.Output += int(outputTok.Int64)
 		r.Tokens.CacheRead += int(cacheTok.Int64)
+		if parentID.String != "" {
+			// A subagent's usage is recorded on its own row only, so it adds to
+			// the totals, but it is part of its parent's session, not one more.
+			continue
+		}
+		r.Sessions++
 		r.SessionList = append(r.SessionList, s)
 		order = append(order, key{s.Agent, s.SessionID})
 	}
