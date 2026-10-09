@@ -1,4 +1,4 @@
-// Package claude owns the claude runtime: the argv builder for a bare,
+// Package claude owns the claude runtime: the argv builder for an isolated,
 // api_key-authenticated headless run, the stream-json event parser that
 // reads stdout as it arrives, and process control including timeout and
 // process-group kill.

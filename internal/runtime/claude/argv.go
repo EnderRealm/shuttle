@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -57,19 +58,29 @@ func (o Options) OutDir() string       { return filepath.Join(o.RunDir, "out") }
 
 // Argv is the §7.4 command line, behind Launcher when one is set: srt takes it
 // as argv after a `--`, so it is exec'd rather than written to a file.
+//
+// No --bare: it sets CLAUDE_CODE_SIMPLE, which shrinks the built-in tool set
+// to Bash, Edit and Read before --tools filters it, so a manifest asking for
+// Glob, Grep or Write got Read alone. Its isolation is rebuilt here instead:
+// --strict-mcp-config drops every MCP server, and an empty --setting-sources
+// loads no user, project or local settings — and with them no CLAUDE.md, which
+// the CLI otherwise discovers by walking up from the run directory into $HOME
+// (§7.4). The --settings file still applies.
 func Argv(o Options) ([]string, error) {
 	if err := requireLaunchable(o); err != nil {
 		return nil, err
 	}
 	return append(append([]string{}, o.Launcher...),
 		o.Bin,
-		"--bare", "-p",
+		"-p",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--model", o.Model,
 		"--max-turns", strconv.Itoa(o.MaxTurns),
 		"--max-budget-usd", strconv.FormatFloat(o.MaxBudgetUSD, 'f', 2, 64),
+		"--strict-mcp-config",
+		"--setting-sources", "",
 		"--permission-mode", "dontAsk",
 		"--tools", strings.Join(o.Tools, ","),
 		"--settings", o.SettingsPath(),
@@ -108,9 +119,12 @@ func Environ(o Options) ([]string, error) {
 // dontAsk mean "only this".
 type settings struct {
 	Permissions permissions `json:"permissions"`
+	// Always false: auto-memory is on by default and adds a memory directory
+	// under CLAUDE_CONFIG_DIR, and instructions to use it, to every run (§7.4).
+	AutoMemoryEnabled bool `json:"autoMemoryEnabled"`
 	// The daemon's own hooks would otherwise run inside the model's turns;
-	// --bare already reads no user settings, so this is belt for the case
-	// where a settings file is honoured anyway.
+	// the empty --setting-sources already loads no settings file that could
+	// define one, so this is belt for the case where one is honoured anyway.
 	DisableAllHooks bool `json:"disableAllHooks"`
 }
 
@@ -126,7 +140,7 @@ type permissions struct {
 func SettingsJSON(o Options) ([]byte, error) {
 	// Guarded like the other two entry points, and for a sharper reason: this
 	// is the document that makes --permission-mode dontAsk mean "only this",
-	// and an empty RunDir would render its allow rules as Read(/**).
+	// and an empty RunDir would render its allow rules as Read(//**).
 	if err := requireLaunchable(o); err != nil {
 		return nil, err
 	}
@@ -135,14 +149,25 @@ func SettingsJSON(o Options) ([]byte, error) {
 		// requireLaunchable refused every tool without a rule above, so the
 		// allow list is complete or the launch never happened.
 		rules, _ := toolRules(o, tool)
-		s.Permissions.Allow = append(s.Permissions.Allow, rules...)
+		for _, rule := range rules {
+			// Read, Glob and Grep share one rule, so it is emitted once.
+			if !slices.Contains(s.Permissions.Allow, rule) {
+				s.Permissions.Allow = append(s.Permissions.Allow, rule)
+			}
+		}
 	}
 	return json.MarshalIndent(s, "", "  ")
 }
 
-// toolRule is the settings.json allow rule for one manifest tool, and with it
-// the set of tools phase 1 knows: a tool with no rule is one --tools would
+// toolRules is the settings.json allow rules for one manifest tool, and with
+// them the set of tools phase 1 knows: a tool with no rule is one --tools would
 // name with nothing allowing it, which fails mid-run rather than at launch.
+//
+// The CLI checks file access against Read and Edit rules only (§7.4): a path
+// rule spelled Write, Glob or Grep is accepted and never consulted, so Glob and
+// Grep are governed by the Read rule and Write by an Edit rule. Every pattern
+// is `//` + an absolute path, because a single leading slash anchors at the
+// --settings file's directory rather than the filesystem root.
 func toolRules(o Options, tool string) ([]string, bool) {
 	switch tool {
 	case "Read", "Glob", "Grep":
@@ -152,12 +177,12 @@ func toolRules(o Options, tool string) ([]string, bool) {
 		}
 		rules := make([]string, 0, len(roots))
 		for _, root := range roots {
-			rules = append(rules, fmt.Sprintf("%s(%s/**)", tool, root))
+			rules = append(rules, fmt.Sprintf("Read(/%s/**)", root))
 		}
 		return rules, true
 	case "Write":
 		// out/ only: it is the one directory the model may write (§7.2).
-		return []string{fmt.Sprintf("Write(%s/**)", o.OutDir())}, true
+		return []string{fmt.Sprintf("Edit(/%s/**)", o.OutDir())}, true
 	}
 	return nil, false
 }

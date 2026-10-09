@@ -421,29 +421,78 @@ then stdin is closed. Single turn; there is no reply box.
 
 Two auth modes, chosen per agent by `runtime.auth`. Phase 1 uses `api_key`.
 
-`api_key` runs `--bare`. Bare mode reads no OAuth credential, no `~/.claude`
-settings, no hooks, no MCP servers, no plugins, no CLAUDE.md. That is exactly the
-determinism a scheduled run wants, and it removes the headless-OAuth-expiry failure
-(claude-code issue 79685) outright. The key comes from Keychain at launch and enters
-the child as `ANTHROPIC_API_KEY`; it is never written to disk by shuttle. The price is
-metered tokens: the daily agent is one summarise turn over a bounded bundle, so the
-expected cost is cents, and `max_budget_usd` caps it regardless.
+`api_key` runs with no OAuth credential, no `~/.claude` settings, no hooks, no MCP
+servers, no user plugins and no CLAUDE.md. That is exactly the determinism a
+scheduled run wants, and it removes the headless-OAuth-expiry failure (claude-code
+issue 79685) outright. The key comes from Keychain at launch and enters the child as
+`ANTHROPIC_API_KEY`; it is never written to disk by shuttle. The price is metered
+tokens: the daily agent is one summarise turn over a bounded bundle, so the expected
+cost is cents, and `max_budget_usd` caps it regardless.
+
+It does not use `--bare`, which was the original mechanism for all of this. `--bare`
+sets `CLAUDE_CODE_SIMPLE=1`, which on CLI 2.1.289 shrinks the built-in tool set to
+Bash, Edit and Read *before* `--tools` filters it: the daily manifest's
+`Read,Glob,Grep,Write` reached the model as `["Read"]`, so no run could write `out/`.
+Each property is instead held by a named mechanism, measured on 2.1.289 (2026-10-07)
+with marker files planted in a scratch `$HOME` and run directory and the API
+requests captured:
+
+- **Credential.** `ANTHROPIC_API_KEY` is the only credential in an environment built
+  from scratch (below); the init event reports `apiKeySource: "ANTHROPIC_API_KEY"`.
+  `CLAUDE_CONFIG_DIR` is the run's own `claude-home`, so there is no credentials file
+  to find, and the CLI's Keychain lookups are for items suffixed with a hash of that
+  directory (`Claude Code-credentials-<sha256[:8]>`, `Claude Code-<sha256[:8]>`),
+  which never exist for a fresh run directory. The lookups themselves still happen —
+  `security find-generic-password` is called for both, as `--bare` calls it for the
+  first — so the property is that no login credential is found, not that the
+  Keychain is never asked.
+- **Settings and CLAUDE.md.** `--setting-sources ''` loads no user, project or local
+  settings file, and with them no CLAUDE.md, project skills or project `.mcp.json`;
+  the `--settings` file still applies. This one is load-bearing beyond `~/.claude`
+  being out of reach: the CLI discovers CLAUDE.md by walking up from its cwd, a run
+  directory under `~/.shuttle/runs/` puts `$HOME` on that walk, and without the flag
+  `~/.claude/CLAUDE.md` loads into every run as a project memory file.
+- **Hooks.** No settings source that could define one is loaded; `disableAllHooks`
+  in `settings.json` is belt over that.
+- **MCP servers.** `--strict-mcp-config` with no `--mcp-config`. The empty
+  `--setting-sources` also drops a project `.mcp.json` on its own.
+- **Plugins.** User-installed plugins live under `CLAUDE_CONFIG_DIR`, which is empty.
+  The two builtin plugins (`cc-plugin-agents-md`, `cc-plugin-plugin-authoring`) and
+  the bundled skills ship inside the binary and are listed in the init event with or
+  without `--bare`; neither mode excludes them.
+- **Auto-memory.** `"autoMemoryEnabled": false` in `settings.json`. It is on by
+  default and adds a memory directory under `CLAUDE_CONFIG_DIR`, and instructions to
+  use it, to the prompt.
+
+One thing `--bare` skipped is not rebuilt: the cross-session messaging inbox, a unix
+socket the CLI binds at `$TMPDIR/cc-socks/<pid>.sock` (or `/tmp/cc-socks-<uid>/` when
+that path exceeds 103 bytes) for same-uid peer sessions to send into. The only switch
+for it outside `--bare` is an undocumented environment variable. Under srt the bind
+fails, the run continues and the init event carries no `messaging_socket_path`; a
+`--unsafe-no-sandbox` run has the inbox.
+
+`TestRunInitExposesTheManifestToolsAndNothingAmbient` launches the installed binary
+through `claude.Run` and asserts the init event: exactly the manifest's tools,
+`apiKeySource` `ANTHROPIC_API_KEY`, no MCP servers and no project skill despite both
+being planted in the run directory, and no `memory_paths`. The init event precedes the
+first API request, so the test runs on a dummy key and stops the run there.
 
 `subscription` is the fallback for a cost-sensitive agent later (the miner over long
-transcripts is the candidate). It cannot use `--bare` and instead passes
-`--strict-mcp-config` (no MCP servers), `--settings '{"disableAllHooks":true}'` and
-runs from a directory with no project settings, and it keeps `~/.claude/.credentials.json`
-readable in the sandbox profile. Its preflight must detect an expired login and
-pause the agent (§6.3), because there is no headless recovery.
+transcripts is the candidate). It needs the login the `api_key` isolation shuts out,
+so it keeps `--strict-mcp-config` and `disableAllHooks`, runs from a directory with
+no project settings, and keeps `~/.claude/.credentials.json` readable in the sandbox
+profile. Its preflight must detect an expired login and pause the agent (§6.3),
+because there is no headless recovery.
 
 The argv:
 
 ```
 exec /opt/homebrew/bin/claude \
-  --bare -p \
+  -p \
   --input-format stream-json --output-format stream-json --verbose \
   --model sonnet \
   --max-turns 12 --max-budget-usd 1.50 \
+  --strict-mcp-config --setting-sources '' \
   --permission-mode dontAsk \
   --tools Read,Glob,Grep,Write \
   --settings /Users/steve/.shuttle/runs/daily/<run>/settings.json \
@@ -456,16 +505,39 @@ exec /opt/homebrew/bin/claude \
 {
   "permissions": {
     "allow": [
-      "Read(/Users/steve/.shuttle/runs/daily/<run>/**)",
-      "Glob(/Users/steve/.shuttle/runs/daily/<run>/**)",
-      "Grep(/Users/steve/.shuttle/runs/daily/<run>/**)",
-      "Write(/Users/steve/.shuttle/runs/daily/<run>/out/**)"
+      "Read(//Users/steve/.shuttle/runs/daily/<run>/**)",
+      "Edit(//Users/steve/.shuttle/runs/daily/<run>/out/**)"
     ],
     "deny": ["Bash", "WebFetch", "WebSearch", "Agent", "Task"]
   },
+  "autoMemoryEnabled": false,
   "disableAllHooks": true
 }
 ```
+
+The spelling of each rule is load-bearing, and the CLI accepts a wrong one
+silently. It checks file access against `Read` and `Edit` path rules only: a
+path rule spelled `Write`, `Glob` or `Grep` is accepted and never consulted, so
+the manifest's `Write` is allowed by an `Edit` rule and its `Glob` and `Grep`
+by the `Read` rule (the manifest's tool names still go to `--tools` unchanged).
+And a pattern is absolute only with a leading `//`: a single `/` anchors at the
+directory of the `--settings` file. The original document spelled every rule
+`Tool(/abs/path/**)`, which matched nothing — reads worked only because the CLI
+allows reads inside its working directory regardless of rules, and every write
+to `out/` was refused under `dontAsk` (2026-10-07). Measured on 2.1.289 against
+a fake Messages API that asked for each call: with this document a `Write` into
+`out/` lands; a `Write` elsewhere in the run directory or outside it, and a
+`Read` outside it, come back as `system/permission_denied`; with the working
+directory moved away from the run directory, `Read`, `Glob` and `Grep` inside it
+still succeed on the `Read` rule alone, and `Glob(…)`/`Grep(…)` rules alone
+allow neither. `TestRunPermitsWritesToOutAndNothingElse` holds the first half
+against the installed binary.
+
+The working-directory default is also a residual: reads anywhere in the run
+directory are allowed whatever the `Read` rules say, because the run directory
+is the CLI's cwd. A narrower read root, which observer runs set to `inputs/`,
+therefore does not confine reads within the run directory; the §11 profile is
+what bounds reads beyond it.
 
 The environment is built from scratch, not inherited: `PATH` (the baked one),
 `HOME`, `TMPDIR=<run>/tmp`, `CLAUDE_CODE_TMPDIR=<run>/tmp` (srt rewrites the
@@ -508,9 +580,9 @@ exits 0 (0.24 s measured); the Keychain items resolve; `summaries.db` opens read
 and its schema is version 4 or later; `~/.ticket/config.yaml` parses and `central_root`
 exists; the Cloudflare token resolves (delivery is not attempted here), except on a
 `--no-deliver` run, which never sends. An auth
-preflight, `claude --bare -p ping --model haiku --max-turns 1 --output-format json`
-with a 60 s timeout, runs once per daemon tick that has a due slot, not per run, and
-its cost is a rounding error. Any preflight failure is a `failed` run with the
+preflight, the §7.4 argv with the prompt `ping`, `--model haiku`, `--max-turns 1` and
+`--tools Read`, with a 60 s timeout, runs once per daemon tick that has a due slot,
+not per run, and its cost is a rounding error. Any preflight failure is a `failed` run with the
 `preflight` class and a named check; an auth failure additionally pauses the agent.
 
 ### 7.6 Failure classes
@@ -737,7 +809,7 @@ write that leaves the machine. The `allowedDomains` list is the agent manifest's
 nothing.
 
 `docs/sandbox.md` records what was measured on the Mac: the exact set of paths
-the CLI writes under `CLAUDE_CONFIG_DIR` with `--bare` (so `allowWrite` is
+the CLI writes under `CLAUDE_CONFIG_DIR` with the §7.4 argv (so `allowWrite` is
 complete rather than generous), that the CLI does honour the proxy environment
 srt sets, and that on macOS the seatbelt enforces the domain list regardless. It
 also records the residuals the profile does not close.

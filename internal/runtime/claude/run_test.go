@@ -3,12 +3,18 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -575,18 +581,279 @@ func TestRunSuccessPreparesTheRunDirectory(t *testing.T) {
 	}
 }
 
+// The installed binary the live tests launch.
+func claudeBin() string {
+	if bin := os.Getenv("SHUTTLE_CLAUDE_BIN"); bin != "" {
+		return bin
+	}
+	return "/opt/homebrew/bin/claude"
+}
+
+// installedOptions is the daily manifest's runtime against the installed
+// binary with a dummy key, for the tests that cost nothing: they stop before
+// any API request or answer it themselves. Skips only where no binary exists.
+func installedOptions(t *testing.T) Options {
+	t.Helper()
+	bin := claudeBin()
+	if _, err := os.Stat(bin); err != nil {
+		t.Skipf("no claude binary to launch: %v", err)
+	}
+	dir := t.TempDir()
+	return Options{
+		Bin:            bin,
+		RunDir:         filepath.Join(dir, "run"),
+		Auth:           AuthAPIKey,
+		Model:          "haiku",
+		MaxTurns:       1,
+		MaxBudgetUSD:   0.05,
+		Tools:          []string{"Read", "Glob", "Grep", "Write"},
+		TimeoutSeconds: 60,
+		APIKey:         "sk-ant-invalid",
+		Prompt:         "Reply with exactly the word ok.",
+		PATH:           "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+		HomeDir:        dir,
+		Timezone:       "America/Los_Angeles",
+	}
+}
+
+// What the CLI exposes, not what the argv says: --bare passed every argv
+// assertion in this package while the CLI handed the model Read alone. Free —
+// the init event precedes the first API request and the run is stopped on it —
+// so it runs wherever the binary is installed rather than behind an opt-in.
+func TestRunInitExposesTheManifestToolsAndNothingAmbient(t *testing.T) {
+	o := installedOptions(t)
+	// Project configuration in the run's cwd, which the CLI loads unless told
+	// not to: an MCP server, dropped by --strict-mcp-config and by the empty
+	// --setting-sources alike (measured on 2.1.289), and a skill only the
+	// latter keeps out.
+	if err := os.MkdirAll(filepath.Join(o.RunDir, ".claude", "skills", "probe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(o.RunDir, ".mcp.json"), []byte(`{"mcpServers":{"probe":{"command":"/usr/bin/true"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(o.RunDir, ".claude", "skills", "probe", "SKILL.md"), []byte("---\nname: probe\ndescription: probe\n---\nprobe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	transcript := &initWatcher{found: cancel}
+	var stderr bytes.Buffer
+	if _, err := Run(ctx, o, transcript, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	line := transcript.initLine()
+	if line == nil {
+		t.Fatalf("no system/init event before the run ended; stderr %q", stderr.String())
+	}
+	var init struct {
+		Tools        []string          `json:"tools"`
+		APIKeySource string            `json:"apiKeySource"`
+		MCPServers   []json.RawMessage `json:"mcp_servers"`
+		Skills       []string          `json:"skills"`
+		MemoryPaths  json.RawMessage   `json:"memory_paths"`
+	}
+	if err := json.Unmarshal(line, &init); err != nil {
+		t.Fatalf("init event %s: %v", line, err)
+	}
+
+	got := slices.Sorted(slices.Values(init.Tools))
+	want := slices.Sorted(slices.Values(o.Tools))
+	if !slices.Equal(got, want) {
+		t.Errorf("init tools = %q, want exactly the manifest's %q", init.Tools, want)
+	}
+	if init.APIKeySource != "ANTHROPIC_API_KEY" {
+		t.Errorf("init apiKeySource = %q, want ANTHROPIC_API_KEY", init.APIKeySource)
+	}
+	if len(init.MCPServers) != 0 {
+		t.Errorf("init mcp_servers = %s, want none", init.MCPServers)
+	}
+	if slices.Contains(init.Skills, "probe") {
+		t.Errorf("init skills = %q: the run directory's project skill loaded", init.Skills)
+	}
+	if len(init.MemoryPaths) != 0 && string(init.MemoryPaths) != "null" {
+		t.Errorf("init memory_paths = %s, want auto-memory off", init.MemoryPaths)
+	}
+}
+
+// What settings.json permits, not what it says: rules spelled Write(/abs/...)
+// passed review and were never consulted by the CLI, so every live run's
+// writes to out/ were denied. The model is a fake Messages API that asks for
+// each tool call in turn; the real CLI decides each one under the real argv,
+// environment and settings document.
+func TestRunPermitsWritesToOutAndNothingElse(t *testing.T) {
+	o := installedOptions(t)
+	o.MaxTurns = 10
+	outside := filepath.Dir(o.RunDir)
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inOut := filepath.Join(o.OutDir(), "report.md")
+	inRun := filepath.Join(o.RunDir, "inputs", "planted.md")
+	beyondRun := filepath.Join(outside, "planted.md")
+	steps := []fakeToolUse{
+		{"Write", map[string]any{"file_path": inOut, "content": "report"}},
+		{"Write", map[string]any{"file_path": inRun, "content": "planted"}},
+		{"Write", map[string]any{"file_path": beyondRun, "content": "planted"}},
+		{"Read", map[string]any{"file_path": secret}},
+	}
+	api := httptest.NewServer(fakeMessagesAPI(t, steps))
+	defer api.Close()
+	// The base URL rides in through the launcher rather than Environ, which
+	// production never points anywhere but the real API.
+	o.Launcher = []string{"/usr/bin/env", "ANTHROPIC_BASE_URL=" + api.URL}
+
+	var transcript, stderr bytes.Buffer
+	out, err := Run(context.Background(), o, &transcript, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Class != "" {
+		t.Fatalf("class = %q, detail %q, stderr %q", out.Class, out.Detail, stderr.String())
+	}
+	denied := map[string]bool{}
+	for _, line := range bytes.Split(transcript.Bytes(), []byte("\n")) {
+		var ev struct {
+			Type      string `json:"type"`
+			Subtype   string `json:"subtype"`
+			ToolUseID string `json:"tool_use_id"`
+		}
+		if json.Unmarshal(line, &ev) == nil && ev.Type == "system" && ev.Subtype == "permission_denied" {
+			denied[ev.ToolUseID] = true
+		}
+	}
+	for i, step := range steps {
+		wantDenied := i > 0
+		if denied[fakeToolUseID(i)] != wantDenied {
+			t.Errorf("%s %s: denied = %v, want %v", step.Name, step.Input["file_path"], !wantDenied, wantDenied)
+		}
+	}
+	if _, err := os.Stat(inOut); err != nil {
+		t.Errorf("the allowed write did not land: %v", err)
+	}
+	for _, path := range []string{inRun, beyondRun} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: a denied write landed (%v)", path, err)
+		}
+	}
+}
+
+type fakeToolUse struct {
+	Name  string
+	Input map[string]any
+}
+
+func fakeToolUseID(step int) string { return fmt.Sprintf("toolu_%02d", step) }
+
+// fakeMessagesAPI answers the streaming Messages API as a model that asks for
+// steps in order — the next one is chosen by how many tool results the
+// conversation already carries — and then ends its turn.
+func fakeMessagesAPI(t *testing.T, steps []fakeToolUse) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The CLI also probes endpoints a model run does not depend on, such
+		// as /api/hello.
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			http.NotFound(w, r)
+			return
+		}
+		var req struct {
+			Messages []struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("fake api: %s: %v", r.URL, err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		step := 0
+		for _, m := range req.Messages {
+			var blocks []struct {
+				Type string `json:"type"`
+			}
+			// A string content is plain text and carries no tool result.
+			if json.Unmarshal(m.Content, &blocks) != nil {
+				continue
+			}
+			for _, b := range blocks {
+				if b.Type == "tool_result" {
+					step++
+				}
+			}
+		}
+		block, delta, stop := map[string]any{"type": "text", "text": ""}, map[string]any{"type": "text_delta", "text": "done"}, "end_turn"
+		if step < len(steps) {
+			input, _ := json.Marshal(steps[step].Input)
+			block = map[string]any{"type": "tool_use", "id": fakeToolUseID(step), "name": steps[step].Name, "input": map[string]any{}}
+			delta = map[string]any{"type": "input_json_delta", "partial_json": string(input)}
+			stop = "tool_use"
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, ev := range []map[string]any{
+			{"type": "message_start", "message": map[string]any{
+				"id": fmt.Sprintf("msg_%02d", step), "type": "message", "role": "assistant", "model": "claude-haiku-4-5",
+				"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 1},
+			}},
+			{"type": "content_block_start", "index": 0, "content_block": block},
+			{"type": "content_block_delta", "index": 0, "delta": delta},
+			{"type": "content_block_stop", "index": 0},
+			{"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 5}},
+			{"type": "message_stop"},
+		} {
+			data, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev["type"], data)
+		}
+	})
+}
+
+// initWatcher is a transcript sink that keeps the system/init line and calls
+// found the moment it arrives.
+type initWatcher struct {
+	mu    sync.Mutex
+	buf   []byte
+	init  []byte
+	found func()
+}
+
+func (w *initWatcher) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			return len(p), nil
+		}
+		line := w.buf[:i]
+		w.buf = w.buf[i+1:]
+		var env struct {
+			Type    string `json:"type"`
+			Subtype string `json:"subtype"`
+		}
+		if w.init == nil && json.Unmarshal(line, &env) == nil && env.Type == "system" && env.Subtype == "init" {
+			w.init = bytes.Clone(line)
+			w.found()
+		}
+	}
+}
+
+func (w *initWatcher) initLine() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.init
+}
+
 // Opt-in: this one spends real money, capped at max_budget_usd 0.05.
 func TestRunLive(t *testing.T) {
 	if os.Getenv("SHUTTLE_LIVE_CLAUDE") != "1" {
 		t.Skip("set SHUTTLE_LIVE_CLAUDE=1 to run against the real binary")
 	}
-	bin := os.Getenv("SHUTTLE_CLAUDE_BIN")
-	if bin == "" {
-		bin = "/opt/homebrew/bin/claude"
-	}
 	dir := t.TempDir()
 	o := Options{
-		Bin:            bin,
+		Bin:            claudeBin(),
 		RunDir:         filepath.Join(dir, "run"),
 		Auth:           AuthAPIKey,
 		Model:          "haiku",

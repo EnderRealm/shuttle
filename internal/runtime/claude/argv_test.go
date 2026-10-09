@@ -29,13 +29,15 @@ func goldenOptions() Options {
 func TestArgvGolden(t *testing.T) {
 	want := []string{
 		"/opt/homebrew/bin/claude",
-		"--bare", "-p",
+		"-p",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--model", "sonnet",
 		"--max-turns", "12",
 		"--max-budget-usd", "1.50",
+		"--strict-mcp-config",
+		"--setting-sources", "",
 		"--permission-mode", "dontAsk",
 		"--tools", "Read,Glob,Grep,Write",
 		"--settings", "/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/settings.json",
@@ -78,8 +80,8 @@ func TestArgvBudgetFormat(t *testing.T) {
 	}
 }
 
-// A manifest may legally carry subscription auth (§4.1); emitting --bare argv
-// for it would run the wrong flag set silently.
+// A manifest may legally carry subscription auth (§4.1); emitting the api_key
+// argv for it would run the wrong flag set silently.
 func TestArgvRefusesSubscriptionAuth(t *testing.T) {
 	o := goldenOptions()
 	o.Auth = "subscription"
@@ -100,7 +102,7 @@ func TestArgvRefusesRelativePaths(t *testing.T) {
 	}{
 		{name: "bin", edit: func(o *Options) { o.Bin = "claude" }},
 		{name: "run dir", edit: func(o *Options) { o.RunDir = "runs/daily/daily-20260902-043000-8f2a" }},
-		// An empty run dir renders the allow rules as Read(/**), which would
+		// An empty run dir renders the allow rules as Read(//**), which would
 		// make the permission document mean the whole filesystem.
 		{name: "empty run dir", edit: func(o *Options) { o.RunDir = "" }},
 		{name: "launcher", edit: func(o *Options) { o.Launcher = []string{"srt", "-s", "srt.json"} }},
@@ -162,10 +164,8 @@ func TestSettingsJSONGolden(t *testing.T) {
 	want := `{
   "permissions": {
     "allow": [
-      "Read(/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/**)",
-      "Glob(/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/**)",
-      "Grep(/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/**)",
-      "Write(/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/out/**)"
+      "Read(//Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/**)",
+      "Edit(//Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/out/**)"
     ],
     "deny": [
       "Bash",
@@ -175,6 +175,7 @@ func TestSettingsJSONGolden(t *testing.T) {
       "Task"
     ]
   },
+  "autoMemoryEnabled": false,
   "disableAllHooks": true
 }`
 	got, err := SettingsJSON(goldenOptions())
@@ -195,7 +196,7 @@ func TestSettingsJSONDerivesAllowFromTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(got), "Glob(") || strings.Contains(string(got), "Write(") {
+	if strings.Contains(string(got), "Edit(") {
 		t.Errorf("settings allow rules for tools the manifest omits:\n%s", got)
 	}
 }

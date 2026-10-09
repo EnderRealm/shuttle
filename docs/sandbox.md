@@ -13,7 +13,7 @@ this document when either binary moves.
 Every model run is launched behind an argv prefix from `internal/sandbox`:
 
 ```
-/opt/homebrew/bin/srt -s <run>/srt.json -- /opt/homebrew/bin/claude --bare -p …
+/opt/homebrew/bin/srt -s <run>/srt.json -- /opt/homebrew/bin/claude -p …
 ```
 
 `--`, not `-c`. srt's `-c` takes one string, runs it through `bash -c` and
@@ -21,9 +21,12 @@ silently ignores every positional argument after it (`srt -s p -c 'echo FROM-C'
 /bin/echo IGNORED` prints only `FROM-C`), so a `-c <run>/run.sh` launcher would
 drop the model argv the runtime appends to the prefix. With `--`, srt
 shell-quotes the argv it is given and runs that, which is verified with
-arguments containing spaces and with the `--bare -p …` flag set. `run.sh` is
-therefore neither written nor needed, and §7.2's run directory no longer lists
-it.
+arguments containing spaces and with the `--bare -p …` flag set of the time. The
+empty value of `--setting-sources ''`, which replaced `--bare` (§7.4), survives
+the quoting as an empty argument rather than vanishing (2026-10-07: `srt -s p --
+/bin/sh -c 'echo "argc=$# [$1][$2][$3]"' x a '' b` prints `argc=3 [a][][b]`).
+`run.sh` is therefore neither written nor needed, and §7.2's run directory no
+longer lists it.
 
 `internal/sandbox` supplies the prefix, the profile and the preflight; no caller
 wires them yet, since `internal/runner` is still a stub and `shuttle run` claims
@@ -166,11 +169,11 @@ under `/private/tmp`; `ls <run>` and `cat <run>/srt.json` are the positive
 controls. The `~/.shuttle` assertion skips itself when the directory does not
 exist on the host, where the `ls` would fail for the wrong reason.
 
-## What the bare CLI writes under CLAUDE_CONFIG_DIR
+## What the CLI writes under CLAUDE_CONFIG_DIR
 
-Measured from a run directory `R`, with the environment built from scratch and
-`HOME` pointed at an empty directory so a stray write outside the run directory
-would show up:
+Measured first with `--bare`, from a run directory `R`, with the environment
+built from scratch and `HOME` pointed at an empty directory so a stray write
+outside the run directory would show up:
 
 ```
 printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly the word ok."}]}}' | \
@@ -203,6 +206,29 @@ child's `TMPDIR` was `/tmp/claude`. `<run>/tmp` also holds srt's own
 `srt-mux-<pid>-<n>.sock`, which is host-side and outside the sandbox. Both
 `<run>/claude-home` and `<run>/tmp` are in `allowWrite` as directories, so the
 `allowWrite` list matches the measured set.
+
+**Re-measured without `--bare`** on claude CLI 2.1.289, 2026-10-07, after §7.4
+dropped it: the same command with `--bare` removed, `--strict-mcp-config
+--setting-sources ''` added, `--tools Read,Write`, and `"autoMemoryEnabled": false`
+in `settings.json`. Again nothing under `HOME` and nothing elsewhere in the run
+directory; the set under the two writable directories grew by three entries:
+
+```
+claude-home/.last-cleanup
+claude-home/sessions/<pid>.<hash>.key   (outside srt only)
+tmp/cc-socks/                            (in srt, empty)
+tmp/cc-socks/<pid>.sock                  (outside srt only)
+```
+
+`tmp/cc-socks/` is the CLI's cross-session messaging inbox and the `.key` file is
+its auth key; `--bare` skipped both (§7.4). Under srt the CLI creates the
+directory but the socket bind fails, publishes no key, and carries on: the init
+event has no `messaging_socket_path` and the run proceeds to the API as before.
+Outside srt the socket lands at `<run>/tmp/cc-socks/<pid>.sock` while that path
+fits in 103 bytes and at `/tmp/cc-socks-<uid>/<pid>.sock`, outside the run
+directory, when it does not; production's
+`/Users/steve/.shuttle/runs/daily/daily-20260902-043000-8f2a/tmp/cc-socks/99999.sock`
+is 83 bytes, so a production run keeps it inside.
 
 **Limitation, stated plainly:** the key was a bogus one. The run reached the API
 and was refused (401 `authentication_failed`, retried until killed), so a
