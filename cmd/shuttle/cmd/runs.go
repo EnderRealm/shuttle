@@ -3,16 +3,12 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 
 	"github.com/spf13/cobra"
 
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
-	"shuttle/internal/runner"
 )
 
 var (
@@ -52,25 +48,16 @@ func init() {
 	rootCmd.AddCommand(runsCmd)
 }
 
-// openLedger opens ~/.shuttle/runs.db. The caller closes it.
+// openLedger opens ~/.shuttle/runs.db. The caller closes it. It reads no
+// config.json, so a malformed one cannot keep an operator from inspecting the
+// ledger or acknowledging an incident; the execution paths that write terminal
+// rows attach notifications in newPipeline.
 func openLedger() (*ledger.Store, error) {
 	path, err := config.LedgerPath()
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := config.Load()
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
-	store, err := ledger.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	runner.ConfigureOutcomes(store, cfg, filepath.Dir(path), log.Default())
-	return store, nil
+	return ledger.Open(path)
 }
 
 // formatCost applies §12: two decimals, and a run that reported no cost prints

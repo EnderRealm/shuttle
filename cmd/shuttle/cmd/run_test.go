@@ -345,3 +345,65 @@ func TestRunDryRunRequiresConfig(t *testing.T) {
 		t.Fatalf("err = %v, want one naming config.json", err)
 	}
 }
+
+// The execution path, not openLedger, carries the notification policy: the
+// store newPipeline is handed honours config.json's cooldown and enablement on
+// committed failures and recoveries, and a notifier error leaves the terminal
+// row as written.
+func TestNewPipelineAttachesTheConfiguredNotifications(t *testing.T) {
+	shuttleEnv(t)
+	writeConfig(t, `{"notify": {"enabled": true, "cooldown_minutes": 60}}`)
+	statePath := filepath.Join(os.Getenv("SHUTTLE_HOME"), "notify.state")
+	// The failure below is inside its cooldown, so no notification is sent;
+	// without the configured cooldown it would be.
+	signature := ledger.Signature(ledger.ClassDied, "exit 1")
+	state, err := json.Marshal(map[string]time.Time{"daily\x00incident\x00" + signature: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var logs bytes.Buffer
+	if _, err := newPipeline(store, log.New(&logs, "", 0)); err != nil {
+		t.Fatal(err)
+	}
+	claim := func(at time.Time) string {
+		t.Helper()
+		r, ok, err := store.Claim("daily", at, ledger.TriggerCron)
+		if err != nil || !ok {
+			t.Fatalf("claim: %v", err)
+		}
+		return r.ID
+	}
+	failed := claim(time.Now().Add(-2 * time.Hour))
+	if err := store.Fail(failed, ledger.ClassDied, "exit 1", ledger.Result{}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "run=" + failed + " agent=daily notification=false"; !strings.Contains(logs.String(), want) ||
+		!strings.Contains(logs.String(), "error=<nil>") {
+		t.Fatalf("failure inside the cooldown: log = %q", &logs)
+	}
+	// A disabled notifier never reads its state, so an unreadable one
+	// surfacing as the recovery's error shows enablement came from config.
+	if err := os.WriteFile(statePath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered := claim(time.Now().Add(-time.Hour))
+	if err := store.Complete(recovered, ledger.Result{}); err != nil {
+		t.Fatalf("a notification failure changed the terminal result: %v", err)
+	}
+	if want := "run=" + recovered + " agent=daily notification=false"; !strings.Contains(logs.String(), want) ||
+		!strings.Contains(logs.String(), "recovery=true error=notify state") {
+		t.Fatalf("recovery with a broken notifier: log = %q", &logs)
+	}
+	row, err := store.Get(recovered)
+	if err != nil || row.Status != ledger.StatusCompleted {
+		t.Fatalf("recovered row = %+v, %v", row, err)
+	}
+}

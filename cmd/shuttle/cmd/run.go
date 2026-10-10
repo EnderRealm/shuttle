@@ -211,11 +211,13 @@ func newPipeline(store *ledger.Store, logger *log.Logger) (claimedPipeline, erro
 	if err != nil {
 		return nil, err
 	}
+	// Attached before the rest of construction can fail, so the preflight
+	// failure a manual run records on a construction error still notifies.
+	runner.ConfigureOutcomes(store, cfg, home, logger)
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	runner.ConfigureOutcomes(store, cfg, home, logger)
 	return &runner.Pipeline{
 		Ledger: store, Config: cfg, Home: home, HomeDir: homeDir,
 		PATH: os.Getenv("PATH"), Logger: logger, Sender: runner.NewSender(cfg, logger),
