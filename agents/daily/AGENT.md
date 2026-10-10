@@ -79,9 +79,12 @@ local time.
   also contain.
 
 A missing source matters too. Report `"available": false`, a non-empty tk-tickets `skips`,
-or a git-log `skipped` entry whose `reason` starts with `git log:` as a data gap in one
-line. A git-log `skipped` entry whose `reason` says "no such file or directory" is a
-checkout registered from another machine. That is routine, so leave it out. When
+a non-zero `skipped_lines` in tk-journal or tk-tickets, or a git-log `skipped` entry whose
+`reason` starts with `git log:` as a data gap in one line. `skipped_lines` counts malformed
+lines anywhere in tk's commit or mutation log, so some of the day's ticket activity may be
+missing and the same count can recur day after day. Zero is normal, so leave it out. A
+git-log `skipped` entry whose `reason` says "no such file or directory" is a checkout
+registered from another machine. That is routine, so leave it out. When
 loom-sessions reports `"available": false`, the day is never quiet, because its sessions
 could not be seen: write a short email whose H1 names the gap. Any other gap is one line
 and does not change whether the day is quiet.
@@ -129,7 +132,8 @@ Use markdown in this order. Leave out any section that would be empty.
 1. **H1:** a plain headline for the day. It becomes the email's headline. Say what
    happened in a few words; a date on its own is not a headline.
 2. **Lede:** two or three sentences on the shape of the day. Which repositories saw work,
-   how much landed, and the one thing most worth knowing.
+   how much landed, and the one thing most worth knowing. Leave the `reports`
+   repository out of both the repositories and the amount landed.
 3. **`## Needs attention`:** stuck or unusual items, each with the evidence that supports
    it (see below). Put the most consequential first, and keep at most five. If more
    qualify, mention the rest in their repository's section. Include Test by hand items
@@ -137,7 +141,8 @@ Use markdown in this order. Leave out any section that would be empty.
    after the flagged items: one short line each, the most consequential first.
 4. **`## By repository`:** one `###` per repository with real work, using the short name
    (the last path segment, so `github.com/enderrealm/loom` and `/users/steve/code/loom`
-   are both `loom`). Busiest first. For each one:
+   are both `loom`). Busiest first. The `reports` repository gets no section, because its
+   commits are this report's own archive. For each one:
    - What landed: each commit as hash and subject, followed by what it changed in a
      clause drawn from the commit message or handoff note.
    - Tickets that are now done, and tickets worked on but not done.
