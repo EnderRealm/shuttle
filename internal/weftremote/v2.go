@@ -98,6 +98,23 @@ func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 		s.handleV2Runs(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v2/runs/"):
 		s.handleV2RunPath(w, strings.TrimPrefix(path, "/v2/runs/"))
+	case r.Method == http.MethodPost && runCommand.MatchString(path):
+		m := runCommand.FindStringSubmatch(path)
+		s.handleRunCommand(w, r, m[1], m[2])
+	case r.Method == http.MethodPost && path == "/v2/launches":
+		s.handleLaunch(w, r)
+	case r.Method == http.MethodGet && path == "/v2/frontier":
+		s.handleFrontier(w, r.URL.Query().Get("project"))
+	case r.Method == http.MethodPost && path == "/v2/frontier":
+		s.handleFrontierSubmit(w, r)
+	case r.Method == http.MethodGet && path == "/v2/queue":
+		s.handleQueue(w)
+	case r.Method == http.MethodPost && path == "/v2/queue/clear":
+		s.handleClear(w, r)
+	case r.Method == http.MethodPut && path == "/v2/queue/capacity":
+		s.handleCapacity(w, r)
+	case r.Method == http.MethodPost && entryCancel.MatchString(path):
+		s.handleCancel(w, r, entryCancel.FindStringSubmatch(path)[1])
 	case r.Method == http.MethodGet && path == "/v2/questions":
 		s.handleV2Questions(w)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v2/questions/"):
@@ -123,21 +140,32 @@ func (s *Service) v2Internal(w http.ResponseWriter, err error) {
 // upgradeRequired is §2.5's refusal of a path naming a version this host does
 // not speak, answered in the v2 error shape a client reading it will speak.
 func (s *Service) upgradeRequired(w http.ResponseWriter, segment string) {
-	s.v2Error(w, http.StatusUpgradeRequired, "upgrade_required", fmt.Sprintf(
-		"weft-service/%s is not spoken here: this host speaks %s, and GET /v2/service lists what it serves",
-		segment, strings.Join(spokenVersions, " and ")))
+	s.v2Error(w, http.StatusUpgradeRequired, "upgrade_required", upgradeMessage("weft-service/"+segment))
+}
+
+func upgradeMessage(version string) string {
+	return fmt.Sprintf("%s is not spoken here: this host speaks %s, and GET /v2/service lists what it serves",
+		version, strings.Join(spokenVersions, " and "))
 }
 
 func (s *Service) capabilityNotServed(w http.ResponseWriter, id string) {
+	message, ok := s.notServedMessage(id)
+	if !ok {
+		s.v2Internal(w, fmt.Errorf("route names undeclared capability %s", id))
+		return
+	}
+	s.v2Error(w, http.StatusNotImplemented, "capability_not_served", message)
+}
+
+// notServedMessage is error-capability-not-served.json's message for id.
+func (s *Service) notServedMessage(id string) (string, bool) {
 	for _, c := range capabilities {
 		if c.ID == id {
-			s.v2Error(w, http.StatusNotImplemented, "capability_not_served", fmt.Sprintf(
-				"%s is not served by host %s, which declares %s conformance: %s",
-				id, s.hostID, conformance(), c.Reason))
-			return
+			return fmt.Sprintf("%s is not served by host %s, which declares %s conformance: %s",
+				id, s.hostID, conformance(), c.Reason), true
 		}
 	}
-	s.v2Internal(w, fmt.Errorf("route names undeclared capability %s", id))
+	return "", false
 }
 
 // conformance is complete only when every desktop capability — all but
@@ -218,9 +246,7 @@ func (s *Service) handleDashboard(w http.ResponseWriter) {
 	}
 	host := map[string]any{"dispatch": "open", "reason": nil}
 	if agent.Paused {
-		host = map[string]any{"dispatch": "paused", "reason": fmt.Sprintf(
-			"%s is paused (%s) since %s; shuttle resume %s lifts it",
-			ledger.WeftAgent, agent.PausedReason.String, agent.PausedAt.String, ledger.WeftAgent)}
+		host = map[string]any{"dispatch": "paused", "reason": ledger.WeftHostPausedDetail(agent.PausedReason.String, agent.PausedAt.String)}
 	}
 	// No tile here carries a figure: an unknown allowance rendered as zero is
 	// a claim nobody made (§5.3), and this build reads no allowance source.
@@ -344,7 +370,12 @@ func (s *Service) watchCatalog(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		_, err := s.syncCatalog()
+		c, err := s.syncCatalog()
+		// Each pass also dispatches: it is how a pause lifted from another
+		// process — shuttle resume weft-worker — reaches the queue.
+		if err == nil {
+			s.dispatchWith(c)
+		}
 		// A refusal persists until tk changes; it is logged when it changes,
 		// not on every poll.
 		message := ""

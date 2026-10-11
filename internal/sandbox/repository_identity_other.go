@@ -7,3 +7,9 @@ package sandbox
 func RepositoryIdentity(repo string) (string, error) {
 	return CanonicalRepository(repo)
 }
+
+// filesystemSpelling is the resolved path unchanged off macOS, where the
+// volumes Shuttle meets fold no case.
+func filesystemSpelling(path string) (string, error) {
+	return path, nil
+}

@@ -50,6 +50,9 @@ type Supervisor struct {
 	stopping map[string]bool
 	// findKey is the test seam over keychain.Find; nil reads the real Keychain.
 	findKey func(string) (string, error)
+	// settled runs once a segment is settled — reaped, failed or cancelled
+	// before spawn — which is when its slot and reservation are free.
+	settled func()
 }
 
 func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger *log.Logger, locks ...*sync.RWMutex) *Supervisor {
@@ -66,6 +69,9 @@ func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger 
 func (s *Supervisor) Start(runID string) {
 	if err := s.run(runID); err != nil {
 		s.log.Printf("weft run=%s: %v", runID, err)
+	}
+	if s.settled != nil {
+		s.settled()
 	}
 }
 
@@ -695,7 +701,10 @@ func (s *Supervisor) readEvents(run *ledger.WeftRun, segment ledger.WeftSegment,
 			if err := decodeStrict(line, &event); err != nil {
 				return workerRead{err: err}
 			}
-			if err := validateEnvelope(event.envelope, run, segment, expectedSeq, workerRunID); err != nil {
+			// A refusal before hello precedes weft's started line, so it has no
+			// worker_run_id yet.
+			refusal := first && event.Failure != nil
+			if err := validateEnvelopeAt(event.envelope, run, segment, expectedSeq, workerRunID, refusal); err != nil {
 				return workerRead{err: err}
 			}
 			if first && event.Failure == nil {
@@ -703,6 +712,22 @@ func (s *Supervisor) readEvents(run *ledger.WeftRun, segment ledger.WeftSegment,
 			}
 			if !oneOf(event.Outcome, "finished", "halted", "failed", "stopped") {
 				return workerRead{err: fmt.Errorf("invalid ended outcome %q", event.Outcome)}
+			}
+			// weft-service/v2 §6.7: an answer or resume segment refused before
+			// any stage because the default branch moved past the run's base.
+			// The run is held for the operator, its answer unconsumed.
+			if text(event.Failure) == ledger.WeftActionStaleBase {
+				if !refusal || event.Outcome != "failed" || segment.Kind == "launch" {
+					return workerRead{err: fmt.Errorf("stale_base is a refusal of an answer or resume segment before hello")}
+				}
+				s.stateMu.Lock()
+				err := s.store.RecordWeftStaleBase(run.ID, segment.Segment, text(event.Detail))
+				s.stateMu.Unlock()
+				if err != nil {
+					return workerRead{err: err}
+				}
+				terminal = true
+				break
 			}
 			haltStage, haltReason, haltDetail := "", "", ""
 			if event.Halt != nil {
@@ -804,11 +829,20 @@ type halt struct {
 }
 
 func validateEnvelope(e envelope, run *ledger.WeftRun, segment ledger.WeftSegment, seq int, workerID string) error {
+	return validateEnvelopeAt(e, run, segment, seq, workerID, false)
+}
+
+// validateEnvelopeAt checks an event's envelope; preHello admits the null
+// worker_run_id of a refusal written before weft's started line.
+func validateEnvelopeAt(e envelope, run *ledger.WeftRun, segment ledger.WeftSegment, seq int, workerID string, preHello bool) error {
 	if e.ContractVersion != ContractVersion || e.RunID != run.ID || e.Segment != segment.Segment || e.Seq != seq {
 		return fmt.Errorf("worker event envelope does not match the launched segment")
 	}
 	if _, err := time.Parse(time.RFC3339Nano, e.TS); err != nil {
 		return fmt.Errorf("worker event timestamp: %w", err)
+	}
+	if preHello && e.WorkerRunID == "" {
+		return nil
 	}
 	if !validProtocolID(e.WorkerRunID) || (workerID != "" && e.WorkerRunID != workerID) {
 		return fmt.Errorf("worker_run_id changed within the segment")

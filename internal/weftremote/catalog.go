@@ -52,6 +52,7 @@ type catalogProject struct {
 // catalog is one complete tk read: every registered project with its tickets,
 // off one snapshot.
 type catalog struct {
+	store    *ticket.MultiStore
 	snap     *ticket.Snapshot
 	projects []*catalogProject
 	byName   map[string]*catalogProject
@@ -71,7 +72,8 @@ func (s *Service) readCatalog() (*catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	snap, err := ticket.NewMultiStore(cfg.TicketsRoot()).Snapshot()
+	store := ticket.NewMultiStore(cfg.TicketsRoot())
+	snap, err := store.Snapshot()
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +95,7 @@ func (s *Service) readCatalog() (*catalog, error) {
 		byNamespace[ns] = append(byNamespace[ns], t)
 	}
 	homes := homeDirectories()
-	c := &catalog{snap: snap, byName: map[string]*catalogProject{}}
+	c := &catalog{store: store, snap: snap, byName: map[string]*catalogProject{}}
 	for _, name := range cfg.Names() {
 		p := bindProject(s.cfg.Paths.TKConfig, name, cfg.Projects[name].Path, homes)
 		p.Tickets = byNamespace[name]
@@ -194,19 +196,28 @@ func projectDigest(p *catalogProject, snap *ticket.Snapshot) (string, error) {
 }
 
 // recordCatalog raises catalog_revision for every project whose digest moved,
-// with its catalog event. The caller holds stateMu for writing.
+// with its catalog event, and revalidates those projects' waiting entries
+// against the read (§5.2, §6.3). The caller holds stateMu for writing.
 func (s *Service) recordCatalog(c *catalog) error {
 	digests := make(map[string]string, len(c.projects))
 	for _, p := range c.projects {
 		digests[p.Name] = p.digest
 	}
-	revisions, err := s.store.SyncWeftCatalog(digests)
+	revisions, changed, err := s.store.SyncWeftCatalog(digests)
 	if err != nil {
 		return err
 	}
 	for _, p := range c.projects {
 		p.Revision = revisions[p.Name]
 	}
+	if len(changed) == 0 {
+		return nil
+	}
+	changes, err := s.store.RevalidateWeftEntries(changed, s.entryCheck(c))
+	if err != nil {
+		return err
+	}
+	s.logChanges("", changes)
 	return nil
 }
 
@@ -225,9 +236,10 @@ func (s *Service) syncCatalog() (*catalog, error) {
 // against, all at one as_of.
 type catalogView struct {
 	*catalog
-	runs    map[string][]*ledger.WeftRun
-	entries map[string]ledger.WeftEntryRef
-	asOf    int64
+	runs     map[string][]*ledger.WeftRun
+	entries  map[string]ledger.WeftEntryRef
+	capacity ledger.WeftCapacity
+	asOf     int64
 }
 
 func (s *Service) readCatalogView() (*catalogView, error) {
@@ -249,6 +261,9 @@ func (s *Service) readCatalogView() (*catalogView, error) {
 		v.runs[run.Ticket] = append(v.runs[run.Ticket], run)
 	}
 	if v.entries, err = s.store.WeftPendingEntries(); err != nil {
+		return nil, err
+	}
+	if v.capacity, err = s.store.WeftCapacity(); err != nil {
 		return nil, err
 	}
 	if v.asOf, err = s.store.WeftAsOf(); err != nil {
@@ -403,38 +418,9 @@ func (v *catalogView) ticketRow(p *catalogProject, t *ticket.Ticket) map[string]
 // a done ticket reads done rather than as the run that finished it. A
 // project with no usable checkout makes every one of its tickets ineligible.
 func (v *catalogView) ineligibility(p *catalogProject, t *ticket.Ticket, runs []*ledger.WeftRun, entry ledger.WeftEntryRef, hasEntry bool) []map[string]any {
-	reasons := []map[string]any{}
+	reasons := tkIneligibility(v.snap, t)
 	add := func(code, detail string) {
 		reasons = append(reasons, map[string]any{"code": code, "detail": detail})
-	}
-	if t.Status != ticket.StatusReady && t.Status != ticket.StatusOpen {
-		add("status", string(t.Status))
-	}
-	if t.Type == ticket.TypeEpic {
-		add("epic", "an epic is a container; launch its tickets")
-	}
-	if v.snap.IsBlocked(t.ID) {
-		named := false
-		for _, dep := range qualifiedDeps(t) {
-			d, ok := v.snap.Get(dep)
-			switch {
-			case !ok:
-				add("dependency_unresolved", dep+" does not resolve")
-			case d.Status != ticket.StatusDone && d.Status != ticket.StatusClosed:
-				add("dependency_unresolved", dep+" is "+string(d.Status))
-			default:
-				continue
-			}
-			named = true
-		}
-		if !named {
-			add("dependency_unresolved", "a dependency does not resolve")
-		}
-	}
-	// A parent relationship tk cannot place is a relationship to resolve
-	// before the work is automatically runnable, as tk's frontier treats it.
-	if issue := ticket.RelationshipIssue(t); issue != "" {
-		add("dependency_unresolved", issue)
 	}
 	if len(reasons) == 0 {
 		for _, run := range runs {
@@ -465,6 +451,77 @@ func (v *catalogView) ineligibility(p *catalogProject, t *ticket.Ticket, runs []
 		add("project_unavailable", p.ReasonDetail)
 	}
 	return reasons
+}
+
+// tkIneligibility is what tk itself says against launching the ticket — its
+// status, its kind, its graph — read through pkg/ticket's own rules.
+func tkIneligibility(snap *ticket.Snapshot, t *ticket.Ticket) []map[string]any {
+	reasons := []map[string]any{}
+	add := func(code, detail string) {
+		reasons = append(reasons, map[string]any{"code": code, "detail": detail})
+	}
+	if t.Status != ticket.StatusReady && t.Status != ticket.StatusOpen {
+		add("status", string(t.Status))
+	}
+	if t.Type == ticket.TypeEpic {
+		add("epic", "an epic is a container; launch its tickets")
+	}
+	if snap.IsBlocked(t.ID) {
+		named := false
+		for _, dep := range qualifiedDeps(t) {
+			d, ok := snap.Get(dep)
+			switch {
+			case !ok:
+				add("dependency_unresolved", dep+" does not resolve")
+			case d.Status != ticket.StatusDone && d.Status != ticket.StatusClosed:
+				add("dependency_unresolved", dep+" is "+string(d.Status))
+			default:
+				continue
+			}
+			named = true
+		}
+		if !named {
+			add("dependency_unresolved", "a dependency does not resolve")
+		}
+	}
+	// A parent relationship tk cannot place is a relationship to resolve
+	// before the work is automatically runnable, as tk's frontier treats it.
+	if issue := ticket.RelationshipIssue(t); issue != "" {
+		add("dependency_unresolved", issue)
+	}
+	return reasons
+}
+
+// tkEligibility is tk's reasons with the project's unavailability: what a
+// launch is refused ticket_not_eligible for, and dispatch invalidates on.
+func tkEligibility(snap *ticket.Snapshot, p *catalogProject, t *ticket.Ticket) []map[string]any {
+	reasons := tkIneligibility(snap, t)
+	if p.State == projectUnavailable {
+		reasons = append(reasons, map[string]any{"code": "project_unavailable", "detail": p.ReasonDetail})
+	}
+	return reasons
+}
+
+// frontier is tk's frontier for the project in tk's order (§6.4) — what
+// `tk frontier --project` lists — each ticket with its eligibility, and the
+// admissible subset in the same order.
+func (v *catalogView) frontier(p *catalogProject) ([]map[string]any, []string) {
+	var mine []*ticket.Ticket
+	for _, t := range ticket.FrontierOf(v.store, v.store.ListFromSnapshot(v.snap)) {
+		if ns, _ := ticket.ParseNamespacedID(t.ID); ns == p.Name {
+			mine = append(mine, t)
+		}
+	}
+	ticket.SortByPriorityID(mine)
+	rows, admissible := []map[string]any{}, []string{}
+	for _, t := range mine {
+		row := v.ticketRow(p, t)
+		rows = append(rows, map[string]any{"id": t.ID, "title": t.Title, "eligibility": row["eligibility"]})
+		if row["eligibility"].(map[string]any)["state"] == "eligible" {
+			admissible = append(admissible, t.ID)
+		}
+	}
+	return rows, admissible
 }
 
 // qualifiedDeps is the ticket's deps as the qualified ids tk resolves them to.

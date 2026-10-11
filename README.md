@@ -20,8 +20,16 @@ eligibility, the dashboard, run history, questions and the state stream, with
 not-served capabilities answering 501. The catalog reads tk through
 `pkg/ticket`, refuses a partial tk read rather than serving it, and rereads the
 store every five seconds so edits made outside Shuttle reach clients as catalog
-events. `weft-remote/v1` routes keep serving reads; every v1 mutation answers
-503 `host_paused`, though a recorded v1 idempotency key still replays.
+events. Launches, frontier selections, answers and resumes enter one durable
+admission queue under a host-wide cap (default 3, `PUT /v2/queue/capacity`);
+dispatch takes the repository reservation and a slot, mints the run, and
+spawns a `weft-remote/v1` worker segment through the supervisor. Waiting work
+survives clients closing and a daemon restart; `shuttle pause weft-worker`
+pauses dispatch without refusing admission. The daemon log names the host,
+the SHA-256 of each idempotency key, and every entry and run a request or
+dispatch touched. `weft-remote/v1` routes keep serving reads; every v1
+mutation answers 503 `host_paused`, though a recorded v1 idempotency key still
+replays.
 Opening an existing `runs.db` migrates it in place (§14.1 of that contract):
 back it up first, as `runs.db.v1-<stamp>`.
 

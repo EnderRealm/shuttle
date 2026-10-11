@@ -183,10 +183,11 @@ func (s *Store) WeftStreamBounds() (floor, oldest, newest int64, err error) {
 // read at. A project seen for the first time is recorded at revision 0; one
 // whose digest moved, or that is no longer in digests, has its revision
 // raised. Each recorded or raised project writes its catalog event in the same
-// transaction, so a revision a read reports is one the stream carries.
-func (s *Store) SyncWeftCatalog(digests map[string]string) (map[string]int64, error) {
-	revisions := map[string]int64{}
-	err := s.withTx(func(tx *sql.Tx) error {
+// transaction, so a revision a read reports is one the stream carries; changed
+// names them.
+func (s *Store) SyncWeftCatalog(digests map[string]string) (revisions map[string]int64, changed []string, err error) {
+	revisions = map[string]int64{}
+	err = s.withTx(func(tx *sql.Tx) error {
 		type row struct {
 			revision int64
 			digest   string
@@ -237,13 +238,14 @@ func (s *Store) SyncWeftCatalog(digests map[string]string) (map[string]int64, er
 				continue
 			}
 			revisions[name] = prior.revision
+			changed = append(changed, name)
 			if err := appendCatalogEventTx(tx, name, prior.revision, stamp); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
-	return revisions, err
+	return revisions, changed, err
 }
 
 func appendCatalogEventTx(tx *sql.Tx, project string, revision int64, stamp string) error {
@@ -271,12 +273,10 @@ type WeftCounts struct {
 }
 
 // WeftDashboardCounts reads every dashboard figure in one statement, so they
-// agree with each other. A slot is held by a run with a dispatched segment —
-// a parked run has no process — and by an archiving entry (§6.1).
+// agree with each other. Capacity's running count is weftRunningSQL's.
 func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
 	c := WeftCounts{Capacity: WeftCapacityDefault}
 	var capacity sql.NullString
-	var archiving int
 	err := s.db.QueryRow(`SELECT
 		(SELECT value FROM weft_settings WHERE key=?),
 		(SELECT count(*) FROM weft_runs WHERE phase IN (?,?)),
@@ -284,12 +284,12 @@ func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
 		(SELECT count(*) FROM weft_runs WHERE action_required IS NOT NULL),
 		(SELECT count(*) FROM weft_questions WHERE state='pending'),
 		(SELECT count(*) FROM weft_entries WHERE state='waiting'),
-		(SELECT count(*) FROM weft_entries WHERE state='archiving'),
+		(`+weftRunningSQL+`),
 		(SELECT count(*) FROM weft_repositories WHERE dispatch='paused'),
 		(SELECT count(*) FROM weft_terminals WHERE state IN ('starting','live','detached'))`,
 		weftCapacityKey, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked).
 		Scan(&capacity, &c.Active, &c.Blocked, &c.ActionRequired, &c.QuestionsPending, &c.Waiting,
-			&archiving, &c.RepositoriesPaused, &c.TerminalsOpen)
+			&c.Running, &c.RepositoriesPaused, &c.TerminalsOpen)
 	if err != nil {
 		return c, err
 	}
@@ -298,7 +298,6 @@ func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
 			return c, fmt.Errorf("weft capacity %q: %w", capacity.String, err)
 		}
 	}
-	c.Running = c.Active + archiving
 	return c, nil
 }
 
@@ -388,7 +387,7 @@ func (s *Store) QueryWeftRuns(q WeftRunQuery) ([]*WeftRun, error) {
 		return nil, err
 	}
 	for _, run := range out {
-		if err := s.loadWeftChildren(run); err != nil {
+		if err := loadWeftChildren(s.db, run); err != nil {
 			return nil, err
 		}
 	}
@@ -398,10 +397,14 @@ func (s *Store) QueryWeftRuns(q WeftRunQuery) ([]*WeftRun, error) {
 // LatestWeftQuestion is the run's most recent question in any state, with its
 // answer, or sql.ErrNoRows when it never asked one.
 func (s *Store) LatestWeftQuestion(runID string) (*WeftQuestion, error) {
+	return latestWeftQuestion(s.db, runID)
+}
+
+func latestWeftQuestion(q querier, runID string) (*WeftQuestion, error) {
 	var id string
-	if err := s.db.QueryRow(`SELECT id FROM weft_questions WHERE run_id=? ORDER BY asked_at DESC,rowid DESC LIMIT 1`,
+	if err := q.QueryRow(`SELECT id FROM weft_questions WHERE run_id=? ORDER BY asked_at DESC,rowid DESC LIMIT 1`,
 		runID).Scan(&id); err != nil {
 		return nil, err
 	}
-	return s.WeftQuestion(id)
+	return weftQuestion(q, id)
 }

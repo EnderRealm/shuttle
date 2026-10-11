@@ -120,6 +120,11 @@ two run workers active across agents.`,
 			if err != nil {
 				return err
 			}
+			// weft-service/v2 §12 steps 4 and 5, after the restart pass above
+			// (step 1) and before the listener accepts or anything dispatches.
+			if err := service.Restart(); err != nil {
+				return fmt.Errorf("weft restart: %w", err)
+			}
 			ch := make(chan error, 1)
 			serviceErr = ch
 			go func() { ch <- service.ListenAndServe(ctx) }()

@@ -133,6 +133,39 @@ func TestRepositoryIdentityCollapsesCaseAliases(t *testing.T) {
 	}
 }
 
+// Two spellings of one checkout on a case-insensitive volume are one
+// repository: one canonical path, one repository_id, one reservation.
+func TestCanonicalRepositoryCollapsesCaseAliases(t *testing.T) {
+	root := shortCodingRoot(t)
+	repo := filepath.Join(root, "Weft")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "weft")
+	if _, err := os.Stat(alias); err != nil {
+		t.Skip("test volume is case-sensitive")
+	}
+	direct, err := CanonicalRepository(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	throughAlias, err := CanonicalRepository(filepath.Join(strings.ToUpper(root), "WEFT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower, err := CanonicalRepository(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.TrimPrefix(repo, "/private")
+	if direct != want || throughAlias != want || lower != want {
+		t.Fatalf("canonical paths %s, %s, %s; want the volume's spelling %s", direct, throughAlias, lower, want)
+	}
+	if RepositoryID(direct) != RepositoryID(lower) || RepositoryID(direct) != RepositoryID(throughAlias) {
+		t.Fatalf("repository_ids differ: %s %s %s", RepositoryID(direct), RepositoryID(lower), RepositoryID(throughAlias))
+	}
+}
+
 func TestCodingProfileProtectsGitIndirectionsAndSiblingWorktrees(t *testing.T) {
 	root := shortCodingRoot(t)
 	repo := filepath.Join(root, "repo")

@@ -39,6 +39,7 @@ type Service struct {
 	hostID   string
 	home     string
 	log      *log.Logger
+	segments *Supervisor
 	mutateMu sync.Mutex
 	stateMu  sync.RWMutex
 	// catalogPoll is how often the host rereads tk for changes made outside
@@ -88,10 +89,19 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	if err != nil {
 		return nil, fmt.Errorf("weft host_id: %w", err)
 	}
-	return &Service{
+	s := &Service{
 		cfg: cfg, store: store, token: token, tokenID: ledger.TokenID(token), hostID: hostID,
 		home: home, log: logger, catalogPoll: 5 * time.Second,
-	}, nil
+	}
+	// Dispatch spawns weft-remote/v1 segments through the supervisor; each
+	// settled segment may free the slot and reservation a waiting entry needs.
+	s.segments = NewSupervisor(cfg, store, home, logger, &s.stateMu)
+	s.segments.settled = s.dispatch
+	return s, nil
+}
+
+func (s *Service) weftRunsRoot() string {
+	return filepath.Join(s.home, "runs", ledger.WeftAgent)
 }
 
 // ValidateListen refuses public and non-tailnet listener addresses.
@@ -126,6 +136,9 @@ func (s *Service) ListenAndServe(ctx context.Context) error {
 		return err
 	}
 	go s.watchCatalog(ctx)
+	// Waiting entries survive a restart (§12): dispatch resumes once the
+	// restart pass and Restart have run.
+	go s.dispatch()
 	server := &http.Server{Handler: s, ReadHeaderTimeout: 10 * time.Second}
 	stopped := make(chan struct{})
 	go func() {

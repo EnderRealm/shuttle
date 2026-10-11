@@ -4,10 +4,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"shuttle/internal/sandbox"
 )
 
 // schemaTwo writes a weft-remote/v1 ledger as a schema-2 binary left it: a
@@ -230,15 +235,18 @@ func TestWeftRunParksAnswersAndResumesDurably(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 7 {
-		t.Fatalf("events = %d, want launch, hello, stage, question, park, the answered question and the requeue", len(events))
+	if len(events) != 8 {
+		t.Fatalf("events = %d, want launch, hello, stage, question, park, the reap's capacity, the answered question and the requeue", len(events))
+	}
+	if reaped := events[5]; reaped.Type != "capacity" || !strings.Contains(string(reaped.Payload), `"capacity":{"cap":3,"running":0,"waiting":0}`) {
+		t.Fatalf("reap recorded as %s %s", reaped.Type, reaped.Payload)
 	}
 	for _, event := range events {
 		if !strings.HasPrefix(string(event.Payload), `{"contract_version":"weft-service/v2","seq":`) {
 			t.Fatalf("event payload order = %s", event.Payload)
 		}
 	}
-	if answered := events[5]; answered.Type != "question" || !strings.Contains(string(answered.Payload), `"state":"answered"`) ||
+	if answered := events[6]; answered.Type != "question" || !strings.Contains(string(answered.Payload), `"state":"answered"`) ||
 		!strings.Contains(string(answered.Payload), `"entry_id":null`) {
 		t.Fatalf("answer recorded as %s %s", answered.Type, answered.Payload)
 	}
@@ -335,3 +343,133 @@ func TestReconcileWeftUnknownClosesAPIStateAndReleasesRepository(t *testing.T) {
 		t.Fatalf("repository remained locked: %v", err)
 	}
 }
+
+// §12 steps 4 and 5: an archiving entry whose worker is gone is settled by
+// the archive ref it was to write — at the superseded run's head, the
+// maintenance row becomes the new run's in one transaction and its slot is
+// carried; absent, the row and slot are released and the entry waits again.
+// A maintenance row whose entry is no longer archiving, with nothing in
+// flight, is a gone holder.
+func TestRestartSettlesArchivingEntriesByTheirArchiveRef(t *testing.T) {
+	s := newStore(t)
+	root := t.TempDir()
+	runs := filepath.Join(root, "runs")
+	retained := func(ticket, repo string) *WeftRun {
+		t.Helper()
+		run, err := s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "weft", Repo: repo, Branch: ticket,
+			Worktree: filepath.Join(root, "worktrees", strings.ReplaceAll(ticket, "/", "-")), RunDirRoot: runs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordWeftEnded(run.ID, 1, "halted", false, "review", "rejected", "", "", "", "head-"+run.ID, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CompleteWeftSegment(run.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+	archived := filepath.Join(root, "archived")
+	refused := filepath.Join(root, "refused")
+	cleaned := filepath.Join(root, "cleaned")
+	for _, dir := range []string{archived, refused, cleaned} {
+		if err := mkdir(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := retained("weft/archived-0001", archived)
+	second := retained("weft/refused-0002", refused)
+	for i, e := range []struct{ id, ticket, repo, supersedes, state string }{
+		{"e-20261011T120000Z-00000001", first.Ticket, archived, first.ID, WeftEntryArchiving},
+		{"e-20261011T120000Z-00000002", second.Ticket, refused, second.ID, WeftEntryArchiving},
+		{"e-20261011T120000Z-00000003", "weft/cleaned-0003", cleaned, first.ID, WeftEntryCancelled},
+	} {
+		if _, err := s.db.Exec(`INSERT INTO weft_entries(id,kind,ticket,project,repository_id,repository,position,state,
+			supersedes,token_id,request_key,created_at,updated_at,revision)
+			VALUES(?,'fresh',?,'weft',?,?,?,?,?,'token','key','2026-10-11T12:00:00.000Z','2026-10-11T12:00:00.000Z',2)`,
+			e.id, e.ticket, sandboxID(e.repo), e.repo, i+1, e.state, e.supersedes); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO weft_reservations(repository_id,repository,holder_kind,holder_id,acquired_at)
+			VALUES(?,?,'maintenance',?,'2026-10-11T12:00:00.000Z')`, sandboxID(e.repo), e.repo, e.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := s.WeftAsOf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, err := s.WeftCapacity(); err != nil || c.Running != 2 {
+		t.Fatalf("archiving entries hold %+v slots, %v", c, err)
+	}
+	var asked []string
+	released, _, spawn, err := s.RestartWeftQueue(WeftDispatch{WeftRoot: filepath.Join(root, "weft"), RunDirRoot: runs},
+		func(repo, ref string) (string, error) {
+			asked = append(asked, ref)
+			if ref == "refs/weft/archive/"+first.ID {
+				return "head-" + first.ID, nil
+			}
+			return "", nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(released) != 1 || released[0].HolderID != "e-20261011T120000Z-00000003" {
+		t.Fatalf("released = %+v", released)
+	}
+	if len(asked) != 2 || len(spawn) != 1 {
+		t.Fatalf("asked %v, spawn %v", asked, spawn)
+	}
+	fresh, err := s.GetWeftRun(spawn[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := s.GetWeftRun(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Supersedes.String != first.ID || fresh.Phase != WeftPhaseQueued || fresh.EntryID.String != "e-20261011T120000Z-00000001" ||
+		old.Disposition != WeftDispositionArchived || old.SupersededBy.String != fresh.ID ||
+		old.ArchiveRef.String != "refs/weft/archive/"+first.ID || old.Outcome.String != "stopped" {
+		t.Fatalf("fresh %+v old %+v", fresh, old)
+	}
+	var holderKind, holderID string
+	if err := s.db.QueryRow(`SELECT holder_kind,holder_id FROM weft_reservations WHERE repository_id=?`, sandboxID(archived)).
+		Scan(&holderKind, &holderID); err != nil || holderKind != "run" || holderID != fresh.ID {
+		t.Fatalf("archived repository held by %s %s, %v", holderKind, holderID, err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM weft_reservations WHERE repository_id IN (?,?)`, sandboxID(refused), sandboxID(cleaned)).
+		Scan(&n); err != nil || n != 0 {
+		t.Fatalf("refused and cleaned repositories still reserved: %d %v", n, err)
+	}
+	q, err := s.WeftQueue(s.now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]string{}
+	for _, e := range q.Entries {
+		states[e.ID] = e.State + " " + e.RunID.String
+	}
+	if states["e-20261011T120000Z-00000001"] != "dispatched "+fresh.ID || states["e-20261011T120000Z-00000002"] != "waiting " {
+		t.Fatalf("entries = %v", states)
+	}
+	if q.Capacity.Running != 1 || q.Capacity.Waiting != 1 {
+		t.Fatalf("capacity = %+v", q.Capacity)
+	}
+	events, err := s.WeftEventsAfter(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, e := range events {
+		kinds = append(kinds, e.Type)
+	}
+	if !reflect.DeepEqual(kinds, []string{"queue", "run", "run", "queue", "capacity"}) {
+		t.Fatalf("events = %v", kinds)
+	}
+}
+
+func mkdir(path string) error { return os.MkdirAll(path, 0o755) }
+
+func sandboxID(path string) string { return sandbox.RepositoryID(path) }

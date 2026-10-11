@@ -178,8 +178,7 @@ type WeftLaunch struct {
 // ClaimWeft creates an API run, its first phase-1 ledger segment and the
 // repository reservation in one transaction. It is weft-remote/v1's
 // admission, so the run is recorded under that protocol, which never lands.
-// Nothing launches the segments it claims in this build until v2 dispatch
-// wires the supervisor back in.
+// weft-service/v2 mints its runs at dispatch instead (weftqueue.go).
 func (s *Store) ClaimWeft(p WeftLaunch) (*WeftRun, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -190,43 +189,54 @@ func (s *Store) ClaimWeft(p WeftLaunch) (*WeftRun, error) {
 		return nil, err
 	}
 	now := s.now()
-	runID, err := newRemoteID("r", now)
+	runID, err := mintWeftRunTx(tx, p, now, "", WeftRecordedV1, WeftV1SettlementDetail)
 	if err != nil {
 		return nil, err
 	}
-	ledgerID, err := NewRunID(WeftAgent, now.UTC())
-	if err != nil {
-		return nil, err
-	}
-	stamp := weftTimestamp(now)
-	runDir := filepath.Join(p.RunDirRoot, ledgerID)
-	repositoryID := sandbox.RepositoryID(p.Repo)
-	if _, err := tx.Exec(`INSERT INTO weft_runs(
-		id,ticket,project,repo,branch,worktree,phase,created_at,updated_at,
-		repository_id,origin,recorded_under,disposition,settlement_state,settlement_detail)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		runID, p.Ticket, p.Project, p.Repo, p.Branch, p.Worktree,
-		WeftPhaseQueued, stamp, stamp, repositoryID, WeftOriginHosted, WeftRecordedV1,
-		WeftDispositionRetained, WeftSettlementNone, WeftV1SettlementDetail); err != nil {
-		return nil, err
-	}
-	if err := acquireRepository(tx, repositoryID, p.Repo, runID, stamp); err != nil {
-		return nil, err
-	}
-	if err := insertWeftLedgerRunTx(tx, ledgerID, runDir, stamp, now); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`INSERT INTO weft_segments(run_id,segment,kind,ledger_run_id)
-		VALUES(?,?,?,?)`, runID, 1, "launch", ledgerID); err != nil {
-		return nil, err
-	}
-	if err := appendRunEventTx(tx, runID, stamp); err != nil {
+	if err := appendRunEventTx(tx, runID, weftTimestamp(now)); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return s.GetWeftRun(runID)
+}
+
+// mintWeftRunTx creates a run, its repository reservation and its first
+// launch segment with the segment's phase-1 ledger row. The caller writes the
+// run event.
+func mintWeftRunTx(tx *sql.Tx, p WeftLaunch, now time.Time, entryID, recordedUnder, settlementDetail string) (string, error) {
+	runID, err := newRemoteID("r", now)
+	if err != nil {
+		return "", err
+	}
+	ledgerID, err := NewRunID(WeftAgent, now.UTC())
+	if err != nil {
+		return "", err
+	}
+	stamp := weftTimestamp(now)
+	runDir := filepath.Join(p.RunDirRoot, ledgerID)
+	repositoryID := sandbox.RepositoryID(p.Repo)
+	if _, err := tx.Exec(`INSERT INTO weft_runs(
+		id,ticket,project,repo,branch,worktree,phase,created_at,updated_at,
+		repository_id,entry_id,origin,recorded_under,disposition,settlement_state,settlement_detail)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		runID, p.Ticket, p.Project, p.Repo, p.Branch, p.Worktree,
+		WeftPhaseQueued, stamp, stamp, repositoryID, nullString(entryID), WeftOriginHosted, recordedUnder,
+		WeftDispositionRetained, WeftSettlementNone, settlementDetail); err != nil {
+		return "", err
+	}
+	if err := acquireRepository(tx, repositoryID, p.Repo, runID, stamp); err != nil {
+		return "", err
+	}
+	if err := insertWeftLedgerRunTx(tx, ledgerID, runDir, stamp, now); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(`INSERT INTO weft_segments(run_id,segment,kind,ledger_run_id)
+		VALUES(?,?,?,?)`, runID, 1, "launch", ledgerID); err != nil {
+		return "", err
+	}
+	return runID, nil
 }
 
 func requireWeftAvailable(tx *sql.Tx, ticket string) error {
@@ -286,7 +296,7 @@ func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot string) (*We
 	if err != nil {
 		return nil, err
 	}
-	if segment > 8 {
+	if segment > WeftSegmentLimit {
 		return nil, ErrWeftSegmentLimit
 	}
 	answerID, err := newRemoteID("a", s.now())
@@ -302,19 +312,14 @@ func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot string) (*We
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, ErrWeftQuestionPending
 	}
-	if err := acquireRepository(tx, run.RepositoryID, run.Repo, runID, stamp); err != nil {
+	if _, err := claimNextSegmentTx(tx, run, "answer", answerID, runDirRoot, s.now()); err != nil {
 		return nil, err
 	}
-	ledgerID, err := insertWeftSegmentTx(tx, runID, segment, "answer", answerID, runDirRoot, s.now())
-	if err != nil {
+	if _, err := tx.Exec(`UPDATE weft_runs SET summary=NULL WHERE id=?`, runID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(`INSERT INTO weft_answers(id,question_id,run_id,text,submitted_at,segment)
 		VALUES(?,?,?,?,?,?)`, answerID, questionID, runID, text, stamp, segment); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=NULL,stopped=0,summary=NULL,updated_at=?,ended_at=NULL,
-		revision=revision+1 WHERE id=?`, WeftPhaseQueued, stamp, runID); err != nil {
 		return nil, err
 	}
 	question, err := getQuestionTx(tx, questionID)
@@ -331,11 +336,69 @@ func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot string) (*We
 	if err := appendRunEventTx(tx, runID, stamp); err != nil {
 		return nil, err
 	}
-	_ = ledgerID
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return s.GetWeftRun(runID)
+}
+
+// WeftSegmentLimit is the most segments one run may claim (v1 §3.8).
+const WeftSegmentLimit = 8
+
+// claimNextSegmentTx claims the run's next segment of kind — an answer or a
+// resume — with its phase-1 ledger row, takes the repository reservation and
+// moves the run back to queued, keeping the last summary until the worker
+// reports another. The caller writes the run event.
+func claimNextSegmentTx(tx *sql.Tx, run *WeftRun, kind, answerID, runDirRoot string, now time.Time) (int, error) {
+	segment, err := nextSegmentTx(tx, run.ID)
+	if err != nil {
+		return 0, err
+	}
+	if segment > WeftSegmentLimit {
+		return 0, ErrWeftSegmentLimit
+	}
+	stamp := weftTimestamp(now)
+	if err := acquireRepository(tx, run.RepositoryID, run.Repo, run.ID, stamp); err != nil {
+		return 0, err
+	}
+	if _, err := insertWeftSegmentTx(tx, run.ID, segment, kind, answerID, runDirRoot, now); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=NULL,stopped=0,updated_at=?,ended_at=NULL,
+		revision=revision+1 WHERE id=?`, WeftPhaseQueued, stamp, run.ID); err != nil {
+		return 0, err
+	}
+	return segment, nil
+}
+
+// resumeAnswerTx is the answer a resume segment carries (v1 §3.8): the last
+// segment's, when that segment never said hello and so never consumed it.
+func resumeAnswerTx(tx *sql.Tx, runID string) (string, error) {
+	var lastAnswer, lastWorker sql.NullString
+	if err := tx.QueryRow(`SELECT answer_id,worker_run_id FROM weft_segments WHERE run_id=? ORDER BY segment DESC LIMIT 1`, runID).
+		Scan(&lastAnswer, &lastWorker); err != nil {
+		return "", err
+	}
+	if !lastWorker.Valid && lastAnswer.Valid {
+		return lastAnswer.String, nil
+	}
+	return "", nil
+}
+
+// weftResumableTx is v1 §3.8's rule for a run another segment may resume: it
+// ended stopped, or failed under one of the host's classes.
+func weftResumableTx(tx *sql.Tx, run *WeftRun) (bool, error) {
+	if run.Phase != WeftPhaseEnded || (!run.Stopped && run.Outcome.String != "failed") {
+		return false, nil
+	}
+	if run.Stopped {
+		return true, nil
+	}
+	var lastFailure sql.NullString
+	if err := tx.QueryRow(`SELECT failure FROM weft_segments WHERE run_id=? ORDER BY segment DESC LIMIT 1`, run.ID).Scan(&lastFailure); err != nil {
+		return false, err
+	}
+	return isHostFailure(lastFailure.String), nil
 }
 
 func requireWeftAgentAvailable(tx *sql.Tx) error {
@@ -413,41 +476,21 @@ func (s *Store) ClaimWeftResume(runID, runDirRoot string) (*WeftRun, error) {
 	if err := requireWeftAgentAvailable(tx); err != nil {
 		return nil, err
 	}
-	var lastFailure sql.NullString
-	if err := tx.QueryRow(`SELECT failure FROM weft_segments WHERE run_id=? ORDER BY segment DESC LIMIT 1`, runID).Scan(&lastFailure); err != nil {
-		return nil, err
-	}
-	if !run.Stopped && !isHostFailure(lastFailure.String) {
-		return nil, ErrWeftRunNotResumable
-	}
-	segment, err := nextSegmentTx(tx, runID)
+	resumable, err := weftResumableTx(tx, run)
 	if err != nil {
 		return nil, err
 	}
-	if segment > 8 {
-		return nil, ErrWeftSegmentLimit
+	if !resumable {
+		return nil, ErrWeftRunNotResumable
 	}
-	stamp := weftTimestamp(s.now())
-	if err := acquireRepository(tx, run.RepositoryID, run.Repo, runID, stamp); err != nil {
+	answerID, err := resumeAnswerTx(tx, runID)
+	if err != nil {
 		return nil, err
 	}
-	var lastAnswer, lastWorker sql.NullString
-	if err := tx.QueryRow(`SELECT answer_id,worker_run_id FROM weft_segments WHERE run_id=? ORDER BY segment DESC LIMIT 1`, runID).
-		Scan(&lastAnswer, &lastWorker); err != nil {
+	if _, err := claimNextSegmentTx(tx, run, "resume", answerID, runDirRoot, s.now()); err != nil {
 		return nil, err
 	}
-	var answerID string
-	if !lastWorker.Valid && lastAnswer.Valid {
-		answerID = lastAnswer.String
-	}
-	if _, err := insertWeftSegmentTx(tx, runID, segment, "resume", answerID, runDirRoot, s.now()); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=NULL,stopped=0,updated_at=?,ended_at=NULL,
-		revision=revision+1 WHERE id=?`, WeftPhaseQueued, stamp, runID); err != nil {
-		return nil, err
-	}
-	if err := appendRunEventTx(tx, runID, stamp); err != nil {
+	if err := appendRunEventTx(tx, runID, weftTimestamp(s.now())); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -575,6 +618,27 @@ func (s *Store) RecordWeftEnded(runID string, segment int, outcome string, stopp
 	})
 }
 
+// RecordWeftStaleBase records an answer or resume segment the worker refused
+// before hello because the repository's default branch moved past the run's
+// base (weft-service/v2 §6.7). The run is held blocked with stale_base for the
+// operator: branch, worktree and any accepted answer are kept, the answer
+// unconsumed, and nothing relaunches it. Settlement waits for reap.
+func (s *Store) RecordWeftStaleBase(runID string, segment int, detail string) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		stamp := weftTimestamp(s.now())
+		if _, err := tx.Exec(`UPDATE weft_segments SET terminal='ended',failure=? WHERE run_id=? AND segment=?`,
+			WeftActionStaleBase, runID, segment); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=NULL,action_required=?,action_detail=?,
+			updated_at=?,revision=revision+1 WHERE id=?`,
+			WeftPhaseParked, WeftActionStaleBase, detail, stamp, runID); err != nil {
+			return err
+		}
+		return appendRunEventTx(tx, runID, stamp)
+	})
+}
+
 // CompleteWeftSegment settles the phase-1 row and releases the repository only
 // after the supervisor has reaped the worker process. A terminal worker event
 // alone deliberately does neither.
@@ -592,11 +656,14 @@ func (s *Store) CompleteWeftSegment(runID string, segment int) error {
 			return err
 		}
 		event.Recovered = last.String == StatusFailed
-		if err := completeSegmentTx(tx, ledgerID, weftTimestamp(s.now())); err != nil {
+		stamp := weftTimestamp(s.now())
+		if err := completeSegmentTx(tx, ledgerID, stamp); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID)
-		return err
+		if _, err = tx.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID); err != nil {
+			return err
+		}
+		return capacityStepTx(tx, stamp)
 	})
 	if err == nil && s.OnTerminal != nil {
 		s.OnTerminal(event)
@@ -679,7 +746,10 @@ func (s *Store) FailWeftSegment(runID string, segment int, class, detail string)
 			WeftPhaseEnded, outcome, detail, summary, stamp, stamp, runID); err != nil {
 			return err
 		}
-		return appendRunEventTx(tx, runID, stamp)
+		if err := appendRunEventTx(tx, runID, stamp); err != nil {
+			return err
+		}
+		return capacityStepTx(tx, stamp)
 	})
 	if err == nil && s.OnTerminal != nil {
 		s.OnTerminal(event)
@@ -692,22 +762,27 @@ func (s *Store) FailWeftSegment(runID string, segment int, class, detail string)
 // or a host-side failure, both preserving the stopped outcome.
 func (s *Store) MarkWeftStopped(runID string) error {
 	return s.withTx(func(tx *sql.Tx) error {
-		run, err := getWeftRunTx(tx, runID)
-		if err != nil {
-			return err
-		}
-		if run.Phase == WeftPhaseEnded {
-			return ErrWeftRunOver
-		}
-		stamp := weftTimestamp(s.now())
-		if _, err := tx.Exec(`UPDATE weft_runs SET stopped=1,phase=?,outcome='stopped',
-			summary=?,updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`, WeftPhaseEnded,
-			`{"state":"unavailable","reason":"stopped by the operator"}`, stamp, stamp, runID); err != nil {
-			return err
-		}
-		return appendRunEventTx(tx, runID, stamp)
+		return markWeftStoppedTx(tx, runID, weftTimestamp(s.now()))
 	})
 }
+
+func markWeftStoppedTx(tx *sql.Tx, runID, stamp string) error {
+	run, err := getWeftRunTx(tx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Phase == WeftPhaseEnded {
+		return ErrWeftRunOver
+	}
+	if _, err := tx.Exec(`UPDATE weft_runs SET stopped=1,phase=?,outcome='stopped',
+		summary=?,updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`, WeftPhaseEnded,
+		weftStoppedSummary, stamp, stamp, runID); err != nil {
+		return err
+	}
+	return appendRunEventTx(tx, runID, stamp)
+}
+
+const weftStoppedSummary = `{"state":"unavailable","reason":"stopped by the operator"}`
 
 // CancelQueuedWeftSegment settles a stop that won the race before the worker
 // was spawned. It is an operator stop, not a worker failure or incident.
@@ -728,8 +803,10 @@ func (s *Store) CancelQueuedWeftSegment(runID string, segment int) error {
 		if err := recordSuccess(tx, agent, stamp); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID)
-		return err
+		if _, err = tx.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID); err != nil {
+			return err
+		}
+		return capacityStepTx(tx, stamp)
 	})
 }
 
@@ -742,31 +819,50 @@ func segmentLedgerID(tx *sql.Tx, runID string, segment int) (string, error) {
 // StopWeftParked closes a run with no live process and withdraws its question.
 func (s *Store) StopWeftParked(runID string) (*WeftRun, error) {
 	err := s.withTx(func(tx *sql.Tx) error {
-		run, err := getWeftRunTx(tx, runID)
-		if err != nil {
-			return err
-		}
-		if run.Phase == WeftPhaseEnded {
-			return ErrWeftRunOver
-		}
-		if run.Phase != WeftPhaseParked {
-			return fmt.Errorf("run %s has a live segment", runID)
-		}
-		stamp := weftTimestamp(s.now())
-		if _, err := tx.Exec(`UPDATE weft_questions SET state='withdrawn' WHERE run_id=? AND state='pending'`, runID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome='stopped',stopped=1,
-			summary=?,updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`, WeftPhaseEnded,
-			`{"state":"unavailable","reason":"stopped by the operator"}`, stamp, stamp, runID); err != nil {
-			return err
-		}
-		return appendRunEventTx(tx, runID, stamp)
+		return stopWeftParkedTx(tx, runID, weftTimestamp(s.now()))
 	})
 	if err != nil {
 		return nil, err
 	}
 	return s.GetWeftRun(runID)
+}
+
+func stopWeftParkedTx(tx *sql.Tx, runID, stamp string) error {
+	run, err := getWeftRunTx(tx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Phase == WeftPhaseEnded {
+		return ErrWeftRunOver
+	}
+	if run.Phase != WeftPhaseParked {
+		return fmt.Errorf("run %s has a live segment", runID)
+	}
+	pending, err := pendingWeftQuestion(tx, runID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		pending = nil
+	case err != nil:
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE weft_questions SET state='withdrawn' WHERE run_id=? AND state='pending'`, runID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome='stopped',stopped=1,
+		summary=?,updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`, WeftPhaseEnded,
+		weftStoppedSummary, stamp, stamp, runID); err != nil {
+		return err
+	}
+	if pending != nil {
+		withdrawn, err := getQuestionTx(tx, pending.ID)
+		if err != nil {
+			return err
+		}
+		if err := appendQuestionEventTx(tx, withdrawn, stamp); err != nil {
+			return err
+		}
+	}
+	return appendRunEventTx(tx, runID, stamp)
 }
 
 // ReleaseWeftRepository releases only the reservation held by this run.
@@ -805,19 +901,34 @@ func (s *Store) ReconcileWeftUnknown(ledgerRunID string) error {
 		if _, err := tx.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID); err != nil {
 			return err
 		}
-		return appendRunEventTx(tx, runID, stamp)
+		if err := appendRunEventTx(tx, runID, stamp); err != nil {
+			return err
+		}
+		return capacityStepTx(tx, stamp)
 	})
 }
 
 func (s *Store) GetWeftRun(id string) (*WeftRun, error) {
-	run, err := getWeftRunDB(s.db, id)
+	return getWeftRunFull(s.db, id)
+}
+
+// querier is what a read needs, so one read serves the store and a
+// transaction alike: the ledger has one connection, and a read issued on the
+// store from inside a transaction would wait on that transaction forever.
+type querier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func getWeftRunFull(q querier, id string) (*WeftRun, error) {
+	run, err := scanWeftRun(q.QueryRow(`SELECT `+weftRunColumns+` FROM weft_runs WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("weft run %s: not found", id)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := s.loadWeftChildren(run); err != nil {
+	if err := loadWeftChildren(q, run); err != nil {
 		return nil, err
 	}
 	return run, nil
@@ -838,10 +949,6 @@ func getWeftRunTx(tx *sql.Tx, id string) (*WeftRun, error) {
 	return scanWeftRun(tx.QueryRow(`SELECT `+weftRunColumns+` FROM weft_runs WHERE id=?`, id))
 }
 
-func getWeftRunDB(db *sql.DB, id string) (*WeftRun, error) {
-	return scanWeftRun(db.QueryRow(`SELECT `+weftRunColumns+` FROM weft_runs WHERE id=?`, id))
-}
-
 func scanWeftRun(sc scanner) (*WeftRun, error) {
 	var run WeftRun
 	var summary sql.NullString
@@ -858,8 +965,8 @@ func scanWeftRun(sc scanner) (*WeftRun, error) {
 	return &run, err
 }
 
-func (s *Store) loadWeftChildren(run *WeftRun) error {
-	rows, err := s.db.Query(`SELECT ws.run_id,ws.segment,ws.kind,ws.ledger_run_id,ws.worker_run_id,
+func loadWeftChildren(q querier, run *WeftRun) error {
+	rows, err := q.Query(`SELECT ws.run_id,ws.segment,ws.kind,ws.ledger_run_id,ws.worker_run_id,
 		ws.answer_id,ws.terminal,ws.failure,r.run_dir,r.claimed_at,r.started_at,r.ended_at
 		FROM weft_segments ws JOIN runs r ON r.id=ws.ledger_run_id
 		WHERE ws.run_id=? ORDER BY ws.segment`, run.ID)
@@ -879,7 +986,7 @@ func (s *Store) loadWeftChildren(run *WeftRun) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(`SELECT run_id,segment,stage,occurrence,attempt,backend,state,session,
+	rows, err = q.Query(`SELECT run_id,segment,stage,occurrence,attempt,backend,state,session,
 		detail,exit_code,turns,spend,processing_ms,tokens,at FROM weft_stages
 		WHERE run_id=? ORDER BY rowid`, run.ID)
 	if err != nil {
@@ -905,32 +1012,40 @@ func (s *Store) loadWeftChildren(run *WeftRun) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	q, err := s.PendingWeftQuestion(run.ID)
+	question, err := pendingWeftQuestion(q, run.ID)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		q = nil
+		question = nil
 	}
-	run.Question = q
+	run.Question = question
 	return nil
 }
 
 func (s *Store) PendingWeftQuestion(runID string) (*WeftQuestion, error) {
-	return scanQuestion(s.db.QueryRow(`SELECT q.id,q.run_id,r.ticket,q.segment,q.stage,q.occurrence,
+	return pendingWeftQuestion(s.db, runID)
+}
+
+func pendingWeftQuestion(q querier, runID string) (*WeftQuestion, error) {
+	return scanQuestion(q.QueryRow(`SELECT q.id,q.run_id,r.ticket,q.segment,q.stage,q.occurrence,
 		q.attempt,q.text,q.asked_at,q.state,q.answer_id FROM weft_questions q
 		JOIN weft_runs r ON r.id=q.run_id WHERE q.run_id=? AND q.state='pending'`, runID))
 }
 
 func (s *Store) WeftQuestion(id string) (*WeftQuestion, error) {
-	q, err := scanQuestion(s.db.QueryRow(`SELECT q.id,q.run_id,r.ticket,q.segment,q.stage,q.occurrence,
+	return weftQuestion(s.db, id)
+}
+
+func weftQuestion(db querier, id string) (*WeftQuestion, error) {
+	q, err := scanQuestion(db.QueryRow(`SELECT q.id,q.run_id,r.ticket,q.segment,q.stage,q.occurrence,
 		q.attempt,q.text,q.asked_at,q.state,q.answer_id FROM weft_questions q
 		JOIN weft_runs r ON r.id=q.run_id WHERE q.id=?`, id))
 	if err != nil {
 		return nil, err
 	}
 	if q.AnswerID.Valid {
-		q.Answer, err = s.weftAnswer(q.AnswerID.String)
+		q.Answer, err = weftAnswer(db, q.AnswerID.String)
 	}
 	return q, err
 }
@@ -967,16 +1082,16 @@ func scanQuestion(sc scanner) (*WeftQuestion, error) {
 	return &q, err
 }
 
-func (s *Store) weftAnswer(id string) (*WeftAnswer, error) {
+func weftAnswer(q querier, id string) (*WeftAnswer, error) {
 	var a WeftAnswer
-	err := s.db.QueryRow(`SELECT id,question_id,run_id,text,submitted_at,segment,entry_id,consumed_segment
+	err := q.QueryRow(`SELECT id,question_id,run_id,text,submitted_at,segment,entry_id,consumed_segment
 		FROM weft_answers WHERE id=?`, id).
 		Scan(&a.ID, &a.QuestionID, &a.RunID, &a.Text, &a.SubmittedAt, &a.Segment, &a.EntryID, &a.ConsumedSegment)
 	return &a, err
 }
 
 func (s *Store) WeftAnswer(id string) (*WeftAnswer, error) {
-	return s.weftAnswer(id)
+	return weftAnswer(s.db, id)
 }
 
 // WeftAsOf is the last seq the state stream allocated. It is read from the

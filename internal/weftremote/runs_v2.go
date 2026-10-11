@@ -67,8 +67,15 @@ func v2Halt(run *ledger.WeftRun) any {
 	return map[string]any{"stage": run.HaltStage.String, "reason": run.HaltReason.String, "detail": run.HaltDetail.String}
 }
 
+// runReader is what v2Run reads beyond the run: the store, or a queue
+// transaction building the response it records.
+type runReader interface {
+	WeftAnswer(id string) (*ledger.WeftAnswer, error)
+	LatestWeftQuestion(runID string) (*ledger.WeftQuestion, error)
+}
+
 // v2Run is the full run (run.json).
-func v2Run(run *ledger.WeftRun, store *ledger.Store) (map[string]any, error) {
+func v2Run(run *ledger.WeftRun, store runReader) (map[string]any, error) {
 	var action, failure any
 	if run.ActionRequired.Valid {
 		options := actionOptions[run.ActionRequired.String]
@@ -94,9 +101,8 @@ func v2Run(run *ledger.WeftRun, store *ledger.Store) (map[string]any, error) {
 			}
 			answer = map[string]any{"question_id": a.QuestionID, "answer_id": a.ID}
 		}
-		// Nothing launches segments in this build until v2 dispatch wires
-		// the supervisor back in; every recorded segment was claimed under
-		// weft-remote/v1.
+		// Dispatch launches every segment under weft-remote/v1 until the
+		// weft-worker/v2 worker of weft/expose-recoverable-hosted-b935.
 		segments = append(segments, map[string]any{
 			"segment": seg.Segment, "kind": seg.Kind, "worker_contract": ContractVersion,
 			"ledger_run_id": seg.LedgerRunID, "worker_run_id": nullString(seg.WorkerRunID),

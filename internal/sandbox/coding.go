@@ -69,15 +69,19 @@ func RepositoryID(canonical string) string {
 	return string(base) + "-" + hex.EncodeToString(sum[:4])
 }
 
-// CanonicalRepository collapses symlink aliases to the one path used for the
-// repository reservation and hosted worker argv. Swift's standardized path
-// drops macOS's /private alias, so the host does the same after resolution.
+// CanonicalRepository collapses symlink and case aliases to the one path used
+// for the repository reservation and hosted worker argv. Swift's standardized
+// path drops macOS's /private alias, so the host does the same after
+// resolution.
 func CanonicalRepository(repo string) (string, error) {
 	if !filepath.IsAbs(repo) {
 		return "", fmt.Errorf("repository %q is not absolute", repo)
 	}
 	canonical, err := filepath.EvalSymlinks(filepath.Clean(repo))
 	if err != nil {
+		return "", fmt.Errorf("resolve repository %q: %w", repo, err)
+	}
+	if canonical, err = filesystemSpelling(canonical); err != nil {
 		return "", fmt.Errorf("resolve repository %q: %w", repo, err)
 	}
 	if strings.HasPrefix(canonical, "/private/") {

@@ -533,8 +533,8 @@ func (s *studio) seedFixtureRuns(tickets []fixtureTicket) {
 		}
 		s.runIDs[ft.Run.RunID] = run.ID
 	}
-	// No call admits an entry until v2 dispatch ships; the row is the one
-	// launch-response.json shows, written as admission will write it.
+	// The row launch-response.json shows, written directly so it waits on the
+	// seeded run without a dispatch pass spawning anything.
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(s.root, "runs.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -812,8 +812,8 @@ func (s *studio) compareTicket(row map[string]any, want fixtureTicket) {
 			run["action_required"] != optional(want.Run.ActionRequired) {
 			t.Errorf("%s run = %v, want %+v", want.ID, run, want.Run)
 		}
-		// Every run this build records is recorded under weft-remote/v1,
-		// which never lands; tickets.json's in-flight runs are v2 ones.
+		// The seeded runs are recorded under weft-remote/v1, which never
+		// lands; tickets.json's in-flight runs are v2 ones.
 		if run["landing"] != "not_applicable" {
 			t.Errorf("%s run landing = %v", want.ID, run["landing"])
 		}
