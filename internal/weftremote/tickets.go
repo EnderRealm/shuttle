@@ -1,13 +1,11 @@
 package weftremote
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
 	"shuttle/internal/provider/tkconfig"
-	"shuttle/internal/sandbox"
 )
 
 type ticketCatalog struct {
@@ -30,18 +28,6 @@ func (c *ticketCatalog) all() ([]*ticket.Ticket, error) {
 
 func (c *ticketCatalog) get(id string) (*ticket.Ticket, error) {
 	return c.store.Get(id)
-}
-
-func (c *ticketCatalog) projectPath(project string) (string, error) {
-	p, ok := c.config.Projects[project]
-	if !ok || p.Path == "" {
-		return "", fmt.Errorf("project %s has no configured path", project)
-	}
-	path, err := sandbox.CanonicalRepository(p.Path)
-	if err != nil {
-		return "", fmt.Errorf("project %s: %w", project, err)
-	}
-	return path, nil
 }
 
 func projectOf(id string) string {

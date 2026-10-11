@@ -12,19 +12,16 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
-	"shuttle/internal/sandbox"
 )
 
 const (
@@ -32,22 +29,22 @@ const (
 	maxAnswerBytes  = 64 << 10
 )
 
-type segmentControl interface {
-	Start(runID string)
-	Stop(runID string)
-}
-
-// Service is the authenticated weft-remote/v1 HTTP host.
+// Service is the authenticated weft host: weft-service/v2, and weft-remote/v1
+// in the route mode of weft-service/v2 §14.2.
 type Service struct {
 	cfg      *config.Config
 	store    *ledger.Store
 	token    string
 	tokenID  string
+	hostID   string
 	home     string
 	log      *log.Logger
-	segments segmentControl
 	mutateMu sync.Mutex
 	stateMu  sync.RWMutex
+	// catalogPoll is how often the host rereads tk for changes made outside
+	// Shuttle (§5.2). A full read of the Studio's store costs ~150ms, so the
+	// interval trades an external edit's latency against a daemon's idle CPU.
+	catalogPoll time.Duration
 }
 
 func New(cfg *config.Config, store *ledger.Store, token, home string, logger *log.Logger) (*Service, error) {
@@ -87,16 +84,14 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	if logger == nil {
 		logger = log.Default()
 	}
-	s := &Service{cfg: cfg, store: store, token: token, tokenID: ledger.TokenID(token), home: home, log: logger}
-	s.segments = NewSupervisor(cfg, store, home, logger, &s.stateMu)
-	return s, nil
-}
-
-// SetSegmentControl replaces process supervision for protocol tests.
-func (s *Service) SetSegmentControl(control segmentControl) {
-	if control != nil {
-		s.segments = control
+	hostID, err := store.WeftHostID()
+	if err != nil {
+		return nil, fmt.Errorf("weft host_id: %w", err)
 	}
+	return &Service{
+		cfg: cfg, store: store, token: token, tokenID: ledger.TokenID(token), hostID: hostID,
+		home: home, log: logger, catalogPoll: 5 * time.Second,
+	}, nil
 }
 
 // ValidateListen refuses public and non-tailnet listener addresses.
@@ -130,6 +125,7 @@ func (s *Service) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	go s.watchCatalog(ctx)
 	server := &http.Server{Handler: s, ReadHeaderTimeout: 10 * time.Second}
 	stopped := make(chan struct{})
 	go func() {
@@ -150,11 +146,24 @@ func (s *Service) ListenAndServe(ctx context.Context) error {
 }
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	version, _, _ := strings.Cut(strings.TrimPrefix(path, "/"), "/")
 	if !s.authorized(r) {
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "a bearer token is required")
+		if version == "v1" {
+			s.writeError(w, http.StatusUnauthorized, "unauthorized", "a bearer token is required")
+		} else {
+			s.v2Error(w, http.StatusUnauthorized, "unauthorized", "a bearer token is required")
+		}
 		return
 	}
-	path := strings.TrimSuffix(r.URL.Path, "/")
+	switch {
+	case version == "v2":
+		s.serveV2(w, r, path)
+		return
+	case version != "v1" && unspokenVersion(version):
+		s.upgradeRequired(w, version)
+		return
+	}
 	if r.Method == http.MethodGet && path != "/v1/events" {
 		s.stateMu.RLock()
 		defer s.stateMu.RUnlock()
@@ -165,7 +174,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v1/tickets/"):
 		s.handleTicket(w, strings.TrimPrefix(path, "/v1/tickets/"))
 	case r.Method == http.MethodPost && path == "/v1/runs":
-		s.handleLaunch(w, r)
+		s.handleV1Mutation(w, r)
 	case r.Method == http.MethodGet && path == "/v1/runs":
 		s.handleRuns(w, r)
 	case r.Method == http.MethodGet && path == "/v1/questions":
@@ -278,76 +287,6 @@ func (s *Service) catalog(w http.ResponseWriter) (*ticketCatalog, []*ticket.Tick
 	return catalog, all, byID, true
 }
 
-func (s *Service) handleLaunch(w http.ResponseWriter, r *http.Request) {
-	type request struct {
-		ContractVersion string `json:"contract_version"`
-		Ticket          string `json:"ticket"`
-	}
-	s.mutate(w, r, func(body []byte) mutation {
-		var req request
-		if err := decodeStrict(body, &req); err != nil {
-			return apiFailure(http.StatusBadRequest, "malformed", err.Error())
-		}
-		if req.ContractVersion != ContractVersion {
-			return apiFailure(http.StatusBadRequest, "contract_version", "unsupported contract_version")
-		}
-		if strings.Count(req.Ticket, "/") != 1 {
-			return apiFailure(http.StatusBadRequest, "malformed", "ticket must be a qualified project/id")
-		}
-		catalog, err := loadTickets(s.cfg.Paths.TKConfig)
-		if err != nil {
-			return mutation{err: err}
-		}
-		all, err := catalog.all()
-		if err != nil {
-			return mutation{err: err}
-		}
-		byID := make(map[string]*ticket.Ticket, len(all))
-		for _, t := range all {
-			byID[t.ID] = t
-		}
-		t := byID[req.Ticket]
-		if t == nil {
-			return apiFailure(http.StatusNotFound, "ticket_not_found", req.Ticket+" was not found")
-		}
-		if yes, reason := launchable(t, byID); !yes {
-			return apiFailure(http.StatusConflict, "ticket_not_launchable", req.Ticket+": "+reason)
-		}
-		repo, err := catalog.projectPath(projectOf(t.ID))
-		if err != nil {
-			return mutation{err: err}
-		}
-		worktree, err := sandbox.WorktreePath(s.cfg.Weft.Root, repo, t.ID)
-		if err != nil {
-			return mutation{err: err}
-		}
-		repositoryKey, err := sandbox.RepositoryIdentity(repo)
-		if err != nil {
-			return mutation{err: err}
-		}
-		run, err := s.store.ClaimWeft(ledger.WeftLaunch{
-			Ticket: t.ID, Project: projectOf(t.ID), Repo: repo, Branch: t.ID,
-			Worktree: worktree, RunDirRoot: s.weftRunsRoot(), RepositoryKey: repositoryKey,
-		})
-		if err != nil {
-			return s.mapLedgerError(err, req.Ticket)
-		}
-		resource, err := runResource(run, s.store)
-		if err != nil {
-			return mutation{err: err}
-		}
-		asOf, err := s.store.WeftAsOf()
-		if err != nil {
-			return mutation{err: err}
-		}
-		return mutation{
-			status: http.StatusCreated,
-			body:   map[string]any{"contract_version": ContractVersion, "as_of": asOf, "run": resource},
-			after:  func() { s.segments.Start(run.ID) },
-		}
-	})
-}
-
 func (s *Service) handleRuns(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	if state != "" && state != "active" && state != "blocked" && state != "over" {
@@ -418,158 +357,11 @@ func (s *Service) handleRunPath(w http.ResponseWriter, r *http.Request, rest str
 			}
 			s.writeJSON(w, http.StatusOK, map[string]any{"contract_version": ContractVersion, "as_of": asOf, "result": resultResource(run)})
 		}
-	case r.Method == http.MethodPost && parts[1] == "answer":
-		s.handleAnswer(w, r, runID)
-	case r.Method == http.MethodPost && parts[1] == "stop":
-		s.handleStop(w, r, runID)
-	case r.Method == http.MethodPost && parts[1] == "resume":
-		s.handleResume(w, r, runID)
+	case r.Method == http.MethodPost && oneOf(parts[1], "answer", "stop", "resume"):
+		s.handleV1Mutation(w, r)
 	default:
 		s.writeError(w, http.StatusNotFound, "run_not_found", runID+" was not found")
 	}
-}
-
-func (s *Service) handleAnswer(w http.ResponseWriter, r *http.Request, runID string) {
-	type request struct {
-		ContractVersion string `json:"contract_version"`
-		QuestionID      string `json:"question_id"`
-		Answer          string `json:"answer"`
-	}
-	s.mutate(w, r, func(body []byte) mutation {
-		var req request
-		if err := decodeStrict(body, &req); err != nil {
-			return apiFailure(http.StatusBadRequest, "malformed", err.Error())
-		}
-		if req.ContractVersion != ContractVersion {
-			return apiFailure(http.StatusBadRequest, "contract_version", "unsupported contract_version")
-		}
-		if !validProtocolID(req.QuestionID) {
-			return apiFailure(http.StatusBadRequest, "malformed", "question_id is not well formed")
-		}
-		if len([]byte(req.Answer)) > maxAnswerBytes || !utf8.ValidString(req.Answer) {
-			return apiFailure(http.StatusBadRequest, "malformed", "answer must be UTF-8 and at most 64 KiB")
-		}
-		prior, err := s.store.GetWeftRun(runID)
-		if err != nil {
-			return apiFailure(http.StatusNotFound, "run_not_found", runID+" was not found")
-		}
-		repositoryKey, err := sandbox.RepositoryIdentity(prior.Repo)
-		if err != nil {
-			return mutation{err: err}
-		}
-		run, err := s.store.ClaimWeftAnswer(runID, req.QuestionID, req.Answer, s.weftRunsRoot(), repositoryKey)
-		if err != nil {
-			return s.mapLedgerError(err, runID)
-		}
-		resource, err := runResource(run, s.store)
-		if err != nil {
-			return mutation{err: err}
-		}
-		asOf, err := s.store.WeftAsOf()
-		if err != nil {
-			return mutation{err: err}
-		}
-		return mutation{
-			status: http.StatusOK,
-			body:   map[string]any{"contract_version": ContractVersion, "as_of": asOf, "run": resource},
-			after:  func() { s.segments.Start(run.ID) },
-		}
-	})
-}
-
-func (s *Service) handleStop(w http.ResponseWriter, r *http.Request, runID string) {
-	type request struct {
-		ContractVersion string `json:"contract_version"`
-	}
-	s.mutate(w, r, func(body []byte) mutation {
-		var req request
-		if err := decodeStrict(body, &req); err != nil {
-			return apiFailure(http.StatusBadRequest, "malformed", err.Error())
-		}
-		if req.ContractVersion != ContractVersion {
-			return apiFailure(http.StatusBadRequest, "contract_version", "unsupported contract_version")
-		}
-		run, err := s.store.GetWeftRun(runID)
-		if err != nil {
-			return apiFailure(http.StatusNotFound, "run_not_found", runID+" was not found")
-		}
-		if run.Phase == ledger.WeftPhaseEnded {
-			return apiFailure(http.StatusConflict, "run_over", runID+" is already over")
-		}
-		var after func()
-		if run.Phase == ledger.WeftPhaseParked {
-			run, err = s.store.StopWeftParked(runID)
-		} else {
-			err = s.store.MarkWeftStopped(runID)
-			if err == nil {
-				run, err = s.store.GetWeftRun(runID)
-				after = func() { s.segments.Stop(runID) }
-			}
-		}
-		if err != nil {
-			return s.mapLedgerError(err, runID)
-		}
-		resource, err := runResource(run, s.store)
-		if err != nil {
-			return mutation{err: err}
-		}
-		asOf, err := s.store.WeftAsOf()
-		if err != nil {
-			return mutation{err: err}
-		}
-		return mutation{status: http.StatusOK, body: map[string]any{
-			"contract_version": ContractVersion, "as_of": asOf, "run": resource,
-		}, after: after}
-	})
-}
-
-func (s *Service) handleResume(w http.ResponseWriter, r *http.Request, runID string) {
-	type request struct {
-		ContractVersion string `json:"contract_version"`
-	}
-	s.mutate(w, r, func(body []byte) mutation {
-		var req request
-		if err := decodeStrict(body, &req); err != nil {
-			return apiFailure(http.StatusBadRequest, "malformed", err.Error())
-		}
-		if req.ContractVersion != ContractVersion {
-			return apiFailure(http.StatusBadRequest, "contract_version", "unsupported contract_version")
-		}
-		prior, err := s.store.GetWeftRun(runID)
-		if err != nil {
-			return apiFailure(http.StatusNotFound, "run_not_found", runID+" was not found")
-		}
-		hasWorker := false
-		for _, seg := range prior.Segments {
-			hasWorker = hasWorker || seg.WorkerRunID.Valid
-		}
-		if hasWorker {
-			if info, err := os.Stat(prior.Worktree); err != nil || !info.IsDir() {
-				return apiFailure(http.StatusConflict, "worktree_missing", prior.Worktree+" is missing")
-			}
-		}
-		repositoryKey, err := sandbox.RepositoryIdentity(prior.Repo)
-		if err != nil {
-			return mutation{err: err}
-		}
-		run, err := s.store.ClaimWeftResume(runID, s.weftRunsRoot(), repositoryKey)
-		if err != nil {
-			return s.mapLedgerError(err, runID)
-		}
-		resource, err := runResource(run, s.store)
-		if err != nil {
-			return mutation{err: err}
-		}
-		asOf, err := s.store.WeftAsOf()
-		if err != nil {
-			return mutation{err: err}
-		}
-		return mutation{
-			status: http.StatusOK,
-			body:   map[string]any{"contract_version": ContractVersion, "as_of": asOf, "run": resource},
-			after:  func() { s.segments.Start(run.ID) },
-		}
-	})
 }
 
 func (s *Service) handleQuestions(w http.ResponseWriter) {
@@ -612,10 +404,22 @@ func (s *Service) handleQuestion(w http.ResponseWriter, id string) {
 	})
 }
 
+// handleV1Mutation is weft-service/v2 §14.2's v1 route mode: a v1 launch
+// cannot honestly be a waiting entry with no run, and a v1 client must not
+// bypass the shared queue, so every v1 mutation is refused with the
+// host_paused every v1 client already handles. mutate still replays a key
+// recorded before the upgrade.
+func (s *Service) handleV1Mutation(w http.ResponseWriter, r *http.Request) {
+	s.mutate(w, r, func([]byte) mutation {
+		return apiFailure(http.StatusServiceUnavailable, "host_paused",
+			"weft-remote/v1 mutations are refused on host "+s.hostID+
+				": launches, answers, stops and resumes go through weft-service/v2")
+	})
+}
+
 type mutation struct {
 	status int
 	body   any
-	after  func()
 	err    error
 }
 
@@ -681,39 +485,6 @@ func (s *Service) mutate(w http.ResponseWriter, r *http.Request, execute func([]
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(result.status)
 	_, _ = w.Write(doc)
-	if result.after != nil {
-		go result.after()
-	}
-}
-
-func (s *Service) mapLedgerError(err error, id string) mutation {
-	var busy *ledger.RepositoryBusyError
-	switch {
-	case errors.Is(err, ledger.ErrWeftRunInFlight):
-		return apiFailure(http.StatusConflict, "run_in_flight", id+" already has a run in flight")
-	case errors.Is(err, ledger.ErrWeftHostPaused):
-		return apiFailure(http.StatusServiceUnavailable, "host_paused", "weft-worker is paused")
-	case errors.As(err, &busy):
-		return apiFailure(http.StatusConflict, "repository_busy", "repository is held by "+busy.HeldBy)
-	case errors.Is(err, ledger.ErrWeftQuestionPending):
-		return apiFailure(http.StatusConflict, "question_not_pending", id+" has no matching pending question")
-	case errors.Is(err, ledger.ErrWeftRunOver):
-		return apiFailure(http.StatusConflict, "run_over", id+" is over")
-	case errors.Is(err, ledger.ErrWeftRunNotOver):
-		return apiFailure(http.StatusConflict, "run_not_over", id+" is not over")
-	case errors.Is(err, ledger.ErrWeftRunNotResumable):
-		return apiFailure(http.StatusConflict, "run_not_resumable", id+" is not resumable")
-	case errors.Is(err, ledger.ErrWeftSegmentLimit):
-		return apiFailure(http.StatusConflict, "segment_limit", id+" has reached the segment limit")
-	case errors.Is(err, ledger.ErrWeftWorktreeMissing):
-		return apiFailure(http.StatusConflict, "worktree_missing", id+" has no worktree")
-	default:
-		return mutation{err: err}
-	}
-}
-
-func (s *Service) weftRunsRoot() string {
-	return filepath.Join(s.home, "runs", ledger.WeftAgent)
 }
 
 func validIdempotencyKey(key string) bool {
@@ -785,6 +556,10 @@ func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	s.stateMu.RLock()
 	oldest, current, err := s.store.WeftEventBounds()
+	var floor int64
+	if err == nil {
+		floor, err = s.store.WeftV1EventFloor()
+	}
 	s.stateMu.RUnlock()
 	if err != nil {
 		s.internal(w, err)
@@ -817,18 +592,27 @@ func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	keepAlive := time.NewTicker(15 * time.Second)
 	defer keepAlive.Stop()
 	for {
-		s.stateMu.RLock()
-		events, err := s.store.WeftEventsAfter(last)
-		s.stateMu.RUnlock()
-		if err != nil {
-			return
-		}
-		for _, event := range events {
-			if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Seq, event.Type, event.Payload); err != nil {
+		// Only the events written under weft-remote/v1 are v1 payloads
+		// (weft-service/v2 §14.2). They are history — nothing at or below the
+		// migration's floor is written after it — so once they are sent this
+		// stream carries keep-alives alone, and v2 state is read through /v2.
+		if last < floor {
+			s.stateMu.RLock()
+			events, err := s.store.WeftEventsAfter(last)
+			s.stateMu.RUnlock()
+			if err != nil {
 				return
 			}
-			last = event.Seq
-			flusher.Flush()
+			for _, event := range events {
+				if event.Seq > floor {
+					break
+				}
+				if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Seq, event.Type, event.Payload); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
+			last = floor
 		}
 		select {
 		case <-r.Context().Done():

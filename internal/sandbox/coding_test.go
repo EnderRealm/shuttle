@@ -28,6 +28,65 @@ func TestWorktreePathMatchesWeftContract(t *testing.T) {
 	}
 }
 
+// contractDir is weft's docs/service-v2: $WEFT_CONTRACT_DIR, else the sibling
+// checkout, either resolved against this repository's root. Absent is a
+// failure rather than a skip: these fixtures are the contract under test.
+func contractDir(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := os.Getenv("WEFT_CONTRACT_DIR")
+	if dir == "" {
+		dir = filepath.Join("..", "weft", "docs", "service-v2")
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(root, dir)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "manifest.json")); err != nil {
+		t.Fatalf("weft-service/v2 fixtures are required (set WEFT_CONTRACT_DIR): %v", err)
+	}
+	return dir
+}
+
+func TestRepositoryIDMatchesServiceFixtures(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join(contractDir(t), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Projects []struct {
+			RepositoryID *string `json:"repository_id"`
+			Repository   *string `json:"repository"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(doc, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, p := range fixture.Projects {
+		if p.Repository == nil {
+			continue
+		}
+		if got := RepositoryID(*p.Repository); got != *p.RepositoryID {
+			t.Errorf("RepositoryID(%s) = %s, want %s", *p.Repository, got, *p.RepositoryID)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("projects.json binds no repository")
+	}
+	long := "/tmp/" + strings.Repeat("a", 60) + ".git checkout"
+	got := RepositoryID(long)
+	if len(got) != 64 || !strings.HasPrefix(got, strings.Repeat("a", 55)+"-") {
+		t.Fatalf("RepositoryID(%q) = %q, want the basename cut to 55 bytes", long, got)
+	}
+	if got := RepositoryID("/tmp/my repo.v2"); !strings.HasPrefix(got, "my-repo-v2-") {
+		t.Fatalf("RepositoryID kept bytes outside [A-Za-z0-9-]: %s", got)
+	}
+}
+
 func TestCanonicalRepositoryCollapsesSymlinkAliases(t *testing.T) {
 	root := shortCodingRoot(t)
 	repo := filepath.Join(root, "repo")

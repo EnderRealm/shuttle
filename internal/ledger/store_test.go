@@ -43,8 +43,8 @@ func TestOpenStampsSchemaVersion(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read marker: %v", err)
 	}
-	if v != "2" {
-		t.Fatalf("marker = %q, want \"2\"", v)
+	if v != "3" {
+		t.Fatalf("marker = %q, want \"3\"", v)
 	}
 }
 

@@ -9,8 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"time"
+
+	"shuttle/internal/sandbox"
 )
 
 const (
@@ -67,9 +68,29 @@ type WeftRun struct {
 	CreatedAt  string
 	UpdatedAt  string
 	EndedAt    sql.NullString
-	Segments   []WeftSegment
-	Stages     []WeftStage
-	Question   *WeftQuestion
+
+	RepositoryID     string
+	EntryID          sql.NullString
+	Origin           string
+	RecordedUnder    string
+	ArchiveID        sql.NullString
+	SettlementState  string
+	SettlementStep   sql.NullString
+	SettlementReason sql.NullString
+	SettlementDetail sql.NullString
+	SettlementBranch sql.NullString
+	SettlementCommit sql.NullString
+	ActionRequired   sql.NullString
+	ActionDetail     sql.NullString
+	Disposition      string
+	ArchiveRef       sql.NullString
+	Supersedes       sql.NullString
+	SupersededBy     sql.NullString
+	Revision         int64
+
+	Segments []WeftSegment
+	Stages   []WeftStage
+	Question *WeftQuestion
 }
 
 type WeftSegment struct {
@@ -121,12 +142,14 @@ type WeftQuestion struct {
 }
 
 type WeftAnswer struct {
-	ID          string
-	QuestionID  string
-	RunID       string
-	Text        string
-	SubmittedAt string
-	Segment     int
+	ID              string
+	QuestionID      string
+	RunID           string
+	Text            string
+	SubmittedAt     string
+	Segment         int
+	EntryID         sql.NullString
+	ConsumedSegment sql.NullInt64
 }
 
 type WeftEvent struct {
@@ -150,11 +173,13 @@ type WeftRequest struct {
 
 type WeftLaunch struct {
 	Ticket, Project, Repo, Branch, Worktree, RunDirRoot string
-	RepositoryKey                                       string
 }
 
 // ClaimWeft creates an API run, its first phase-1 ledger segment and the
-// repository reservation in one transaction.
+// repository reservation in one transaction. It is weft-remote/v1's
+// admission, so the run is recorded under that protocol, which never lands.
+// Nothing launches the segments it claims in this build until v2 dispatch
+// wires the supervisor back in.
 func (s *Store) ClaimWeft(p WeftLaunch) (*WeftRun, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -175,14 +200,17 @@ func (s *Store) ClaimWeft(p WeftLaunch) (*WeftRun, error) {
 	}
 	stamp := weftTimestamp(now)
 	runDir := filepath.Join(p.RunDirRoot, ledgerID)
+	repositoryID := sandbox.RepositoryID(p.Repo)
 	if _, err := tx.Exec(`INSERT INTO weft_runs(
-		id,ticket,project,repo,branch,worktree,phase,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)`,
+		id,ticket,project,repo,branch,worktree,phase,created_at,updated_at,
+		repository_id,origin,recorded_under,disposition,settlement_state,settlement_detail)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, p.Ticket, p.Project, p.Repo, p.Branch, p.Worktree,
-		WeftPhaseQueued, stamp, stamp); err != nil {
+		WeftPhaseQueued, stamp, stamp, repositoryID, WeftOriginHosted, WeftRecordedV1,
+		WeftDispositionRetained, WeftSettlementNone, WeftV1SettlementDetail); err != nil {
 		return nil, err
 	}
-	if err := acquireRepository(tx, firstNonempty(p.RepositoryKey, p.Repo), runID, stamp); err != nil {
+	if err := acquireRepository(tx, repositoryID, p.Repo, runID, stamp); err != nil {
 		return nil, err
 	}
 	if err := insertWeftLedgerRunTx(tx, ledgerID, runDir, stamp, now); err != nil {
@@ -220,13 +248,14 @@ func requireWeftAvailable(tx *sql.Tx, ticket string) error {
 	return nil
 }
 
-func acquireRepository(tx *sql.Tx, repo, runID, at string) error {
-	_, err := tx.Exec(`INSERT INTO weft_repository_locks(repository,held_by_run,acquired_at) VALUES(?,?,?)`, repo, runID, at)
+func acquireRepository(tx *sql.Tx, repositoryID, repo, runID, at string) error {
+	_, err := tx.Exec(`INSERT INTO weft_reservations(repository_id,repository,holder_kind,holder_id,acquired_at)
+		VALUES(?,?,'run',?,?)`, repositoryID, repo, runID, at)
 	if err == nil {
 		return nil
 	}
 	var held string
-	if scanErr := tx.QueryRow(`SELECT held_by_run FROM weft_repository_locks WHERE repository=?`, repo).Scan(&held); scanErr == nil {
+	if scanErr := tx.QueryRow(`SELECT holder_id FROM weft_reservations WHERE repository_id=?`, repositoryID).Scan(&held); scanErr == nil {
 		return &RepositoryBusyError{HeldBy: held}
 	}
 	return err
@@ -234,7 +263,7 @@ func acquireRepository(tx *sql.Tx, repo, runID, at string) error {
 
 // ClaimWeftAnswer atomically consumes a pending question, claims the next
 // segment and reacquires the repository reservation.
-func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot, repositoryKey string) (*WeftRun, error) {
+func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot string) (*WeftRun, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
@@ -273,7 +302,7 @@ func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot, repositoryK
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, ErrWeftQuestionPending
 	}
-	if err := acquireRepository(tx, firstNonempty(repositoryKey, run.Repo), runID, stamp); err != nil {
+	if err := acquireRepository(tx, run.RepositoryID, run.Repo, runID, stamp); err != nil {
 		return nil, err
 	}
 	ledgerID, err := insertWeftSegmentTx(tx, runID, segment, "answer", answerID, runDirRoot, s.now())
@@ -284,11 +313,19 @@ func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot, repositoryK
 		VALUES(?,?,?,?,?,?)`, answerID, questionID, runID, text, stamp, segment); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=NULL,stopped=0,summary=NULL,updated_at=?,ended_at=NULL WHERE id=?`,
-		WeftPhaseQueued, stamp, runID); err != nil {
+	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=NULL,stopped=0,summary=NULL,updated_at=?,ended_at=NULL,
+		revision=revision+1 WHERE id=?`, WeftPhaseQueued, stamp, runID); err != nil {
 		return nil, err
 	}
-	if err := appendAnswerEventTx(tx, runID, questionID, answerID, segment, stamp); err != nil {
+	question, err := getQuestionTx(tx, questionID)
+	if err != nil {
+		return nil, err
+	}
+	// v2's answer event names the entry an answer was queued as; a v1 answer
+	// has none, so its recording is the question event alone.
+	question.Answer = &WeftAnswer{ID: answerID, QuestionID: questionID, RunID: runID, Text: text,
+		SubmittedAt: stamp, Segment: segment}
+	if err := appendQuestionEventTx(tx, question, stamp); err != nil {
 		return nil, err
 	}
 	if err := appendRunEventTx(tx, runID, stamp); err != nil {
@@ -352,7 +389,7 @@ func insertWeftLedgerRunTx(tx *sql.Tx, ledgerID, runDir, claimedAt string, now t
 }
 
 // ClaimWeftResume claims another segment for a stopped or host-failed run.
-func (s *Store) ClaimWeftResume(runID, runDirRoot, repositoryKey string) (*WeftRun, error) {
+func (s *Store) ClaimWeftResume(runID, runDirRoot string) (*WeftRun, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
@@ -391,7 +428,7 @@ func (s *Store) ClaimWeftResume(runID, runDirRoot, repositoryKey string) (*WeftR
 		return nil, ErrWeftSegmentLimit
 	}
 	stamp := weftTimestamp(s.now())
-	if err := acquireRepository(tx, firstNonempty(repositoryKey, run.Repo), runID, stamp); err != nil {
+	if err := acquireRepository(tx, run.RepositoryID, run.Repo, runID, stamp); err != nil {
 		return nil, err
 	}
 	var lastAnswer, lastWorker sql.NullString
@@ -406,8 +443,8 @@ func (s *Store) ClaimWeftResume(runID, runDirRoot, repositoryKey string) (*WeftR
 	if _, err := insertWeftSegmentTx(tx, runID, segment, "resume", answerID, runDirRoot, s.now()); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=NULL,stopped=0,updated_at=?,ended_at=NULL WHERE id=?`,
-		WeftPhaseQueued, stamp, runID); err != nil {
+	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=NULL,stopped=0,updated_at=?,ended_at=NULL,
+		revision=revision+1 WHERE id=?`, WeftPhaseQueued, stamp, runID); err != nil {
 		return nil, err
 	}
 	if err := appendRunEventTx(tx, runID, stamp); err != nil {
@@ -444,7 +481,9 @@ func (s *Store) MarkWeftRunning(runID string, segment, pid int) error {
 	})
 }
 
-// RecordWeftHello accepts the first worker event and moves the API run to running.
+// RecordWeftHello accepts the first worker event and moves the API run to
+// running. The supervisor has already checked that hello acknowledges the
+// segment's answer, so the answer is consumed by this segment.
 func (s *Store) RecordWeftHello(runID string, segment int, workerRunID, base, criteria string) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		stamp := weftTimestamp(s.now())
@@ -452,7 +491,11 @@ func (s *Store) RecordWeftHello(runID string, segment int, workerRunID, base, cr
 			workerRunID, runID, segment); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE weft_runs SET base=?,criteria=?,phase=?,updated_at=? WHERE id=?`,
+		if _, err := tx.Exec(`UPDATE weft_answers SET consumed_segment=? WHERE consumed_segment IS NULL
+			AND id=(SELECT answer_id FROM weft_segments WHERE run_id=? AND segment=?)`, segment, runID, segment); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE weft_runs SET base=?,criteria=?,phase=?,updated_at=?,revision=revision+1 WHERE id=?`,
 			base, criteria, WeftPhaseRunning, stamp, runID); err != nil {
 			return err
 		}
@@ -492,7 +535,7 @@ func (s *Store) RecordWeftParked(runID string, segment int, stage string, occurr
 		if _, err := tx.Exec(`UPDATE weft_segments SET terminal='parked' WHERE run_id=? AND segment=?`, runID, segment); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,head=?,summary=?,updated_at=? WHERE id=?`,
+		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,head=?,summary=?,updated_at=?,revision=revision+1 WHERE id=?`,
 			WeftPhaseParked, head, string(summary), stamp, runID); err != nil {
 			return err
 		}
@@ -522,13 +565,13 @@ func (s *Store) RecordWeftEnded(runID string, segment int, outcome string, stopp
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=?,halt_stage=?,halt_reason=?,halt_detail=?,
-			head=?,stopped=?,summary=?,updated_at=?,ended_at=? WHERE id=?`,
+			head=?,stopped=?,summary=?,updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`,
 			WeftPhaseEnded, outcome, nullString(haltStage), nullString(haltReason),
 			nullString(firstNonempty(haltDetail, detail)), nullString(head), stopped,
 			string(summary), stamp, stamp, runID); err != nil {
 			return err
 		}
-		return appendEndedEventTx(tx, runID, stamp)
+		return appendRunEventTx(tx, runID, stamp)
 	})
 }
 
@@ -552,7 +595,7 @@ func (s *Store) CompleteWeftSegment(runID string, segment int) error {
 		if err := completeSegmentTx(tx, ledgerID, weftTimestamp(s.now())); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`DELETE FROM weft_repository_locks WHERE held_by_run=?`, runID)
+		_, err = tx.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID)
 		return err
 	})
 	if err == nil && s.OnTerminal != nil {
@@ -631,11 +674,12 @@ func (s *Store) FailWeftSegment(runID string, segment int, class, detail string)
 			outcome = "stopped"
 			summary = `{"state":"unavailable","reason":"stopped by the operator"}`
 		}
-		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=?,halt_detail=?,summary=COALESCE(?,summary),updated_at=?,ended_at=? WHERE id=?`,
+		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome=?,halt_detail=?,summary=COALESCE(?,summary),updated_at=?,ended_at=?,
+			revision=revision+1 WHERE id=?`,
 			WeftPhaseEnded, outcome, detail, summary, stamp, stamp, runID); err != nil {
 			return err
 		}
-		return appendEndedEventTx(tx, runID, stamp)
+		return appendRunEventTx(tx, runID, stamp)
 	})
 	if err == nil && s.OnTerminal != nil {
 		s.OnTerminal(event)
@@ -657,7 +701,7 @@ func (s *Store) MarkWeftStopped(runID string) error {
 		}
 		stamp := weftTimestamp(s.now())
 		if _, err := tx.Exec(`UPDATE weft_runs SET stopped=1,phase=?,outcome='stopped',
-			summary=?,updated_at=?,ended_at=? WHERE id=?`, WeftPhaseEnded,
+			summary=?,updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`, WeftPhaseEnded,
 			`{"state":"unavailable","reason":"stopped by the operator"}`, stamp, stamp, runID); err != nil {
 			return err
 		}
@@ -684,7 +728,7 @@ func (s *Store) CancelQueuedWeftSegment(runID string, segment int) error {
 		if err := recordSuccess(tx, agent, stamp); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`DELETE FROM weft_repository_locks WHERE held_by_run=?`, runID)
+		_, err = tx.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID)
 		return err
 	})
 }
@@ -713,11 +757,11 @@ func (s *Store) StopWeftParked(runID string) (*WeftRun, error) {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome='stopped',stopped=1,
-			summary=?,updated_at=?,ended_at=? WHERE id=?`, WeftPhaseEnded,
+			summary=?,updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`, WeftPhaseEnded,
 			`{"state":"unavailable","reason":"stopped by the operator"}`, stamp, stamp, runID); err != nil {
 			return err
 		}
-		return appendEndedEventTx(tx, runID, stamp)
+		return appendRunEventTx(tx, runID, stamp)
 	})
 	if err != nil {
 		return nil, err
@@ -727,7 +771,7 @@ func (s *Store) StopWeftParked(runID string) (*WeftRun, error) {
 
 // ReleaseWeftRepository releases only the reservation held by this run.
 func (s *Store) ReleaseWeftRepository(runID string) error {
-	_, err := s.db.Exec(`DELETE FROM weft_repository_locks WHERE held_by_run=?`, runID)
+	_, err := s.db.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID)
 	return err
 }
 
@@ -754,14 +798,14 @@ func (s *Store) ReconcileWeftUnknown(ledgerRunID string) error {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome='failed',halt_detail=?,
-			updated_at=?,ended_at=? WHERE id=?`, WeftPhaseEnded,
+			updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`, WeftPhaseEnded,
 			"daemon restarted before the segment settled", stamp, stamp, runID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM weft_repository_locks WHERE held_by_run=?`, runID); err != nil {
+		if _, err := tx.Exec(`DELETE FROM weft_reservations WHERE holder_kind='run' AND holder_id=?`, runID); err != nil {
 			return err
 		}
-		return appendEndedEventTx(tx, runID, stamp)
+		return appendRunEventTx(tx, runID, stamp)
 	})
 }
 
@@ -780,64 +824,22 @@ func (s *Store) GetWeftRun(id string) (*WeftRun, error) {
 }
 
 func (s *Store) WeftRuns(ticket, state string) ([]*WeftRun, error) {
-	query := `SELECT id,ticket,project,repo,branch,worktree,base,criteria,phase,outcome,
-		halt_stage,halt_reason,halt_detail,head,stopped,summary,created_at,updated_at,ended_at FROM weft_runs`
-	var where []string
-	var args []any
-	if ticket != "" {
-		where = append(where, "ticket=?")
-		args = append(args, ticket)
-	}
-	if state != "" {
-		switch state {
-		case "active":
-			where = append(where, "phase IN ('queued','running')")
-		case "blocked":
-			where = append(where, "phase='parked'")
-		case "over":
-			where = append(where, "phase='ended'")
-		}
-	}
-	if len(where) > 0 {
-		query += " WHERE " + strings.Join(where, " AND ")
-	}
-	query += " ORDER BY created_at DESC,id DESC"
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*WeftRun
-	for rows.Next() {
-		run, err := scanWeftRun(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, run)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for _, run := range out {
-		if err := s.loadWeftChildren(run); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
+	return s.QueryWeftRuns(WeftRunQuery{Ticket: ticket, State: state})
 }
 
+// weftRunColumns is every weft_runs column scanWeftRun reads, in its order.
+const weftRunColumns = `id,ticket,project,repo,branch,worktree,base,criteria,phase,outcome,
+	halt_stage,halt_reason,halt_detail,head,stopped,summary,created_at,updated_at,ended_at,
+	repository_id,entry_id,origin,recorded_under,archive_id,settlement_state,settlement_step,
+	settlement_reason,settlement_detail,settlement_branch,settlement_commit,action_required,
+	action_detail,disposition,archive_ref,supersedes,superseded_by,revision`
+
 func getWeftRunTx(tx *sql.Tx, id string) (*WeftRun, error) {
-	return scanWeftRun(tx.QueryRow(`SELECT id,ticket,project,repo,branch,worktree,base,criteria,phase,outcome,
-		halt_stage,halt_reason,halt_detail,head,stopped,summary,created_at,updated_at,ended_at FROM weft_runs WHERE id=?`, id))
+	return scanWeftRun(tx.QueryRow(`SELECT `+weftRunColumns+` FROM weft_runs WHERE id=?`, id))
 }
 
 func getWeftRunDB(db *sql.DB, id string) (*WeftRun, error) {
-	return scanWeftRun(db.QueryRow(`SELECT id,ticket,project,repo,branch,worktree,base,criteria,phase,outcome,
-		halt_stage,halt_reason,halt_detail,head,stopped,summary,created_at,updated_at,ended_at FROM weft_runs WHERE id=?`, id))
+	return scanWeftRun(db.QueryRow(`SELECT `+weftRunColumns+` FROM weft_runs WHERE id=?`, id))
 }
 
 func scanWeftRun(sc scanner) (*WeftRun, error) {
@@ -845,7 +847,11 @@ func scanWeftRun(sc scanner) (*WeftRun, error) {
 	var summary sql.NullString
 	err := sc.Scan(&run.ID, &run.Ticket, &run.Project, &run.Repo, &run.Branch, &run.Worktree,
 		&run.Base, &run.Criteria, &run.Phase, &run.Outcome, &run.HaltStage, &run.HaltReason,
-		&run.HaltDetail, &run.Head, &run.Stopped, &summary, &run.CreatedAt, &run.UpdatedAt, &run.EndedAt)
+		&run.HaltDetail, &run.Head, &run.Stopped, &summary, &run.CreatedAt, &run.UpdatedAt, &run.EndedAt,
+		&run.RepositoryID, &run.EntryID, &run.Origin, &run.RecordedUnder, &run.ArchiveID,
+		&run.SettlementState, &run.SettlementStep, &run.SettlementReason, &run.SettlementDetail,
+		&run.SettlementBranch, &run.SettlementCommit, &run.ActionRequired, &run.ActionDetail,
+		&run.Disposition, &run.ArchiveRef, &run.Supersedes, &run.SupersededBy, &run.Revision)
 	if summary.Valid {
 		run.Summary = json.RawMessage(summary.String)
 	}
@@ -963,8 +969,9 @@ func scanQuestion(sc scanner) (*WeftQuestion, error) {
 
 func (s *Store) weftAnswer(id string) (*WeftAnswer, error) {
 	var a WeftAnswer
-	err := s.db.QueryRow(`SELECT id,question_id,run_id,text,submitted_at,segment FROM weft_answers WHERE id=?`, id).
-		Scan(&a.ID, &a.QuestionID, &a.RunID, &a.Text, &a.SubmittedAt, &a.Segment)
+	err := s.db.QueryRow(`SELECT id,question_id,run_id,text,submitted_at,segment,entry_id,consumed_segment
+		FROM weft_answers WHERE id=?`, id).
+		Scan(&a.ID, &a.QuestionID, &a.RunID, &a.Text, &a.SubmittedAt, &a.Segment, &a.EntryID, &a.ConsumedSegment)
 	return &a, err
 }
 
@@ -972,9 +979,12 @@ func (s *Store) WeftAnswer(id string) (*WeftAnswer, error) {
 	return s.weftAnswer(id)
 }
 
+// WeftAsOf is the last seq the state stream allocated. It is read from the
+// autoincrement counter rather than the retained rows, so it never moves
+// backwards when retention prunes the newest events.
 func (s *Store) WeftAsOf() (int64, error) {
 	var seq int64
-	err := s.db.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM weft_events`).Scan(&seq)
+	err := s.db.QueryRow(`SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='weft_events'),0)`).Scan(&seq)
 	return seq, err
 }
 
@@ -1037,44 +1047,25 @@ func BodySHA(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// appendRunEventTx writes the v2 run projection (weft-service/v2 §10): every
+// run transition, its end included, is one run event.
 func appendRunEventTx(tx *sql.Tx, runID, stamp string) error {
 	run, err := getWeftRunTx(tx, runID)
 	if err != nil {
 		return err
 	}
 	var segment int
-	var terminal, failure sql.NullString
-	if err := tx.QueryRow(`SELECT segment,terminal,failure FROM weft_segments WHERE run_id=? ORDER BY segment DESC LIMIT 1`, runID).
-		Scan(&segment, &terminal, &failure); err != nil {
+	if err := tx.QueryRow(`SELECT segment FROM weft_segments WHERE run_id=? ORDER BY segment DESC LIMIT 1`, runID).
+		Scan(&segment); err != nil {
 		return err
 	}
 	return appendWeftEventTx(tx, runID, "run", stamp, func(seq int64) any {
 		return runEventPayload{
 			eventBase: newEventBase(seq, stamp, runID),
-			State:     stateOf(run.Phase), Phase: run.Phase, Outcome: nullable(run.Outcome),
+			State:     stateOf(run.Phase), Phase: WeftV2Phase(run.Phase), Outcome: nullable(run.Outcome),
 			Failed: failedOf(run), Stopped: run.Stopped, Segment: segment,
-			Terminal: nullable(terminal), Failure: nullable(failure),
-		}
-	})
-}
-
-func appendEndedEventTx(tx *sql.Tx, runID, stamp string) error {
-	run, err := getWeftRunTx(tx, runID)
-	if err != nil {
-		return err
-	}
-	var segment int
-	var terminal, failure sql.NullString
-	if err := tx.QueryRow(`SELECT segment,terminal,failure FROM weft_segments WHERE run_id=? ORDER BY segment DESC LIMIT 1`, runID).
-		Scan(&segment, &terminal, &failure); err != nil {
-		return err
-	}
-	return appendWeftEventTx(tx, runID, "ended", stamp, func(seq int64) any {
-		return endedEventPayload{
-			eventBase: newEventBase(seq, stamp, runID),
-			State:     "over", Phase: run.Phase, Outcome: nullable(run.Outcome),
-			Failed: failedOf(run), Stopped: run.Stopped, Segment: segment,
-			Terminal: nullable(terminal), Failure: nullable(failure), Head: nullable(run.Head),
+			ActionRequired: nullable(run.ActionRequired), Landing: run.SettlementState,
+			Disposition: run.Disposition, Revision: run.Revision,
 		}
 	})
 }
@@ -1096,6 +1087,13 @@ func appendStageEventTx(tx *sql.Tx, stage WeftStage) error {
 }
 
 func appendQuestionEventTx(tx *sql.Tx, question *WeftQuestion, stamp string) error {
+	var answer any
+	if a := question.Answer; a != nil {
+		answer = questionAnswerData{
+			AnswerID: a.ID, Text: a.Text, SubmittedAt: a.SubmittedAt,
+			EntryID: nullable(a.EntryID), ConsumedSegment: nullableInt(a.ConsumedSegment),
+		}
+	}
 	return appendWeftEventTx(tx, question.RunID, "question", stamp, func(seq int64) any {
 		return questionEventPayload{
 			eventBase: newEventBase(seq, stamp, question.RunID),
@@ -1103,17 +1101,8 @@ func appendQuestionEventTx(tx *sql.Tx, question *WeftQuestion, stamp string) err
 				QuestionID: question.ID, RunID: question.RunID, Ticket: question.Ticket,
 				Segment: question.Segment, Stage: question.Stage, Occurrence: question.Occurrence,
 				Attempt: question.Attempt, Text: question.Text, AskedAt: question.AskedAt,
-				State: question.State, Answer: nil,
+				State: question.State, Answer: answer,
 			},
-		}
-	})
-}
-
-func appendAnswerEventTx(tx *sql.Tx, runID, questionID, answerID string, segment int, stamp string) error {
-	return appendWeftEventTx(tx, runID, "answer", stamp, func(seq int64) any {
-		return answerEventPayload{
-			eventBase:  newEventBase(seq, stamp, runID),
-			QuestionID: questionID, AnswerID: answerID, Segment: segment,
 		}
 	})
 }
@@ -1143,32 +1132,21 @@ type eventBase struct {
 }
 
 func newEventBase(seq int64, stamp, runID string) eventBase {
-	return eventBase{ContractVersion: "weft-remote/v1", Seq: seq, TS: stamp, RunID: runID}
+	return eventBase{ContractVersion: WeftServiceVersion, Seq: seq, TS: stamp, RunID: runID}
 }
 
 type runEventPayload struct {
 	eventBase
-	State    string `json:"state"`
-	Phase    string `json:"phase"`
-	Outcome  any    `json:"outcome"`
-	Failed   bool   `json:"failed"`
-	Stopped  bool   `json:"stopped"`
-	Segment  int    `json:"segment"`
-	Terminal any    `json:"terminal"`
-	Failure  any    `json:"failure"`
-}
-
-type endedEventPayload struct {
-	eventBase
-	State    string `json:"state"`
-	Phase    string `json:"phase"`
-	Outcome  any    `json:"outcome"`
-	Failed   bool   `json:"failed"`
-	Stopped  bool   `json:"stopped"`
-	Segment  int    `json:"segment"`
-	Terminal any    `json:"terminal"`
-	Failure  any    `json:"failure"`
-	Head     any    `json:"head"`
+	State          string `json:"state"`
+	Phase          string `json:"phase"`
+	Outcome        any    `json:"outcome"`
+	Failed         bool   `json:"failed"`
+	Stopped        bool   `json:"stopped"`
+	Segment        int    `json:"segment"`
+	ActionRequired any    `json:"action_required"`
+	Landing        string `json:"landing"`
+	Disposition    string `json:"disposition"`
+	Revision       int64  `json:"revision"`
 }
 
 type stageEventPayload struct {
@@ -1212,11 +1190,12 @@ type questionEventData struct {
 	Answer     any    `json:"answer"`
 }
 
-type answerEventPayload struct {
-	eventBase
-	QuestionID string `json:"question_id"`
-	AnswerID   string `json:"answer_id"`
-	Segment    int    `json:"segment"`
+type questionAnswerData struct {
+	AnswerID        string `json:"answer_id"`
+	Text            string `json:"text"`
+	SubmittedAt     string `json:"submitted_at"`
+	EntryID         any    `json:"entry_id"`
+	ConsumedSegment any    `json:"consumed_segment"`
 }
 
 func aggregateWeftSegmentTx(tx *sql.Tx, runID string, segment int) error {
@@ -1285,6 +1264,15 @@ func aggregateWeftSegmentTx(tx *sql.Tx, runID string, segment int) error {
 	_, err = tx.Exec(`UPDATE runs SET num_turns=?,cost_usd=?,input_tokens=?,output_tokens=? WHERE id=?`,
 		turnsValue, costValue, inputValue, outputValue, ledgerID)
 	return err
+}
+
+// WeftV2Phase is weft-service/v2's name for a run phase: a v1 run claimed but
+// not yet started is starting.
+func WeftV2Phase(phase string) string {
+	if phase == WeftPhaseQueued {
+		return "starting"
+	}
+	return phase
 }
 
 func stateOf(phase string) string {

@@ -5,46 +5,156 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-func TestOpenMigratesSchemaOneToWeftSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "runs.db")
-	s, err := Open(path)
+// schemaTwo writes a weft-remote/v1 ledger as a schema-2 binary left it: a
+// run that parked, was answered and finished; a run still holding its
+// repository lock; three v1 events; and a v1 idempotency record.
+func schemaTwo(t *testing.T, path string, extraLocks string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	run := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
-	for _, table := range []string{
-		"weft_repository_locks", "weft_requests", "weft_events", "weft_answers",
-		"weft_questions", "weft_stages", "weft_segments", "weft_runs",
-	} {
-		if _, err := s.db.Exec("DROP TABLE " + table); err != nil {
-			t.Fatalf("drop %s: %v", table, err)
+	defer db.Close()
+	stmts := []string{
+		`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+		schemaSQL,
+		`INSERT INTO schema_meta(key,value) VALUES('schema_version','2')`,
+		`INSERT INTO runs(id,agent,trigger_kind,scheduled_for,claimed_at,status,run_dir) VALUES
+			('weft-worker-20260913-142233-aaaa','weft-worker','weft','2026-09-13T14:22:33Z','2026-09-13T14:22:33Z','completed','/runs/a1'),
+			('weft-worker-20260913-150000-bbbb','weft-worker','weft','2026-09-13T15:00:00Z','2026-09-13T15:00:00Z','completed','/runs/a2'),
+			('weft-worker-20260914-090000-cccc','weft-worker','weft','2026-09-14T09:00:00Z','2026-09-14T09:00:00Z','running','/runs/b1')`,
+		`INSERT INTO weft_runs(id,ticket,project,repo,branch,worktree,base,phase,outcome,stopped,created_at,updated_at,ended_at) VALUES
+			('r-20260913T142233Z-6b2f0c1a','weft/example-ticket-0a1b','weft','/Users/steve/code/weft','weft/example-ticket-0a1b','/w/a','base','ended','finished',0,'2026-09-13T14:22:33.412Z','2026-09-13T16:49:03.556Z','2026-09-13T16:49:03.556Z'),
+			('r-20260914T090000Z-0c1d2e3f','loom/example-cache-5e6f','loom','/Users/steve/code/loom','loom/example-cache-5e6f','/w/b','base','running',NULL,0,'2026-09-14T09:00:00.000Z','2026-09-14T09:00:00.000Z',NULL)`,
+		`INSERT INTO weft_segments(run_id,segment,kind,ledger_run_id,worker_run_id,answer_id,terminal) VALUES
+			('r-20260913T142233Z-6b2f0c1a',1,'launch','weft-worker-20260913-142233-aaaa','20260913T142235Z-11111111',NULL,'parked'),
+			('r-20260913T142233Z-6b2f0c1a',2,'answer','weft-worker-20260913-150000-bbbb','20260913T150002Z-22222222','a-20260913T150000Z-33333333','ended'),
+			('r-20260914T090000Z-0c1d2e3f',1,'launch','weft-worker-20260914-090000-cccc',NULL,NULL,NULL)`,
+		`INSERT INTO weft_questions(id,run_id,segment,stage,occurrence,attempt,text,asked_at,state,answer_id) VALUES
+			('q-20260913T145900Z-44444444','r-20260913T142233Z-6b2f0c1a',1,'work',1,1,'Which shape?','2026-09-13T14:59:00.000Z','answered','a-20260913T150000Z-33333333')`,
+		`INSERT INTO weft_answers(id,question_id,run_id,text,submitted_at,segment) VALUES
+			('a-20260913T150000Z-33333333','q-20260913T145900Z-44444444','r-20260913T142233Z-6b2f0c1a','The existing one.','2026-09-13T15:00:00.000Z',2)`,
+		`INSERT INTO weft_events(ts,run_id,type,payload) VALUES
+			('2026-09-13T14:22:33.412Z','r-20260913T142233Z-6b2f0c1a','run','{"contract_version":"weft-remote/v1"}'),
+			('2026-09-13T16:49:03.556Z','r-20260913T142233Z-6b2f0c1a','ended','{"contract_version":"weft-remote/v1"}'),
+			('2026-09-14T09:00:00.000Z','r-20260914T090000Z-0c1d2e3f','run','{"contract_version":"weft-remote/v1"}')`,
+		`INSERT INTO weft_requests(token_id,key,method,path,body_sha256,status,response,created_at) VALUES
+			('token','launch-1','POST','/v1/runs','body',201,'{"run":{}}','2026-09-14T09:00:00.000Z')`,
+		`INSERT INTO weft_repository_locks(repository,held_by_run,acquired_at) VALUES
+			('darwin:16777232:4242','r-20260914T090000Z-0c1d2e3f','2026-09-14T09:00:00.000Z')` + extraLocks,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
 		}
 	}
-	if _, err := s.db.Exec(`UPDATE schema_meta SET value='1' WHERE key='schema_version'`); err != nil {
+}
+
+func TestOpenMigratesSchemaTwoToWeftServiceV2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.db")
+	schemaTwo(t, path, "")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	hostID, err := s.WeftHostID()
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`^h-[a-z0-9-]{1,40}-[0-9a-f]{8}$`).MatchString(hostID) {
+		t.Fatalf("host_id = %q", hostID)
+	}
+	finished, err := s.GetWeftRun("r-20260913T142233Z-6b2f0c1a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.RecordedUnder != "weft-remote/v1" || finished.Origin != "hosted" ||
+		finished.Disposition != "retained" || finished.SettlementState != "not_applicable" ||
+		finished.SettlementDetail.String != "recorded under weft-remote/v1, which never lands" ||
+		finished.RepositoryID != "weft-47327fe5" || finished.Revision != 1 || len(finished.Segments) != 2 {
+		t.Fatalf("migrated v1 run = %+v", finished)
+	}
+	question, err := s.WeftQuestion("q-20260913T145900Z-44444444")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if question.Answer == nil || question.Answer.ConsumedSegment.Int64 != 2 || question.Answer.EntryID.Valid {
+		t.Fatalf("migrated answer = %+v", question.Answer)
+	}
+	if req, err := s.GetWeftRequest("token", "launch-1"); err != nil || req.Path != "/v1/runs" || req.Status != 201 {
+		t.Fatalf("v1 idempotency record = %+v, %v", req, err)
+	}
+	var lockTable int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='weft_repository_locks'`).Scan(&lockTable); err != nil || lockTable != 0 {
+		t.Fatalf("weft_repository_locks survived the migration: %d, %v", lockTable, err)
+	}
+	var repositoryID, repository, kind, holder string
+	if err := s.db.QueryRow(`SELECT repository_id,repository,holder_kind,holder_id FROM weft_reservations`).
+		Scan(&repositoryID, &repository, &kind, &holder); err != nil {
+		t.Fatal(err)
+	}
+	if repositoryID != "loom-caa7eb66" || repository != "/Users/steve/code/loom" || kind != "run" ||
+		holder != "r-20260914T090000Z-0c1d2e3f" {
+		t.Fatalf("moved reservation = %s %s %s %s", repositoryID, repository, kind, holder)
+	}
+	root := filepath.Join(t.TempDir(), "runs")
+	_, err = s.ClaimWeft(WeftLaunch{Ticket: "loom/next", Project: "loom", Repo: "/Users/steve/code/loom",
+		Branch: "loom/next", Worktree: "/w/next", RunDirRoot: root})
+	var busy *RepositoryBusyError
+	if !errors.As(err, &busy) || busy.HeldBy != "r-20260914T090000Z-0c1d2e3f" {
+		t.Fatalf("claim over the moved reservation = %v", err)
+	}
+	if floor, err := s.WeftV1EventFloor(); err != nil || floor != 3 {
+		t.Fatalf("v1 event floor = %d, %v", floor, err)
+	}
+	floor, oldest, newest, err := s.WeftStreamBounds()
+	if err != nil || floor != 3 || oldest != 4 || newest != 3 {
+		t.Fatalf("stream bounds = floor %d, %d..%d, %v; want no v2 event retained after seq 3", floor, oldest, newest, err)
 	}
 	s.Close()
 
 	s, err = Open(path)
 	if err != nil {
-		t.Fatalf("migrate: %v", err)
+		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := s.Get(run.ID); err != nil {
-		t.Fatalf("phase-1 row was not preserved: %v", err)
+	again, err := s.WeftHostID()
+	if err != nil || again != hostID {
+		t.Fatalf("host_id after reopen = %q, %v; minted %q", again, err, hostID)
 	}
-	for _, table := range []string{
-		"weft_runs", "weft_segments", "weft_stages", "weft_questions",
-		"weft_answers", "weft_events", "weft_requests", "weft_repository_locks",
-	} {
-		var name string
-		if err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
-			t.Errorf("%s was not migrated: %v", table, err)
-		}
+}
+
+func TestSchemaTwoMigrationIsAllOrNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.db")
+	// A second lock on the same checkout under another identity key: the
+	// migration refuses to pick a holder.
+	schemaTwo(t, path, `,('/Users/steve/code/loom','r-20260913T142233Z-6b2f0c1a','2026-09-14T09:00:01.000Z')`)
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE weft_runs SET repo='/Users/steve/code/loom' WHERE id='r-20260913T142233Z-6b2f0c1a'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "repository lock") {
+		t.Fatalf("migration over two locks on one repository = %v", err)
+	}
+	var version string
+	var locks int
+	if err := db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM weft_repository_locks`).Scan(&locks); err != nil {
+		t.Fatalf("schema-2 tables did not survive the failed migration: %v", err)
+	}
+	if version != "2" || locks != 2 {
+		t.Fatalf("after a failed migration: version %s, %d locks", version, locks)
 	}
 }
 
@@ -102,7 +212,7 @@ func TestWeftRunParksAnswersAndResumesDurably(t *testing.T) {
 	if row.NumTurns.Int64 != 2 || row.InputTokens.Int64 != 3 || row.OutputTokens.Int64 != 4 || row.CostUSD.Valid {
 		t.Fatalf("segment totals = turns %v tokens %v/%v cost %v", row.NumTurns, row.InputTokens, row.OutputTokens, row.CostUSD)
 	}
-	answer, err := s.ClaimWeftAnswer(run.ID, qid, "Use the existing shape.", root, "")
+	answer, err := s.ClaimWeftAnswer(run.ID, qid, "Use the existing shape.", root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,13 +230,17 @@ func TestWeftRunParksAnswersAndResumesDurably(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) < 6 {
-		t.Fatalf("events = %d, want launch, hello, stage, question, park and answer", len(events))
+	if len(events) != 7 {
+		t.Fatalf("events = %d, want launch, hello, stage, question, park, the answered question and the requeue", len(events))
 	}
 	for _, event := range events {
-		if !strings.HasPrefix(string(event.Payload), `{"contract_version":"weft-remote/v1","seq":`) {
+		if !strings.HasPrefix(string(event.Payload), `{"contract_version":"weft-service/v2","seq":`) {
 			t.Fatalf("event payload order = %s", event.Payload)
 		}
+	}
+	if answered := events[5]; answered.Type != "question" || !strings.Contains(string(answered.Payload), `"state":"answered"`) ||
+		!strings.Contains(string(answered.Payload), `"entry_id":null`) {
+		t.Fatalf("answer recorded as %s %s", answered.Type, answered.Payload)
 	}
 }
 

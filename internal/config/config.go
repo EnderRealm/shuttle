@@ -78,7 +78,8 @@ type Output struct {
 	LinkHosts []string `json:"link_hosts"`
 }
 
-// Weft configures the private weft-remote/v1 service hosted by the daemon.
+// Weft configures the private weft service hosted by the daemon:
+// weft-service/v2, with weft-remote/v1's read routes kept (weft-service/v2 §14.2).
 // An empty Listen disables the service, which keeps phase-1 installations
 // unchanged until the block is configured.
 type Weft struct {

@@ -153,24 +153,40 @@ func migrate(db *sql.DB) error {
 		current = n
 	}
 	// Must precede both the schema apply and the marker write: on an unknown
-	// old or too-new database neither may run. Version 1 is the one supported
-	// migration; schemaSQL's IF NOT EXISTS statements add the V2 tables
-	// without rewriting the phase-1 ledger.
+	// old or too-new database neither may run. Version 2 is the one supported
+	// migration source, and a fresh database takes the same path so the two
+	// cannot drift: schemaSQL lays down (or finds) the schema-2 tables and
+	// migrateWeftV2 carries them forward.
 	if err := checkVersion(current); err != nil {
 		return err
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
+	if current == schemaVersion {
+		return nil
+	}
+	// Forward-only and transactional (weft-service/v2 §14.1): a failure
+	// anywhere leaves the schema-2 ledger as it was, marker included.
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
-	_, err := db.Exec(
+	if err := migrateWeftV2(tx, time.Now()); err != nil {
+		return fmt.Errorf("migrate to weft-service/v2: %w", err)
+	}
+	if _, err := tx.Exec(
 		`INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)`,
 		"schema_version", strconv.Itoa(schemaVersion),
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // checkVersion is the two-way guard. A current of 0 is a fresh database and
-// version 1 is the supported migration source.
+// version 2 is the supported migration source.
 func checkVersion(current int) error {
 	if current != 0 && current < schemaVersion-1 {
 		return fmt.Errorf("%w: on disk %d, this binary writes %d", ErrSchemaOutdated, current, schemaVersion)

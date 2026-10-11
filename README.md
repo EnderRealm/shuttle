@@ -13,11 +13,17 @@ classification, output-validation, and application path; every attempt retains
 its inputs, prompt, transcript, result, and applied-output record.
 
 When `config.json` contains a `weft` block, the installed daemon also hosts the
-private `weft-remote/v1` HTTP service. It reads the existing tk store, retains
-runs, stages, questions and answers in `runs.db`, supervises `weft-worker`
-segments after clients disconnect, and exposes their event stream on the
-configured loopback or Tailscale address. Replayed mutating requests are served
-from the idempotency ledger rather than launching a second worker.
+private weft service on the configured loopback or Tailscale address. It speaks
+`weft-service/v2` (weft's `docs/service-v2-contract.md`) as a developmental
+host: discovery, the full catalog of every registered project and ticket with
+eligibility, the dashboard, run history, questions and the state stream, with
+not-served capabilities answering 501. The catalog reads tk through
+`pkg/ticket`, refuses a partial tk read rather than serving it, and rereads the
+store every five seconds so edits made outside Shuttle reach clients as catalog
+events. `weft-remote/v1` routes keep serving reads; every v1 mutation answers
+503 `host_paused`, though a recorded v1 idempotency key still replays.
+Opening an existing `runs.db` migrates it in place (§14.1 of that contract):
+back it up first, as `runs.db.v1-<stamp>`.
 
 Email delivery is still planned; a valid report remains pending for the sender
 ticket, while `--no-deliver` records an intentional skip without losing the

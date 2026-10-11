@@ -6,10 +6,13 @@ package ledger
 //
 // schemaVersion 1: the §6 tables — runs, agents and incidents.
 // schemaVersion 2: the weft-remote/v1 durable host records.
-const schemaVersion = 2
+// schemaVersion 3: weft-service/v2's host records (weft-service/v2 §6.9, §14.1).
+const schemaVersion = 3
 
-// schemaSQL is the §6 DDL. IF NOT EXISTS throughout because Open applies it on
-// every open, guarded by the version check rather than by a migration table.
+// schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
+// throughout because migrate applies it to a fresh database and to a schema-2
+// one alike, ahead of weftV2SQL; a schema-3 database never runs it again,
+// since weftV2SQL drops weft_repository_locks.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
@@ -165,4 +168,77 @@ CREATE TABLE IF NOT EXISTS weft_repository_locks (
   held_by_run     TEXT NOT NULL REFERENCES weft_runs(id),
   acquired_at     TEXT NOT NULL
 );
+`
+
+// weftV2SQL is the forward half of the §14.1 migration that is plain DDL: the
+// tables weft-service/v2 §6.9 adds, the columns it adds to the v1 tables, and
+// weft_catalog, the host's record of each project's catalog_revision and the
+// digest of the tickets it was last computed over (§5.2). The data half —
+// moving the repository locks, labelling the v1 runs, minting host_id — is
+// migrateWeftV2, in the same transaction.
+const weftV2SQL = `
+CREATE TABLE weft_host (host_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+CREATE TABLE weft_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE weft_entries (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, ticket TEXT NOT NULL, project TEXT NOT NULL,
+  repository_id TEXT NOT NULL, repository TEXT NOT NULL, selection_id TEXT,
+  position INTEGER NOT NULL UNIQUE, state TEXT NOT NULL,
+  waiting_reason TEXT, holder_kind TEXT, holder_id TEXT,
+  invalidated_reason TEXT, invalidated_detail TEXT,
+  run_id TEXT, supersedes TEXT, answer_id TEXT REFERENCES weft_answers(id),
+  checkout TEXT, tk_store_root TEXT, work_evidence_dir TEXT,
+  token_id TEXT NOT NULL, request_key TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL
+);
+CREATE TABLE weft_reservations (
+  repository_id TEXT PRIMARY KEY, repository TEXT NOT NULL,
+  holder_kind TEXT NOT NULL, holder_id TEXT NOT NULL, acquired_at TEXT NOT NULL
+);
+CREATE TABLE weft_repositories (
+  repository_id TEXT PRIMARY KEY, repository TEXT NOT NULL, dispatch TEXT NOT NULL,
+  paused_run TEXT, paused_reason TEXT, paused_detail TEXT, paused_at TEXT,
+  revision INTEGER NOT NULL
+);
+CREATE TABLE weft_land_steps (
+  run_id TEXT NOT NULL, step TEXT NOT NULL, intent_at TEXT NOT NULL, acked_at TEXT,
+  result TEXT, result_at TEXT, observed TEXT, detail TEXT, PRIMARY KEY (run_id, step)
+);
+CREATE TABLE weft_terminals (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, target_kind TEXT NOT NULL, target_id TEXT NOT NULL,
+  path TEXT NOT NULL, repository_id TEXT, state TEXT NOT NULL, pid INTEGER, pgid INTEGER,
+  exit_code INTEGER, closed_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  revision INTEGER NOT NULL
+);
+CREATE TABLE weft_output (
+  run_id TEXT NOT NULL, cursor INTEGER NOT NULL, segment INTEGER NOT NULL, stage TEXT NOT NULL,
+  occurrence INTEGER NOT NULL, attempt INTEGER NOT NULL, chunk INTEGER NOT NULL,
+  at TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY (run_id, cursor)
+);
+CREATE TABLE weft_archives (
+  id TEXT PRIMARY KEY, sha256 TEXT NOT NULL, origin TEXT NOT NULL, imported_at TEXT NOT NULL
+);
+CREATE TABLE weft_catalog (
+  project TEXT PRIMARY KEY, revision INTEGER NOT NULL, digest TEXT NOT NULL
+);
+
+ALTER TABLE weft_runs ADD COLUMN repository_id TEXT;
+ALTER TABLE weft_runs ADD COLUMN entry_id TEXT;
+ALTER TABLE weft_runs ADD COLUMN origin TEXT;
+ALTER TABLE weft_runs ADD COLUMN recorded_under TEXT;
+ALTER TABLE weft_runs ADD COLUMN archive_id TEXT;
+ALTER TABLE weft_runs ADD COLUMN settlement_state TEXT;
+ALTER TABLE weft_runs ADD COLUMN settlement_step TEXT;
+ALTER TABLE weft_runs ADD COLUMN settlement_reason TEXT;
+ALTER TABLE weft_runs ADD COLUMN settlement_detail TEXT;
+ALTER TABLE weft_runs ADD COLUMN settlement_branch TEXT;
+ALTER TABLE weft_runs ADD COLUMN settlement_commit TEXT;
+ALTER TABLE weft_runs ADD COLUMN action_required TEXT;
+ALTER TABLE weft_runs ADD COLUMN action_detail TEXT;
+ALTER TABLE weft_runs ADD COLUMN disposition TEXT;
+ALTER TABLE weft_runs ADD COLUMN archive_ref TEXT;
+ALTER TABLE weft_runs ADD COLUMN supersedes TEXT;
+ALTER TABLE weft_runs ADD COLUMN superseded_by TEXT;
+ALTER TABLE weft_runs ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE weft_answers ADD COLUMN entry_id TEXT;
+ALTER TABLE weft_answers ADD COLUMN consumed_segment INTEGER;
 `

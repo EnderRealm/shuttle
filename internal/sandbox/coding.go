@@ -50,6 +50,25 @@ func WorktreePath(root, repo, ticket string) (string, error) {
 	return filepath.Join(filepath.Clean(root), "worktrees", repoDir, strings.ReplaceAll(ticket, "/", "-")), nil
 }
 
+// RepositoryID is weft-service/v2 §4.1's repository_id for a canonical path:
+// the worktree-root name, its basename restricted to [A-Za-z0-9-] and cut to
+// 55 bytes so the whole id stays within the 64-byte protocol id limit. It is
+// pure over the path given, so a binding whose checkout is missing still has
+// the id its checkout would have.
+func RepositoryID(canonical string) string {
+	base := []byte(filepath.Base(canonical))
+	for i, c := range base {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
+			base[i] = '-'
+		}
+	}
+	if len(base) > 55 {
+		base = base[:55]
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	return string(base) + "-" + hex.EncodeToString(sum[:4])
+}
+
 // CanonicalRepository collapses symlink aliases to the one path used for the
 // repository reservation and hosted worker argv. Swift's standardized path
 // drops macOS's /private alias, so the host does the same after resolution.
