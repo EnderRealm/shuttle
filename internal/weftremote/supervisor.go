@@ -1,7 +1,6 @@
 package weftremote
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -14,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,10 +32,11 @@ const segmentKillPoll = 50 * time.Millisecond
 var afterWorkerSpawn = func() {}
 
 type activeSegment struct {
-	stdin io.WriteCloser
-	pgid  int
-	done  chan struct{}
-	force chan struct{}
+	stdin    io.WriteCloser
+	contract string
+	pgid     int
+	done     chan struct{}
+	force    chan struct{}
 }
 
 // Supervisor owns every worker process independently of HTTP connections.
@@ -53,6 +54,14 @@ type Supervisor struct {
 	// settled runs once a segment is settled — reaped, failed or cancelled
 	// before spawn — which is when its slot and reservation are free.
 	settled func()
+	// hostID joins every line logged about a segment (weft-service/v2 §4.2).
+	hostID string
+	// worker is the last probe of worker_bin (§2.6); probeMu serializes
+	// probing so one change is probed once.
+	worker  atomic.Pointer[workerInfo]
+	probeMu sync.Mutex
+	// output wakes the output streams when a chunk is retained.
+	output *broadcast
 }
 
 func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger *log.Logger, locks ...*sync.RWMutex) *Supervisor {
@@ -62,7 +71,7 @@ func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger 
 	}
 	return &Supervisor{
 		cfg: cfg, store: store, home: home, log: logger, stateMu: stateMu,
-		active: make(map[string]*activeSegment), stopping: make(map[string]bool),
+		active: make(map[string]*activeSegment), stopping: make(map[string]bool), output: newBroadcast(),
 	}
 }
 
@@ -83,7 +92,7 @@ func (s *Supervisor) Stop(runID string) {
 	if active == nil {
 		return
 	}
-	command := map[string]any{"contract_version": ContractVersion, "command": "stop"}
+	command := map[string]any{"contract_version": active.contract, "command": "stop"}
 	doc, _ := json.Marshal(command)
 	_, _ = active.stdin.Write(append(doc, '\n'))
 	select {
@@ -153,6 +162,13 @@ func (s *Supervisor) run(runID string) error {
 	if err := executable(s.cfg.Weft.WorkerBin); err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
+	// A worker that speaks weft-worker/v2 is launched under it; one that does
+	// not keeps the developmental slice's weft-remote/v1 dispatch (§2.4).
+	worker := s.refreshWorker()
+	contract := ContractVersion
+	if worker.speaks(WorkerContractV2) {
+		contract = WorkerContractV2
+	}
 	oauthToken, err := s.oauthToken()
 	if err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
@@ -170,13 +186,13 @@ func (s *Supervisor) run(runID string) error {
 	if err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassSandbox, err)
 	}
-	answerPath, err := s.writeAnswer(run, segment, runDir)
+	answerPath, err := s.writeAnswer(run, segment, runDir, contract)
 	if err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
-	argv := s.argv(run, segment, profilePath, answerPath)
+	argv := s.argv(run, segment, contract, profilePath, answerPath)
 	env := s.environ(homeDir, runDir, oauthToken)
-	if err := writeRunRecord(runDir, run, segment, argv, env, 0); err != nil {
+	if err := writeRunRecord(runDir, run, segment, contract, argv, env, 0); err != nil {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
 	eventsFile, err := os.OpenFile(filepath.Join(runDir, "events.ndjson"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -232,7 +248,7 @@ func (s *Supervisor) run(runID string) error {
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
 	gateReader.Close()
-	if err := writeRunRecord(runDir, run, segment, argv, env, cmd.Process.Pid); err != nil {
+	if err := writeRunRecord(runDir, run, segment, contract, argv, env, cmd.Process.Pid); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		stdin.Close()
 		stdout.Close()
@@ -250,14 +266,14 @@ func (s *Supervisor) run(runID string) error {
 	defer stdout.Close()
 	defer stderr.Close()
 	active := &activeSegment{
-		stdin: stdin, pgid: cmd.Process.Pid, done: make(chan struct{}), force: make(chan struct{}, 1),
+		stdin: stdin, contract: contract, pgid: cmd.Process.Pid, done: make(chan struct{}), force: make(chan struct{}, 1),
 	}
 	s.mu.Lock()
 	s.active[run.ID] = active
 	stopping := s.stopping[run.ID]
 	s.mu.Unlock()
 	if stopping {
-		command, _ := json.Marshal(map[string]any{"contract_version": ContractVersion, "command": "stop"})
+		command, _ := json.Marshal(map[string]any{"contract_version": contract, "command": "stop"})
 		_, _ = stdin.Write(append(command, '\n'))
 	}
 	defer func() {
@@ -269,13 +285,15 @@ func (s *Supervisor) run(runID string) error {
 		close(active.done)
 	}()
 	s.stateMu.Lock()
-	err = s.store.MarkWeftRunning(run.ID, segment.Segment, cmd.Process.Pid)
+	err = s.store.MarkWeftRunning(run.ID, segment.Segment, cmd.Process.Pid, contract)
 	s.stateMu.Unlock()
 	if err != nil {
 		gateWriter.Close()
 		_ = cmd.Wait()
 		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
+	s.log.Printf("weft segment %s: launched %s segment, pid %d, under %s",
+		segmentIDs(s.hostID, run.ID, segment, ""), segment.Kind, cmd.Process.Pid, contract)
 	if _, err := gateWriter.Write([]byte("run\n")); err != nil {
 		gateWriter.Close()
 		_ = cmd.Wait()
@@ -288,7 +306,7 @@ func (s *Supervisor) run(runID string) error {
 		close(stderrDone)
 	}()
 	eventCh := make(chan workerRead, 1)
-	go func() { eventCh <- s.readEvents(run, segment, stdout, eventsFile) }()
+	go func() { eventCh <- s.readEvents(run, segment, contract, worker, stdout, eventsFile) }()
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 
@@ -369,6 +387,8 @@ func (s *Supervisor) run(runID string) error {
 		failClass, failDetail = ledger.ClassDied, fmt.Sprintf("worker exited %d after a terminal event", exitCode)
 	}
 	if failClass != "" {
+		s.log.Printf("weft segment %s: failed %s, exit %d: %s",
+			segmentIDs(s.hostID, run.ID, segment, read.stage), failClass, exitCode, failDetail)
 		s.stateMu.Lock()
 		err := s.store.FailWeftSegment(run.ID, segment.Segment, failClass, failDetail)
 		if err == nil {
@@ -379,6 +399,7 @@ func (s *Supervisor) run(runID string) error {
 			return err
 		}
 	} else {
+		s.log.Printf("weft segment %s: settled after its terminal event", segmentIDs(s.hostID, run.ID, segment, read.stage))
 		s.stateMu.Lock()
 		err := s.store.CompleteWeftSegment(run.ID, segment.Segment)
 		s.stateMu.Unlock()
@@ -450,6 +471,7 @@ func waitProcessGroupGone(pgid int, grace time.Duration) bool {
 }
 
 func (s *Supervisor) failBeforeSpawn(run *ledger.WeftRun, segment ledger.WeftSegment, class string, cause error) error {
+	s.log.Printf("weft segment %s: failed %s before spawn: %v", segmentIDs(s.hostID, run.ID, segment, ""), class, cause)
 	s.stateMu.Lock()
 	err := s.store.FailWeftSegment(run.ID, segment.Segment, class, cause.Error())
 	if err == nil {
@@ -476,9 +498,11 @@ func executable(path string) error {
 	return nil
 }
 
-func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, profilePath, answerPath string) []string {
+// argv never carries --land: landing is not served by this host, so no
+// worker is asked to take a landing step (weft-service/v2 §7.1).
+func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, contract, profilePath, answerPath string) []string {
 	argv := []string{
-		s.cfg.Weft.WorkerBin, "segment", "--contract", ContractVersion,
+		s.cfg.Weft.WorkerBin, "segment", "--contract", contract,
 		"--run", run.ID, "--segment", fmt.Sprint(segment.Segment),
 		"--ticket", run.Ticket, "--repo", run.Repo, "--weft-root", s.cfg.Weft.Root,
 		"--sandbox-profile", profilePath,
@@ -524,7 +548,9 @@ func (s *Supervisor) environ(homeDir, runDir, oauthToken string) []string {
 	}
 }
 
-func (s *Supervisor) writeAnswer(run *ledger.WeftRun, segment ledger.WeftSegment, runDir string) (string, error) {
+// writeAnswer writes the segment's answer file: v1 §4.1's, or
+// answer-file.json's under weft-worker/v2, which adds the answer's id.
+func (s *Supervisor) writeAnswer(run *ledger.WeftRun, segment ledger.WeftSegment, runDir, contract string) (string, error) {
 	if !segment.AnswerID.Valid {
 		return "", nil
 	}
@@ -540,10 +566,14 @@ func (s *Supervisor) writeAnswer(run *ledger.WeftRun, segment ledger.WeftSegment
 		return "", err
 	}
 	path := filepath.Join(runDir, "answer.json")
-	doc, err := json.Marshal(map[string]any{
-		"contract_version": ContractVersion, "question_id": question.ID,
+	fields := map[string]any{
+		"contract_version": contract, "question_id": question.ID,
 		"question": question.Text, "answer": answer.Text,
-	})
+	}
+	if contract == WorkerContractV2 {
+		fields["answer_id"] = answer.ID
+	}
+	doc, err := json.Marshal(fields)
 	if err != nil {
 		return "", err
 	}
@@ -553,7 +583,7 @@ func (s *Supervisor) writeAnswer(run *ledger.WeftRun, segment ledger.WeftSegment
 	return path, nil
 }
 
-func writeRunRecord(runDir string, run *ledger.WeftRun, segment ledger.WeftSegment, argv, env []string, pid int) error {
+func writeRunRecord(runDir string, run *ledger.WeftRun, segment ledger.WeftSegment, contract string, argv, env []string, pid int) error {
 	names := make([]string, 0, len(env))
 	for _, entry := range env {
 		name, _, _ := strings.Cut(entry, "=")
@@ -564,7 +594,7 @@ func writeRunRecord(runDir string, run *ledger.WeftRun, segment ledger.WeftSegme
 		recordedPID = pid
 	}
 	doc, err := json.MarshalIndent(map[string]any{
-		"contract_version": ContractVersion, "run_id": run.ID, "segment": segment.Segment,
+		"contract_version": contract, "run_id": run.ID, "segment": segment.Segment,
 		"kind": segment.Kind, "ticket": run.Ticket, "argv": argv, "environment": names,
 		"claimed_at": segment.ClaimedAt, "pid": recordedPID,
 	}, "", "  ")
@@ -572,282 +602,6 @@ func writeRunRecord(runDir string, run *ledger.WeftRun, segment ledger.WeftSegme
 		return err
 	}
 	return os.WriteFile(filepath.Join(runDir, "run.json"), doc, 0o600)
-}
-
-type workerRead struct {
-	terminal bool
-	err      error
-}
-
-func (s *Supervisor) readEvents(run *ledger.WeftRun, segment ledger.WeftSegment, stdout io.Reader, record io.Writer) workerRead {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), 1<<20)
-	expectedSeq := 1
-	first := true
-	workerRunID := ""
-	terminal := false
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
-		if _, err := record.Write(append(line, '\n')); err != nil {
-			return workerRead{err: err}
-		}
-		if terminal {
-			return workerRead{terminal: true, err: fmt.Errorf("worker event followed a terminal event")}
-		}
-		var kind struct {
-			Event string `json:"event"`
-		}
-		if err := json.Unmarshal(line, &kind); err != nil {
-			return workerRead{err: fmt.Errorf("decode worker event: %w", err)}
-		}
-		switch kind.Event {
-		case "hello":
-			var event helloEvent
-			if err := decodeStrict(line, &event); err != nil {
-				return workerRead{err: err}
-			}
-			if err := validateEnvelope(event.envelope, run, segment, expectedSeq, workerRunID); err != nil {
-				return workerRead{err: err}
-			}
-			if !first || event.Worktree != run.Worktree || event.Ticket != run.Ticket || event.Project != run.Project {
-				return workerRead{err: fmt.Errorf("hello does not match the claimed run")}
-			}
-			if event.Branch != run.Branch || event.Criteria == "" {
-				return workerRead{err: fmt.Errorf("hello branch or criteria does not match the protocol")}
-			}
-			for _, stage := range event.Stages {
-				if stage.Stage == "" || stage.Backend == "" {
-					return workerRead{err: fmt.Errorf("hello carries an invalid stage plan")}
-				}
-			}
-			expectedResume := latestWorkerBefore(run, segment.Segment)
-			if text(event.Resumed) != expectedResume {
-				return workerRead{err: fmt.Errorf("hello resumed %q, want %q", text(event.Resumed), expectedResume)}
-			}
-			expectedAnswer := ""
-			if segment.AnswerID.Valid {
-				s.stateMu.RLock()
-				answer, err := s.store.WeftAnswer(segment.AnswerID.String)
-				s.stateMu.RUnlock()
-				if err != nil {
-					return workerRead{err: err}
-				}
-				expectedAnswer = answer.QuestionID
-			}
-			if text(event.Answer) != expectedAnswer {
-				return workerRead{err: fmt.Errorf("hello answer %q, want %q", text(event.Answer), expectedAnswer)}
-			}
-			workerRunID = event.WorkerRunID
-			s.stateMu.Lock()
-			err := s.store.RecordWeftHello(run.ID, segment.Segment, event.WorkerRunID, event.Base, event.Criteria)
-			s.stateMu.Unlock()
-			if err != nil {
-				return workerRead{err: err}
-			}
-		case "stage":
-			var event stageEvent
-			if err := decodeStrict(line, &event); err != nil {
-				return workerRead{err: err}
-			}
-			if err := validateEnvelope(event.envelope, run, segment, expectedSeq, workerRunID); err != nil {
-				return workerRead{err: err}
-			}
-			if first {
-				return workerRead{err: fmt.Errorf("first worker event is stage, want hello")}
-			}
-			if event.Stage == "" || event.Occurrence < 1 || event.Attempt < 1 ||
-				!oneOf(event.State, "running", "done", "failed", "needs_input") {
-				return workerRead{err: fmt.Errorf("invalid stage transition")}
-			}
-			stage := ledger.WeftStage{
-				RunID: run.ID, Segment: segment.Segment, Stage: event.Stage,
-				Occurrence: event.Occurrence, Attempt: event.Attempt,
-				Backend: nullSQL(event.Backend), State: event.State, Session: nullSQL(event.Session),
-				Detail: nullSQL(event.Detail), ExitCode: nullInt64(event.ExitCode),
-				Turns: nullInt64(event.Turns), Spend: event.Spend,
-				Processing: nullInt64(event.ProcessingMS), Tokens: event.Tokens, At: event.TS,
-			}
-			s.stateMu.Lock()
-			err := s.store.RecordWeftStage(stage)
-			s.stateMu.Unlock()
-			if err != nil {
-				return workerRead{err: err}
-			}
-		case "parked":
-			var event parkedEvent
-			if err := decodeStrict(line, &event); err != nil {
-				return workerRead{err: err}
-			}
-			if err := validateEnvelope(event.envelope, run, segment, expectedSeq, workerRunID); err != nil {
-				return workerRead{err: err}
-			}
-			if first {
-				return workerRead{err: fmt.Errorf("first worker event is parked, want hello")}
-			}
-			if event.WorkerOutcome != "blocked" || event.Question == "" ||
-				len([]byte(event.Question)) > maxAnswerBytes || event.Occurrence < 1 || event.Attempt < 1 {
-				return workerRead{err: fmt.Errorf("invalid parked event")}
-			}
-			s.stateMu.Lock()
-			_, err := s.store.RecordWeftParked(run.ID, segment.Segment, event.Stage,
-				event.Occurrence, event.Attempt, event.Question, event.Head, event.Summary)
-			s.stateMu.Unlock()
-			if err != nil {
-				return workerRead{err: err}
-			}
-			terminal = true
-		case "ended":
-			var event endedEvent
-			if err := decodeStrict(line, &event); err != nil {
-				return workerRead{err: err}
-			}
-			// A refusal before hello precedes weft's started line, so it has no
-			// worker_run_id yet.
-			refusal := first && event.Failure != nil
-			if err := validateEnvelopeAt(event.envelope, run, segment, expectedSeq, workerRunID, refusal); err != nil {
-				return workerRead{err: err}
-			}
-			if first && event.Failure == nil {
-				return workerRead{err: fmt.Errorf("first ended event must carry a worker refusal")}
-			}
-			if !oneOf(event.Outcome, "finished", "halted", "failed", "stopped") {
-				return workerRead{err: fmt.Errorf("invalid ended outcome %q", event.Outcome)}
-			}
-			// weft-service/v2 §6.7: an answer or resume segment refused before
-			// any stage because the default branch moved past the run's base.
-			// The run is held for the operator, its answer unconsumed.
-			if text(event.Failure) == ledger.WeftActionStaleBase {
-				if !refusal || event.Outcome != "failed" || segment.Kind == "launch" {
-					return workerRead{err: fmt.Errorf("stale_base is a refusal of an answer or resume segment before hello")}
-				}
-				s.stateMu.Lock()
-				err := s.store.RecordWeftStaleBase(run.ID, segment.Segment, text(event.Detail))
-				s.stateMu.Unlock()
-				if err != nil {
-					return workerRead{err: err}
-				}
-				terminal = true
-				break
-			}
-			haltStage, haltReason, haltDetail := "", "", ""
-			if event.Halt != nil {
-				haltStage, haltReason, haltDetail = event.Halt.Stage, event.Halt.Reason, event.Halt.Detail
-			}
-			s.stateMu.Lock()
-			err := s.store.RecordWeftEnded(run.ID, segment.Segment, event.Outcome, event.Stopped,
-				haltStage, haltReason, haltDetail, text(event.Failure), text(event.Detail),
-				event.Head, event.Summary)
-			s.stateMu.Unlock()
-			if err != nil {
-				return workerRead{err: err}
-			}
-			terminal = true
-		default:
-			return workerRead{err: fmt.Errorf("unknown worker event %q", kind.Event)}
-		}
-		first = false
-		expectedSeq++
-	}
-	if err := scanner.Err(); err != nil {
-		return workerRead{terminal: terminal, err: err}
-	}
-	return workerRead{terminal: terminal}
-}
-
-type envelope struct {
-	ContractVersion string `json:"contract_version"`
-	RunID           string `json:"run_id"`
-	WorkerRunID     string `json:"worker_run_id"`
-	Segment         int    `json:"segment"`
-	Seq             int    `json:"seq"`
-	TS              string `json:"ts"`
-	Event           string `json:"event"`
-}
-
-type helloEvent struct {
-	envelope
-	WorkerVersion string            `json:"worker_version"`
-	Ticket        string            `json:"ticket"`
-	Project       string            `json:"project"`
-	Branch        string            `json:"branch"`
-	Worktree      string            `json:"worktree"`
-	Base          string            `json:"base"`
-	Criteria      string            `json:"criteria"`
-	Resumed       *string           `json:"resumed"`
-	Inherited     []json.RawMessage `json:"inherited"`
-	Answer        *string           `json:"answer"`
-	Stages        []helloStage      `json:"stages"`
-}
-
-type helloStage struct {
-	Stage   string `json:"stage"`
-	Backend string `json:"backend"`
-}
-
-type stageEvent struct {
-	envelope
-	Stage        string          `json:"stage"`
-	Backend      *string         `json:"backend"`
-	Occurrence   int             `json:"occurrence"`
-	Attempt      int             `json:"attempt"`
-	State        string          `json:"state"`
-	Session      *string         `json:"session"`
-	Detail       *string         `json:"detail"`
-	ExitCode     *int64          `json:"exit_code"`
-	Turns        *int64          `json:"turns"`
-	Spend        json.RawMessage `json:"spend"`
-	ProcessingMS *int64          `json:"processing_ms"`
-	Tokens       json.RawMessage `json:"tokens"`
-}
-
-type parkedEvent struct {
-	envelope
-	Stage         string          `json:"stage"`
-	Occurrence    int             `json:"occurrence"`
-	Attempt       int             `json:"attempt"`
-	WorkerOutcome string          `json:"worker_outcome"`
-	Question      string          `json:"question"`
-	Head          string          `json:"head"`
-	Summary       json.RawMessage `json:"summary"`
-}
-
-type endedEvent struct {
-	envelope
-	Outcome string          `json:"outcome"`
-	Stopped bool            `json:"stopped"`
-	Halt    *halt           `json:"halt"`
-	Failure *string         `json:"failure"`
-	Detail  *string         `json:"detail"`
-	Head    string          `json:"head"`
-	Summary json.RawMessage `json:"summary"`
-}
-
-type halt struct {
-	Stage  string `json:"stage"`
-	Reason string `json:"reason"`
-	Detail string `json:"detail"`
-}
-
-func validateEnvelope(e envelope, run *ledger.WeftRun, segment ledger.WeftSegment, seq int, workerID string) error {
-	return validateEnvelopeAt(e, run, segment, seq, workerID, false)
-}
-
-// validateEnvelopeAt checks an event's envelope; preHello admits the null
-// worker_run_id of a refusal written before weft's started line.
-func validateEnvelopeAt(e envelope, run *ledger.WeftRun, segment ledger.WeftSegment, seq int, workerID string, preHello bool) error {
-	if e.ContractVersion != ContractVersion || e.RunID != run.ID || e.Segment != segment.Segment || e.Seq != seq {
-		return fmt.Errorf("worker event envelope does not match the launched segment")
-	}
-	if _, err := time.Parse(time.RFC3339Nano, e.TS); err != nil {
-		return fmt.Errorf("worker event timestamp: %w", err)
-	}
-	if preHello && e.WorkerRunID == "" {
-		return nil
-	}
-	if !validProtocolID(e.WorkerRunID) || (workerID != "" && e.WorkerRunID != workerID) {
-		return fmt.Errorf("worker_run_id changed within the segment")
-	}
-	return nil
 }
 
 func latestWorkerBefore(run *ledger.WeftRun, segment int) string {

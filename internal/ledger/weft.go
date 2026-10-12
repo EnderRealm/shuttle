@@ -87,6 +87,9 @@ type WeftRun struct {
 	Supersedes       sql.NullString
 	SupersededBy     sql.NullString
 	Revision         int64
+	// Liveness is the latest liveness the worker reported, as its resource
+	// (weft-service/v2 §8.3), or nil.
+	Liveness json.RawMessage
 
 	Segments []WeftSegment
 	Stages   []WeftStage
@@ -106,6 +109,9 @@ type WeftSegment struct {
 	ClaimedAt   string
 	StartedAt   sql.NullString
 	EndedAt     sql.NullString
+	// WorkerContract is the worker protocol the segment was launched under;
+	// NULL is a segment launched before it was recorded, under weft-remote/v1.
+	WorkerContract sql.NullString
 }
 
 type WeftStage struct {
@@ -507,9 +513,14 @@ func isHostFailure(v string) bool {
 	return false
 }
 
-// MarkWeftRunning records the child process before any worker event is read.
-func (s *Store) MarkWeftRunning(runID string, segment, pid int) error {
+// MarkWeftRunning records the child process, and the worker contract it was
+// launched under, before any worker event is read.
+func (s *Store) MarkWeftRunning(runID string, segment, pid int, contract string) error {
 	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE weft_segments SET worker_contract=? WHERE run_id=? AND segment=?`,
+			contract, runID, segment); err != nil {
+			return err
+		}
 		var ledgerID string
 		if err := tx.QueryRow(`SELECT ledger_run_id FROM weft_segments WHERE run_id=? AND segment=?`,
 			runID, segment).Scan(&ledgerID); err != nil {
@@ -526,7 +537,8 @@ func (s *Store) MarkWeftRunning(runID string, segment, pid int) error {
 
 // RecordWeftHello accepts the first worker event and moves the API run to
 // running. The supervisor has already checked that hello acknowledges the
-// segment's answer, so the answer is consumed by this segment.
+// segment's answer, so the answer is consumed by this segment. A prior
+// segment's liveness says nothing about this one, so it is cleared.
 func (s *Store) RecordWeftHello(runID string, segment int, workerRunID, base, criteria string) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		stamp := weftTimestamp(s.now())
@@ -538,7 +550,7 @@ func (s *Store) RecordWeftHello(runID string, segment int, workerRunID, base, cr
 			AND id=(SELECT answer_id FROM weft_segments WHERE run_id=? AND segment=?)`, segment, runID, segment); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE weft_runs SET base=?,criteria=?,phase=?,updated_at=?,revision=revision+1 WHERE id=?`,
+		if _, err := tx.Exec(`UPDATE weft_runs SET base=?,criteria=?,phase=?,liveness=NULL,updated_at=?,revision=revision+1 WHERE id=?`,
 			base, criteria, WeftPhaseRunning, stamp, runID); err != nil {
 			return err
 		}
@@ -943,7 +955,7 @@ const weftRunColumns = `id,ticket,project,repo,branch,worktree,base,criteria,pha
 	halt_stage,halt_reason,halt_detail,head,stopped,summary,created_at,updated_at,ended_at,
 	repository_id,entry_id,origin,recorded_under,archive_id,settlement_state,settlement_step,
 	settlement_reason,settlement_detail,settlement_branch,settlement_commit,action_required,
-	action_detail,disposition,archive_ref,supersedes,superseded_by,revision`
+	action_detail,disposition,archive_ref,supersedes,superseded_by,revision,liveness`
 
 func getWeftRunTx(tx *sql.Tx, id string) (*WeftRun, error) {
 	return scanWeftRun(tx.QueryRow(`SELECT `+weftRunColumns+` FROM weft_runs WHERE id=?`, id))
@@ -951,23 +963,26 @@ func getWeftRunTx(tx *sql.Tx, id string) (*WeftRun, error) {
 
 func scanWeftRun(sc scanner) (*WeftRun, error) {
 	var run WeftRun
-	var summary sql.NullString
+	var summary, liveness sql.NullString
 	err := sc.Scan(&run.ID, &run.Ticket, &run.Project, &run.Repo, &run.Branch, &run.Worktree,
 		&run.Base, &run.Criteria, &run.Phase, &run.Outcome, &run.HaltStage, &run.HaltReason,
 		&run.HaltDetail, &run.Head, &run.Stopped, &summary, &run.CreatedAt, &run.UpdatedAt, &run.EndedAt,
 		&run.RepositoryID, &run.EntryID, &run.Origin, &run.RecordedUnder, &run.ArchiveID,
 		&run.SettlementState, &run.SettlementStep, &run.SettlementReason, &run.SettlementDetail,
 		&run.SettlementBranch, &run.SettlementCommit, &run.ActionRequired, &run.ActionDetail,
-		&run.Disposition, &run.ArchiveRef, &run.Supersedes, &run.SupersededBy, &run.Revision)
+		&run.Disposition, &run.ArchiveRef, &run.Supersedes, &run.SupersededBy, &run.Revision, &liveness)
 	if summary.Valid {
 		run.Summary = json.RawMessage(summary.String)
+	}
+	if liveness.Valid {
+		run.Liveness = json.RawMessage(liveness.String)
 	}
 	return &run, err
 }
 
 func loadWeftChildren(q querier, run *WeftRun) error {
 	rows, err := q.Query(`SELECT ws.run_id,ws.segment,ws.kind,ws.ledger_run_id,ws.worker_run_id,
-		ws.answer_id,ws.terminal,ws.failure,r.run_dir,r.claimed_at,r.started_at,r.ended_at
+		ws.answer_id,ws.terminal,ws.failure,ws.worker_contract,r.run_dir,r.claimed_at,r.started_at,r.ended_at
 		FROM weft_segments ws JOIN runs r ON r.id=ws.ledger_run_id
 		WHERE ws.run_id=? ORDER BY ws.segment`, run.ID)
 	if err != nil {
@@ -976,7 +991,7 @@ func loadWeftChildren(q querier, run *WeftRun) error {
 	for rows.Next() {
 		var seg WeftSegment
 		if err := rows.Scan(&seg.RunID, &seg.Segment, &seg.Kind, &seg.LedgerRunID,
-			&seg.WorkerRunID, &seg.AnswerID, &seg.Terminal, &seg.Failure,
+			&seg.WorkerRunID, &seg.AnswerID, &seg.Terminal, &seg.Failure, &seg.WorkerContract,
 			&seg.RunDir, &seg.ClaimedAt, &seg.StartedAt, &seg.EndedAt); err != nil {
 			rows.Close()
 			return err
@@ -1108,10 +1123,18 @@ func (s *Store) WeftEventBounds() (oldest, newest int64, err error) {
 	return
 }
 
+// PruneWeftRetention drops what is retained only for a window: state events
+// and idempotency records older than before, and the output of every run that
+// ended before it (weft-service/v2 §8.1). Runs, segments, stages, questions
+// and answers are authoritative and never pruned.
 func (s *Store) PruneWeftRetention(before time.Time) error {
 	cutoff := weftTimestamp(before)
 	return s.withTx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM weft_events WHERE ts<?`, cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM weft_output WHERE run_id IN
+			(SELECT id FROM weft_runs WHERE phase=? AND ended_at<?)`, WeftPhaseEnded, cutoff); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`DELETE FROM weft_requests WHERE created_at<?`, cutoff)

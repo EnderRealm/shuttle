@@ -313,7 +313,7 @@ func TestReconcileWeftUnknownClosesAPIStateAndReleasesRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkWeftRunning(run.ID, 1, 12345); err != nil {
+	if err := s.MarkWeftRunning(run.ID, 1, 12345, "weft-remote/v1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.RecordWeftHello(run.ID, 1, "20260902T043012Z-abcd1234", "base", "criteria"); err != nil {

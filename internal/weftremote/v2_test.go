@@ -596,6 +596,16 @@ func TestServiceDiscoveryMirrorsDevelopmentalSlice(t *testing.T) {
 	var want map[string]any
 	fixtureJSON(t, "service-developmental.json", &want)
 	got, slice := doc["service"].(map[string]any), want["service"].(map[string]any)
+	// output is gated by the worker probe (§2.6): unprobed, it is not served
+	// and says what it needs, where the fixture names the ticket that adds it.
+	for _, c := range got["capabilities"].([]any) {
+		if c := c.(map[string]any); c["id"] == "output" {
+			if c["state"] != "not_served" || !strings.Contains(c["reason"].(string), "has not been probed yet") {
+				t.Errorf("unprobed output = %v", c)
+			}
+			c["reason"] = "not served by this host build: stage output and liveness arrive with shuttle/serve-hosted-run-6a0b and weft/stream-hosted-output-f94e"
+		}
+	}
 	for _, key := range []string{"service_versions", "worker_versions", "conformance", "capabilities", "limits"} {
 		if !reflect.DeepEqual(got[key], slice[key]) {
 			t.Errorf("service.%s = %v, service-developmental.json has %v", key, got[key], slice[key])
@@ -997,17 +1007,19 @@ func TestRunHistoryQuestionsAndDashboard(t *testing.T) {
 		!reflect.DeepEqual(d["host"], map[string]any{"dispatch": "open", "reason": nil}) {
 		t.Errorf("dashboard = %v", d)
 	}
-	var providers []string
+	// Nothing observed and an unprobed worker: no tile carries a figure, and
+	// each says why (§5.3).
+	var states []string
 	for _, tile := range d["allowance"].([]any) {
 		tile := tile.(map[string]any)
-		providers = append(providers, tile["provider"].(string))
-		if tile["state"] != "unavailable" || tile["source"] != nil || tile["observed_at"] != nil ||
-			len(tile["windows"].([]any)) != 0 || tile["reason"] == "" {
-			t.Errorf("tile = %v: a tile with no source carries no figure and says why", tile)
+		states = append(states, tile["provider"].(string)+" "+tile["state"].(string))
+		if tile["observed_at"] != nil || len(tile["windows"].([]any)) != 0 || tile["reason"] == "" ||
+			(tile["state"] == "unavailable") != (tile["source"] == nil) {
+			t.Errorf("tile = %v: a tile with nothing observed carries no figure and says why", tile)
 		}
 	}
-	if !reflect.DeepEqual(providers, []string{"claude", "codex", "cursor"}) {
-		t.Errorf("allowance providers = %v", providers)
+	if !reflect.DeepEqual(states, []string{"claude unknown", "codex unavailable", "cursor unavailable"}) {
+		t.Errorf("allowance tiles = %v", states)
 	}
 	if err := s.store.Pause(ledger.WeftAgent); err != nil {
 		t.Fatal(err)
@@ -1068,7 +1080,12 @@ type stream struct {
 
 func openStream(t *testing.T, server *httptest.Server, lastID string) *stream {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, server.URL+"/v2/events", nil)
+	return openPath(t, server, "/v2/events", lastID)
+}
+
+func openPath(t *testing.T, server *httptest.Server, path, lastID string) *stream {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1081,9 +1098,12 @@ func openStream(t *testing.T, server *httptest.Server, lastID string) *stream {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
-		t.Fatalf("GET /v2/events = %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+		t.Fatalf("GET %s = %d %s", path, resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 	s := &stream{resp: resp, events: make(chan sseEvent, 256)}
+	// Closed however the test ends, so a server closed in a later cleanup is
+	// not left waiting on this connection.
+	t.Cleanup(s.close)
 	go func() {
 		defer close(s.events)
 		reader := bufio.NewReader(resp.Body)

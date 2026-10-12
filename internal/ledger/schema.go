@@ -7,7 +7,9 @@ package ledger
 // schemaVersion 1: the §6 tables — runs, agents and incidents.
 // schemaVersion 2: the weft-remote/v1 durable host records.
 // schemaVersion 3: weft-service/v2's host records (weft-service/v2 §6.9, §14.1).
-const schemaVersion = 3
+// schemaVersion 4: run visibility — output high-water marks, liveness, worker
+// contracts and allowance (weft-service/v2 §5.3, §8).
+const schemaVersion = 4
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -241,4 +243,28 @@ ALTER TABLE weft_runs ADD COLUMN superseded_by TEXT;
 ALTER TABLE weft_runs ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE weft_answers ADD COLUMN entry_id TEXT;
 ALTER TABLE weft_answers ADD COLUMN consumed_segment INTEGER;
+`
+
+// weftVisibilitySQL is schema 4, run visibility (§5.3, §8): weft_allowance,
+// the newest observation per provider; weft_output_attempts, the last chunk
+// and cursor each attempt wrote, kept after retention drops the text so a
+// read can say output is missing rather than never written;
+// weft_runs.output_cursor, the last output cursor the run allocated, so a
+// cursor is never reissued after retention empties weft_output;
+// weft_runs.liveness, the latest liveness report as its JSON resource; and
+// weft_segments.worker_contract, the contract the segment was launched under
+// (NULL for one launched before it was recorded, which was weft-remote/v1).
+const weftVisibilitySQL = `
+CREATE INDEX weft_output_attempt ON weft_output(run_id, segment, stage, occurrence, attempt);
+CREATE TABLE weft_output_attempts (
+  run_id TEXT NOT NULL, segment INTEGER NOT NULL, stage TEXT NOT NULL, occurrence INTEGER NOT NULL,
+  attempt INTEGER NOT NULL, last_chunk INTEGER NOT NULL, last_cursor INTEGER NOT NULL,
+  PRIMARY KEY (run_id, segment, stage, occurrence, attempt)
+);
+CREATE TABLE weft_allowance (
+  provider TEXT PRIMARY KEY, source TEXT NOT NULL, observed_at TEXT NOT NULL, windows TEXT NOT NULL
+);
+ALTER TABLE weft_runs ADD COLUMN output_cursor INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_runs ADD COLUMN liveness TEXT;
+ALTER TABLE weft_segments ADD COLUMN worker_contract TEXT;
 `

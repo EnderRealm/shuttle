@@ -55,6 +55,7 @@ func (b *syncBuffer) String() string {
 }
 
 const queueWorkerScript = `#!/bin/sh
+case "$1" in version|allowance-probe) exit 64 ;; esac
 run= segment= ticket= repo= weftroot= resume= answerfile=
 while [ "$#" -gt 0 ]; do
   case "$1" in

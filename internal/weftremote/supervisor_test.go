@@ -61,7 +61,7 @@ func TestSupervisorHandsSegmentTheOAuthTokenByEnvironmentOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nif [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = '" + fixtureOAuthToken +
+	script := "#!/bin/sh\n" + v1WorkerGuard + "if [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = '" + fixtureOAuthToken +
 		"' ]; then printf match > " + seen + "; else printf mismatch > " + seen + "; fi\n" +
 		strings.TrimPrefix(fixtureWorkerScript(worktree), "#!/bin/sh\n")
 	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
@@ -172,10 +172,10 @@ func TestSupervisorClassifiesWorkerProcessFailures(t *testing.T) {
 		class   string
 		timeout int
 	}{
-		{name: "zero without terminal", script: "#!/bin/sh\nexit 0\n", class: ledger.ClassNoResult},
-		{name: "nonzero without terminal", script: "#!/bin/sh\nexit 3\n", class: ledger.ClassDied},
-		{name: "protocol", script: "#!/bin/sh\nprintf 'not-json\\n'\n", class: ledger.ClassProtocol},
-		{name: "timeout", script: "#!/bin/sh\nsleep 300\n", class: ledger.ClassStuck, timeout: 1},
+		{name: "zero without terminal", script: "#!/bin/sh\n" + v1WorkerGuard + "exit 0\n", class: ledger.ClassNoResult},
+		{name: "nonzero without terminal", script: "#!/bin/sh\n" + v1WorkerGuard + "exit 3\n", class: ledger.ClassDied},
+		{name: "protocol", script: "#!/bin/sh\n" + v1WorkerGuard + "printf 'not-json\\n'\n", class: ledger.ClassProtocol},
+		{name: "timeout", script: "#!/bin/sh\n" + v1WorkerGuard + "sleep 300\n", class: ledger.ClassStuck, timeout: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -287,7 +287,7 @@ func TestWorkerCannotRunBeforePIDIsDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nprintf started > " + marker + "\n" +
+	script := "#!/bin/sh\n" + v1WorkerGuard + "printf started > " + marker + "\n" +
 		strings.TrimPrefix(fixtureWorkerScript(worktree), "#!/bin/sh\n")
 	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -420,10 +420,13 @@ func (f *supervisorFixture) claim(t *testing.T, id string) *ledger.WeftRun {
 	return run
 }
 
+// v1WorkerGuard is how a weft-remote/v1 worker answers the subcommands
+// weft-worker/v2 adds: exit 64, no event (§2.6).
+const v1WorkerGuard = "case \"$1\" in version|allowance-probe) exit 64 ;; esac\n"
+
 func fixtureWorkerScript(worktree string) string {
 	quoted, _ := json.Marshal(worktree)
-	return `#!/bin/sh
-run=
+	return "#!/bin/sh\n" + v1WorkerGuard + `run=
 segment=
 ticket=
 while [ "$#" -gt 0 ]; do
@@ -438,4 +441,46 @@ printf '{"contract_version":"weft-remote/v1","run_id":"%s","worker_run_id":"2026
 printf '{"contract_version":"weft-remote/v1","run_id":"%s","worker_run_id":"20260916T120000Z-12345678","segment":%s,"seq":2,"ts":"2026-09-16T12:01:00.000Z","event":"stage","stage":"work","backend":"claude","occurrence":1,"attempt":1,"state":"needs_input","session":null,"detail":null,"exit_code":null,"turns":1,"spend":null,"processing_ms":100,"tokens":null}\n' "$run" "$segment"
 printf '{"contract_version":"weft-remote/v1","run_id":"%s","worker_run_id":"20260916T120000Z-12345678","segment":%s,"seq":3,"ts":"2026-09-16T12:01:01.000Z","event":"parked","stage":"work","occurrence":1,"attempt":1,"worker_outcome":"blocked","question":"Which shape?","head":"head","summary":{"state":"rendered"}}\n' "$run" "$segment"
 `
+}
+
+// A failed version probe stands for workerReprobeAfter, then an unchanged
+// worker_bin is probed again; the same failure is logged once.
+func TestWorkerProbeRetriesAFailureAfterItsBackOff(t *testing.T) {
+	f := newSupervisorFixture(t, false)
+	logs := &syncBuffer{}
+	f.supervisor.log = log.New(logs, "", 0)
+	version := filepath.Join(f.root, "version.json")
+	script := "#!/bin/sh\ncase \"$1\" in version) cat " + version + " 2>/dev/null || exit 64; exit 0 ;; esac\nexit 3\n"
+	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prior := workerReprobeAfter
+	t.Cleanup(func() { workerReprobeAfter = prior })
+	workerReprobeAfter = 0
+	for range 2 {
+		if w := f.supervisor.refreshWorker(); w.Failure != "exited 64" {
+			t.Fatalf("probe = %+v", w)
+		}
+	}
+	if n := strings.Count(logs.String(), "failed: exited 64"); n != 1 {
+		t.Fatalf("the same failure was logged %d times:\n%s", n, logs.String())
+	}
+	doc, err := os.ReadFile(filepath.Join(contractDir(t), "worker-version.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(version, doc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workerReprobeAfter = time.Hour
+	if w := f.supervisor.refreshWorker(); w.Failure != "exited 64" {
+		t.Fatalf("a failure was re-probed inside its back-off: %+v", w)
+	}
+	workerReprobeAfter = 0
+	if w := f.supervisor.refreshWorker(); !w.speaks(WorkerContractV2) || !w.has("output") {
+		t.Fatalf("after the back-off = %+v", w)
+	}
+	if !strings.Contains(logs.String(), "is weft-worker 0.2.0 (weft@dev)") {
+		t.Fatalf("log lacks the recovered probe:\n%s", logs.String())
+	}
 }

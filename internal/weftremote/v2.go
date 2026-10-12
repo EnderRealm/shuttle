@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,9 +27,10 @@ type capability struct {
 	Reason string
 }
 
-// capabilities mirrors docs/service-v2/service-developmental.json, the first
-// developmental slice (§2.4). Its order is the contract's.
-var capabilities = []capability{
+// developmentalCapabilities mirrors docs/service-v2/service-developmental.json,
+// the first developmental slice (§2.4), in the contract's order. output is
+// gated by the worker probe instead (outputGate).
+var developmentalCapabilities = []capability{
 	{ID: "dashboard"},
 	{ID: "catalog"},
 	{ID: "launch"},
@@ -36,7 +38,7 @@ var capabilities = []capability{
 	{ID: "queue"},
 	{ID: "questions"},
 	{ID: "control"},
-	{ID: "output", Reason: "not served by this host build: stage output and liveness arrive with shuttle/serve-hosted-run-6a0b and weft/stream-hosted-output-f94e"},
+	{ID: "output"},
 	{ID: "history"},
 	{ID: "landing", Reason: "not served by this host build: runs end with their branch unlanded until shuttle/reconcile-hosted-landing-5675 and weft/expose-recoverable-hosted-b935"},
 	{ID: "cleanup", Reason: "not served by this host build: dismiss and fresh work arrive with shuttle/reconcile-hosted-landing-5675; until then a run refused prior_run or stale_base stays retained and its ticket cannot be relaunched through the service"},
@@ -76,9 +78,57 @@ func unspokenVersion(segment string) bool {
 	return versionSegment.MatchString(segment) && segment != "v1" && segment != "v2"
 }
 
+// capabilities is §2.3's list as this host serves it now.
+func (s *Service) capabilities() []capability {
+	listed := slices.Clone(developmentalCapabilities)
+	for i := range listed {
+		if listed[i].ID == "output" {
+			listed[i].Reason = s.outputGate()
+		}
+	}
+	return listed
+}
+
+// outputGate is why output is not served, or "" when it is: it needs a
+// worker that speaks weft-worker/v2 with the output and liveness
+// capabilities (§2.3, §2.6).
+func (s *Service) outputGate() string {
+	const needs = "not served by this host: stage output and liveness need a worker speaking " + WorkerContractV2 +
+		" with the output and liveness capabilities, and "
+	bin := s.cfg.Weft.WorkerBin
+	worker := s.segments.worker.Load()
+	switch {
+	case worker == nil:
+		return needs + bin + " has not been probed yet"
+	case worker.Failure != "":
+		return needs + "the probe of " + bin + " failed: " + worker.Failure
+	case !worker.speaks(WorkerContractV2):
+		return needs + bin + " (" + worker.Version + ") speaks only " + strings.Join(worker.Contracts, " and ")
+	}
+	var missing []string
+	for _, c := range []string{"output", "liveness"} {
+		if !worker.has(c) {
+			missing = append(missing, c)
+		}
+	}
+	if len(missing) > 0 {
+		return needs + bin + " (" + worker.Version + ") lacks " + strings.Join(missing, " and ")
+	}
+	return ""
+}
+
+func (s *Service) served(id string) bool {
+	for _, c := range s.capabilities() {
+		if c.ID == id {
+			return c.Reason == ""
+		}
+	}
+	return false
+}
+
 func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 	for _, route := range notServedRoutes {
-		if r.Method == route.method && route.pattern.MatchString(path) {
+		if r.Method == route.method && route.pattern.MatchString(path) && !s.served(route.capability) {
 			s.capabilityNotServed(w, route.capability)
 			return
 		}
@@ -96,6 +146,13 @@ func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 		s.handleCatalogTicket(w, strings.TrimPrefix(path, "/v2/tickets/"))
 	case r.Method == http.MethodGet && path == "/v2/runs":
 		s.handleV2Runs(w, r)
+	case r.Method == http.MethodGet && outputRoute.MatchString(path):
+		m := outputRoute.FindStringSubmatch(path)
+		if m[2] == "" {
+			s.handleOutput(w, r, m[1])
+		} else {
+			s.handleOutputStream(w, r, m[1])
+		}
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v2/runs/"):
 		s.handleV2RunPath(w, strings.TrimPrefix(path, "/v2/runs/"))
 	case r.Method == http.MethodPost && runCommand.MatchString(path):
@@ -159,10 +216,11 @@ func (s *Service) capabilityNotServed(w http.ResponseWriter, id string) {
 
 // notServedMessage is error-capability-not-served.json's message for id.
 func (s *Service) notServedMessage(id string) (string, bool) {
-	for _, c := range capabilities {
+	listed := s.capabilities()
+	for _, c := range listed {
 		if c.ID == id {
 			return fmt.Sprintf("%s is not served by host %s, which declares %s conformance: %s",
-				id, s.hostID, conformance(), c.Reason), true
+				id, s.hostID, conformance(listed), c.Reason), true
 		}
 	}
 	return "", false
@@ -170,7 +228,7 @@ func (s *Service) notServedMessage(id string) (string, bool) {
 
 // conformance is complete only when every desktop capability — all but
 // trial_launch — is served (§2.3).
-func conformance() string {
+func conformance(capabilities []capability) string {
 	for _, c := range capabilities {
 		if c.ID != "trial_launch" && c.Reason != "" {
 			return "developmental"
@@ -196,6 +254,7 @@ func (s *Service) handleService(w http.ResponseWriter) {
 		s.v2Internal(w, err)
 		return
 	}
+	capabilities := s.capabilities()
 	listed := make([]map[string]any, 0, len(capabilities))
 	for _, c := range capabilities {
 		state, reason := "served", any(nil)
@@ -216,7 +275,7 @@ func (s *Service) handleService(w http.ResponseWriter) {
 		// The developmental slice's worker contracts, as service-developmental.json
 		// declares them.
 		"worker_versions": []string{ContractVersion, "weft-worker/v2"},
-		"conformance":     conformance(),
+		"conformance":     conformance(capabilities),
 		"capabilities":    listed,
 		"limits": map[string]any{
 			"capacity_default": ledger.WeftCapacityDefault, "segment_limit": 8,
@@ -239,25 +298,23 @@ func (s *Service) handleDashboard(w http.ResponseWriter) {
 	if err == nil {
 		asOf, err = s.store.WeftAsOf()
 	}
+	var held map[string]ledger.WeftAllowance
+	if err == nil {
+		held, err = s.store.WeftAllowances()
+	}
 	s.stateMu.RUnlock()
 	if err != nil {
 		s.v2Internal(w, err)
 		return
 	}
+	s.probeCodex(false)
 	host := map[string]any{"dispatch": "open", "reason": nil}
 	if agent.Paused {
 		host = map[string]any{"dispatch": "paused", "reason": ledger.WeftHostPausedDetail(agent.PausedReason.String, agent.PausedAt.String)}
 	}
-	// No tile here carries a figure: an unknown allowance rendered as zero is
-	// a claim nobody made (§5.3), and this build reads no allowance source.
-	allowance := []map[string]any{
-		unavailableTile("claude", "no source: this host build does not relay the workers' Claude rate_limit_event observations; they arrive with shuttle/serve-hosted-run-6a0b"),
-		unavailableTile("codex", "no source: this host build runs no Codex allowance probe; it arrives with shuttle/serve-hosted-run-6a0b"),
-		unavailableTile("cursor", "no source: no credential decision has been made for Cursor on this host"),
-	}
 	s.read(w, asOf, map[string]any{"dashboard": map[string]any{
 		"host":      host,
-		"allowance": allowance,
+		"allowance": s.allowanceTiles(held),
 		"capacity":  map[string]any{"cap": counts.Capacity, "running": counts.Running, "waiting": counts.Waiting},
 		"runs": map[string]any{
 			"active": counts.Active, "blocked": counts.Blocked, "action_required": counts.ActionRequired,

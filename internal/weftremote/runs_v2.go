@@ -101,10 +101,13 @@ func v2Run(run *ledger.WeftRun, store runReader) (map[string]any, error) {
 			}
 			answer = map[string]any{"question_id": a.QuestionID, "answer_id": a.ID}
 		}
-		// Dispatch launches every segment under weft-remote/v1 until the
-		// weft-worker/v2 worker of weft/expose-recoverable-hosted-b935.
+		// A segment recorded before its contract was is weft-remote/v1's.
+		contract := ContractVersion
+		if seg.WorkerContract.Valid {
+			contract = seg.WorkerContract.String
+		}
 		segments = append(segments, map[string]any{
-			"segment": seg.Segment, "kind": seg.Kind, "worker_contract": ContractVersion,
+			"segment": seg.Segment, "kind": seg.Kind, "worker_contract": contract,
 			"ledger_run_id": seg.LedgerRunID, "worker_run_id": nullString(seg.WorkerRunID),
 			"run_dir": nullString(seg.RunDir), "answer": answer, "started_at": started,
 			"ended_at": nullString(seg.EndedAt), "terminal": nullString(seg.Terminal),
@@ -114,6 +117,12 @@ func v2Run(run *ledger.WeftRun, store runReader) (map[string]any, error) {
 	stages := make([]map[string]any, 0, len(run.Stages))
 	for _, stage := range run.Stages {
 		stages = append(stages, stageResource(stage))
+	}
+	// Liveness is the running segment's: a parked or ended run has no
+	// attempt to be stalled in (§8.3).
+	var liveness any
+	if run.Phase == ledger.WeftPhaseRunning {
+		liveness = rawJSON(run.Liveness)
 	}
 	var question any
 	q, err := store.LatestWeftQuestion(run.ID)
@@ -134,7 +143,7 @@ func v2Run(run *ledger.WeftRun, store runReader) (map[string]any, error) {
 		"archive_ref": nullString(run.ArchiveRef), "supersedes": nullString(run.Supersedes),
 		"superseded_by": nullString(run.SupersededBy), "revision": run.Revision,
 		"created_at": run.CreatedAt, "updated_at": run.UpdatedAt, "ended_at": nullString(run.EndedAt),
-		"liveness": nil, "summary": rawJSON(run.Summary), "segments": segments, "stages": stages,
+		"liveness": liveness, "summary": rawJSON(run.Summary), "segments": segments, "stages": stages,
 		"question": question,
 	}, nil
 }

@@ -27,6 +27,9 @@ import (
 const (
 	maxRequestBytes = 70 << 10
 	maxAnswerBytes  = 64 << 10
+	// retentionWindow is how long idempotency records, state events and an
+	// ended run's output are kept (weft-service/v2 §4.2, §8.1).
+	retentionWindow = 7 * 24 * time.Hour
 )
 
 // Service is the authenticated weft host: weft-service/v2, and weft-remote/v1
@@ -46,6 +49,12 @@ type Service struct {
 	// Shuttle (§5.2). A full read of the Studio's store costs ~150ms, so the
 	// interval trades an external edit's latency against a daemon's idle CPU.
 	catalogPoll time.Duration
+	// started is when this host process started, which the allowance tiles
+	// name while nothing has been observed.
+	started time.Time
+	codex   codexProbe
+	// probes counts the provider probes in flight.
+	probes sync.WaitGroup
 }
 
 func New(cfg *config.Config, store *ledger.Store, token, home string, logger *log.Logger) (*Service, error) {
@@ -91,12 +100,14 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	}
 	s := &Service{
 		cfg: cfg, store: store, token: token, tokenID: ledger.TokenID(token), hostID: hostID,
-		home: home, log: logger, catalogPoll: 5 * time.Second,
+		home: home, log: logger, catalogPoll: 5 * time.Second, started: time.Now(),
 	}
-	// Dispatch spawns weft-remote/v1 segments through the supervisor; each
-	// settled segment may free the slot and reservation a waiting entry needs.
+	// Dispatch spawns segments through the supervisor, under the contract the
+	// worker probe found; each settled segment may free the slot and
+	// reservation a waiting entry needs.
 	s.segments = NewSupervisor(cfg, store, home, logger, &s.stateMu)
 	s.segments.settled = s.dispatch
+	s.segments.hostID = hostID
 	return s, nil
 }
 
@@ -456,7 +467,7 @@ func (s *Service) mutate(w http.ResponseWriter, r *http.Request, execute func([]
 	defer s.mutateMu.Unlock()
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	if err := s.store.PruneWeftRetention(time.Now().Add(-7 * 24 * time.Hour)); err != nil {
+	if err := s.store.PruneWeftRetention(time.Now().Add(-retentionWindow)); err != nil {
 		s.internal(w, err)
 		return
 	}

@@ -301,6 +301,9 @@ func (s *Service) dispatch() {
 }
 
 func (s *Service) dispatchWith(c *catalog) {
+	// worker_bin is re-probed when it changed (§2.6), so the capabilities a
+	// client reads follow the installed worker.
+	s.segments.refreshWorker()
 	s.stateMu.Lock()
 	spawn, changes, err := s.store.DispatchWeft(s.dispatchConfig(c))
 	s.stateMu.Unlock()
@@ -313,7 +316,9 @@ func (s *Service) dispatchWith(c *catalog) {
 }
 
 // Restart is §12's steps 4 and 5, which follow the restart pass the daemon
-// has already run (step 1) and precede the listener and any dispatch.
+// has already run (step 1) and precede the listener and any dispatch; then
+// the worker probe (§2.6), the retention prune (§8.1) and the Codex
+// allowance probe, which runs in the background (§5.3).
 func (s *Service) Restart() error {
 	s.stateMu.Lock()
 	released, changes, spawn, err := s.store.RestartWeftQueue(
@@ -327,6 +332,14 @@ func (s *Service) Restart() error {
 			s.hostID, r.Repository, r.HolderKind, r.HolderID, r.AcquiredAt)
 	}
 	s.logChanges("", changes)
+	s.stateMu.Lock()
+	err = s.store.PruneWeftRetention(time.Now().Add(-retentionWindow))
+	s.stateMu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.segments.refreshWorker()
+	s.probeCodex(true)
 	s.spawn(spawn)
 	return nil
 }
