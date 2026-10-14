@@ -28,12 +28,21 @@ func v2RunRef(run *ledger.WeftRun) map[string]any {
 	}
 }
 
+// latestSegment is the segment a run reads as: its newest, of any kind. An
+// archived run has none and reads as the one legacy run it was.
+func latestSegment(run *ledger.WeftRun) int {
+	if len(run.Segments) > 0 {
+		return run.Segments[len(run.Segments)-1].Segment
+	}
+	if run.Origin == ledger.WeftOriginArchive {
+		return ledger.WeftArchivedSegment
+	}
+	return 0
+}
+
 // v2RunHeader is one history row (runs.json).
 func v2RunHeader(run *ledger.WeftRun) map[string]any {
-	segment, questionID := 0, any(nil)
-	if len(run.Segments) > 0 {
-		segment = run.Segments[len(run.Segments)-1].Segment
-	}
+	segment, questionID := latestSegment(run), any(nil)
 	if run.Question != nil {
 		questionID = run.Question.ID
 	}
@@ -49,16 +58,8 @@ func v2RunHeader(run *ledger.WeftRun) map[string]any {
 	}
 }
 
-// v2Settlement is the run's landing as the host records it (§7.1). The
-// intent steps are the landing capability's, which this build does not serve.
-func v2Settlement(run *ledger.WeftRun) map[string]any {
-	return map[string]any{
-		"state": run.SettlementState, "step": nullString(run.SettlementStep),
-		"reason": nullString(run.SettlementReason), "detail": nullString(run.SettlementDetail),
-		"branch": nullString(run.SettlementBranch), "commit": nullString(run.SettlementCommit),
-		"steps": []any{},
-	}
-}
+// v2Settlement is the run's landing as the host records it (§7.1).
+func v2Settlement(run *ledger.WeftRun) map[string]any { return run.Settlement() }
 
 func v2Halt(run *ledger.WeftRun) any {
 	if !run.HaltStage.Valid || !run.HaltReason.Valid {
@@ -84,8 +85,14 @@ func v2Run(run *ledger.WeftRun, store runReader) (map[string]any, error) {
 		}
 		action = map[string]any{"reason": run.ActionRequired.String, "detail": run.ActionDetail.String, "options": options}
 	}
-	if run.Phase == ledger.WeftPhaseEnded && len(run.Segments) > 0 {
-		failure = nullString(run.Segments[len(run.Segments)-1].Failure)
+	// The run's failure is its pipeline's: a reconcile, cleanup or archive
+	// segment after it has none of its own to report.
+	if run.Phase == ledger.WeftPhaseEnded {
+		for _, seg := range run.Segments {
+			if oneOf(seg.Kind, "launch", "answer", "resume") {
+				failure = nullString(seg.Failure)
+			}
+		}
 	}
 	segments := make([]map[string]any, 0, len(run.Segments))
 	for _, seg := range run.Segments {
@@ -192,10 +199,7 @@ func (s *Service) handleV2Runs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch q.Origin {
-	case "", ledger.WeftOriginHosted:
-	case "archive":
-		s.capabilityNotServed(w, "archive")
-		return
+	case "", ledger.WeftOriginHosted, ledger.WeftOriginArchive:
 	default:
 		s.v2Error(w, http.StatusBadRequest, "malformed", "origin must be hosted or archive")
 		return

@@ -21,8 +21,9 @@ import (
 )
 
 var (
-	runCommand  = regexp.MustCompile(`^/v2/runs/([^/]+)/(answer|stop|resume)$`)
-	entryCancel = regexp.MustCompile(`^/v2/queue/([^/]+)/cancel$`)
+	runCommand         = regexp.MustCompile(`^/v2/runs/([^/]+)/(answer|stop|resume|reconcile|dismiss|fresh)$`)
+	entryCancel        = regexp.MustCompile(`^/v2/queue/([^/]+)/cancel$`)
+	repositoryContinue = regexp.MustCompile(`^/v2/repositories/([^/]+)/continue$`)
 )
 
 // settledEntryWindow is how long a settled entry stays listed (§6.3).
@@ -75,12 +76,17 @@ func refusalStatus(code string) int {
 // key's SHA-256, and the entries and runs it touched — never the token or an
 // answer's text.
 func (s *Service) mutateV2(w http.ResponseWriter, r *http.Request, prepare func(body []byte, key string) (v2Commit, error)) {
+	s.mutateV2Limit(w, r, maxRequestBytes, prepare)
+}
+
+// mutateV2Limit is mutateV2 for a body of at most limit bytes.
+func (s *Service) mutateV2Limit(w http.ResponseWriter, r *http.Request, limit int64, prepare func(body []byte, key string) (v2Commit, error)) {
 	key := r.Header.Get("Idempotency-Key")
 	if !validIdempotencyKey(key) {
 		s.v2Error(w, http.StatusBadRequest, "idempotency_key_missing", "Idempotency-Key must be printable ASCII and at most 128 bytes")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		s.v2Error(w, http.StatusBadRequest, "malformed", "request body is too large")
 		return
@@ -199,7 +205,11 @@ func (s *Service) logChanges(keyHash string, changes []ledger.WeftChange) {
 		if run == "" {
 			run = "-"
 		}
-		line := fmt.Sprintf("weft queue host=%s key=%s entry=%s run=%s: %s %s %s", s.hostID, keyHash, c.EntryID, run, c.Action, c.Kind, c.Ticket)
+		entry := c.EntryID
+		if entry == "" {
+			entry = "-"
+		}
+		line := fmt.Sprintf("weft queue host=%s key=%s entry=%s run=%s: %s %s %s", s.hostID, keyHash, entry, run, c.Action, c.Kind, c.Ticket)
 		if c.Detail != "" {
 			line += " (" + strings.TrimSpace(c.Detail) + ")"
 		}
@@ -244,16 +254,23 @@ func decodeV2(body []byte, dst any, keys ...string) error {
 }
 
 // dispatchConfig is dispatch against one tk read: entries are revalidated
-// against it.
+// against it, and runs are minted pending their landing while it is served.
 func (s *Service) dispatchConfig(c *catalog) ledger.WeftDispatch {
-	return ledger.WeftDispatch{WeftRoot: s.cfg.Weft.Root, RunDirRoot: s.weftRunsRoot(), Check: s.entryCheck(c)}
+	d := s.segments.dispatchBase()
+	d.Check = s.entryCheck(c)
+	return d
 }
 
 // entryCheck is dispatch's and the catalog event's revalidation (§6.3): the
 // project still bound to the repository the entry was admitted for, and the
-// ticket still eligible as tk reads it.
+// ticket still eligible as tk reads it. A reconcile repairs a landing in the
+// repository the run was recorded in, whatever tk says now; a cleanup needs
+// the binding and not the ticket, which a landing may have made done.
 func (s *Service) entryCheck(c *catalog) func(*ledger.WeftEntry) (string, string) {
 	return func(e *ledger.WeftEntry) (string, string) {
+		if e.Kind == ledger.WeftEntryReconcile {
+			return "", ""
+		}
 		p := c.byName[e.Project]
 		if p == nil {
 			return ledger.WeftInvalidBinding, fmt.Sprintf("project %s is no longer registered in %s", e.Project, s.cfg.Paths.TKConfig)
@@ -265,6 +282,9 @@ func (s *Service) entryCheck(c *catalog) func(*ledger.WeftEntry) (string, string
 			}
 			return ledger.WeftInvalidBinding, fmt.Sprintf("project %s is now bound to %s, not %s (%s), which %s was admitted for",
 				e.Project, now, e.Repository, e.RepositoryID, e.ID)
+		}
+		if e.Kind == ledger.WeftEntryCleanup {
+			return "", ""
 		}
 		t, ok := c.snap.Get(e.Ticket)
 		if !ok {
@@ -316,13 +336,13 @@ func (s *Service) dispatchWith(c *catalog) {
 }
 
 // Restart is §12's steps 4 and 5, which follow the restart pass the daemon
-// has already run (step 1) and precede the listener and any dispatch; then
-// the worker probe (§2.6), the retention prune (§8.1) and the Codex
-// allowance probe, which runs in the background (§5.3).
+// has already run (steps 1 and 2) and precede the listener and any dispatch;
+// then the worker probe (§2.6), the retention prune (§8.1) and the Codex
+// allowance probe, which runs in the background (§5.3). The reconciles step
+// 2 claimed start here, with the runs step 5 minted, before dispatch.
 func (s *Service) Restart() error {
 	s.stateMu.Lock()
-	released, changes, spawn, err := s.store.RestartWeftQueue(
-		ledger.WeftDispatch{WeftRoot: s.cfg.Weft.Root, RunDirRoot: s.weftRunsRoot()}, archiveHead)
+	released, changes, spawn, err := s.store.RestartWeftQueue(s.segments.dispatchBase(), archiveHead)
 	s.stateMu.Unlock()
 	if err != nil {
 		return err
@@ -604,8 +624,11 @@ func (s *Service) handleCapacity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleRunCommand(w http.ResponseWriter, r *http.Request, runID, command string) {
 	s.mutateV2(w, r, func(body []byte, key string) (v2Commit, error) {
-		if command == "answer" {
+		switch command {
+		case "answer":
 			return s.answerCommit(body, key, runID)
+		case "dismiss", "fresh":
+			return s.retainedCommit(body, key, runID, command)
 		}
 		var req revisionRequest
 		if err := decodeV2(body, &req, "revision"); err != nil {
@@ -640,7 +663,13 @@ func (s *Service) handleRunCommand(w http.ResponseWriter, r *http.Request, runID
 			return nil, err
 		}
 		return func(tx *ledger.WeftTx) (v2Outcome, error) {
-			entry, err := tx.AdmitResume(runID, req.Revision, directoryExists, s.admission(key))
+			var entry *ledger.WeftEntry
+			var err error
+			if command == "reconcile" {
+				entry, err = tx.AdmitReconcile(runID, req.Revision, s.admission(key))
+			} else {
+				entry, err = tx.AdmitResume(runID, req.Revision, directoryExists, s.admission(key))
+			}
 			if err != nil {
 				return v2Outcome{}, err
 			}
@@ -696,6 +725,60 @@ func (s *Service) answerCommit(body []byte, key, runID string) (v2Commit, error)
 		return v2Outcome{status: http.StatusAccepted, fields: map[string]any{
 			"question": v2Question(question), "entry": entry.Resource(),
 		}}, nil
+	}, nil
+}
+
+// retainedCommit queues cleanup (§6.8) or fresh work (§6.7) over a retained
+// run, against the worktree — and for fresh, the head — the confirmation
+// showed.
+func (s *Service) retainedCommit(body []byte, key, runID, command string) (v2Commit, error) {
+	type dismissRequest struct {
+		ContractVersion    string `json:"contract_version"`
+		Revision           int64  `json:"revision"`
+		AuthorizedWorktree string `json:"authorized_worktree"`
+	}
+	var req struct {
+		dismissRequest
+		AuthorizedHead string `json:"authorized_head"`
+	}
+	var err error
+	if command == "fresh" {
+		err = decodeV2(body, &req, "revision", "authorized_worktree", "authorized_head")
+	} else {
+		err = decodeV2(body, &req.dismissRequest, "revision", "authorized_worktree")
+	}
+	if err != nil {
+		return refusedBy(err), nil
+	}
+	// The head is what an archive of a run with none is written at (§6.7).
+	if command == "fresh" && !commitPattern.MatchString(req.AuthorizedHead) {
+		return refused("malformed", "authorized_head must be a commit: 40 lowercase hex digits"), nil
+	}
+	if !validProtocolID(runID) {
+		return refused("run_not_found", "%s is not a run on host %s", runID, s.hostID), nil
+	}
+	c, err := s.readCatalog()
+	if err != nil {
+		return nil, err
+	}
+	return func(tx *ledger.WeftTx) (v2Outcome, error) {
+		var entry *ledger.WeftEntry
+		var err error
+		if command == "fresh" {
+			entry, err = tx.AdmitFresh(runID, req.Revision, req.AuthorizedWorktree, req.AuthorizedHead, s.admission(key))
+		} else {
+			entry, err = tx.AdmitCleanup(runID, req.Revision, req.AuthorizedWorktree, directoryExists, s.admission(key))
+		}
+		if err != nil {
+			return v2Outcome{}, err
+		}
+		if err := tx.Dispatch(s.dispatchConfig(c)); err != nil {
+			return v2Outcome{}, err
+		}
+		if entry, err = tx.Entry(entry.ID); err != nil {
+			return v2Outcome{}, err
+		}
+		return v2Outcome{status: http.StatusAccepted, fields: map[string]any{"entry": entry.Resource()}}, nil
 	}, nil
 }
 

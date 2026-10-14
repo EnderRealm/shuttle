@@ -199,11 +199,11 @@ func projectDigest(p *catalogProject, snap *ticket.Snapshot) (string, error) {
 // with its catalog event, and revalidates those projects' waiting entries
 // against the read (§5.2, §6.3). The caller holds stateMu for writing.
 func (s *Service) recordCatalog(c *catalog) error {
-	digests := make(map[string]string, len(c.projects))
+	bindings := make(map[string]ledger.WeftBinding, len(c.projects))
 	for _, p := range c.projects {
-		digests[p.Name] = p.digest
+		bindings[p.Name] = ledger.WeftBinding{Digest: p.digest, RepositoryID: p.RepositoryID, Repository: p.Repository}
 	}
-	revisions, changed, err := s.store.SyncWeftCatalog(digests)
+	revisions, changed, err := s.store.SyncWeftCatalog(bindings)
 	if err != nil {
 		return err
 	}
@@ -431,6 +431,8 @@ func (v *catalogView) ineligibility(p *catalogProject, t *ticket.Ticket, runs []
 				add("run_in_flight", "run "+run.ID+" is running")
 			case ledger.WeftPhaseParked:
 				add("run_in_flight", "run "+run.ID+" is parked on a question")
+			case ledger.WeftPhaseSettling:
+				add("run_in_flight", "run "+run.ID+" is landing")
 			}
 		}
 		if hasEntry {

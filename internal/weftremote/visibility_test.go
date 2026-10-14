@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,9 +32,11 @@ import (
 
 // v2WorkerScript is a fixture weft-worker/v2 worker. version prints the
 // control directory's version.json; allowance-probe prints probe.json, or
-// hangs while probe.hang exists; a segment replays the ndjson written for its
-// ticket and segment, holding at each @HOLD@ line until released, and keeps
-// the answer file it was handed.
+// hangs while probe.hang exists; a segment — of any kind — replays the ndjson
+// written for its ticket and segment, holding at each @HOLD@ line until
+// released, reading one command from stdin at each @ACK@ line into
+// <slug>-<segment>.commands, and exiting with no terminal event at @DIE@; it
+// keeps the answer file it was handed.
 const v2WorkerScript = `#!/bin/sh
 control=CONTROL
 case "$1" in
@@ -62,13 +65,20 @@ if [ -n "$answerfile" ]; then
   cp "$answerfile" "$control/$slug-$segment.answer.json"
   qid=$(sed -n 's/.*"question_id":"\([^"]*\)".*/\1/p' "$answerfile")
 fi
+exec 3<&0
 sed -e "s/@RUN@/$run/g" -e "s/@SEG@/$segment/g" -e "s/@QID@/$qid/g" "$control/$slug-$segment.ndjson" |
 while IFS= read -r line; do
-  if [ "$line" = "@HOLD@" ]; then
-    while [ ! -f "$control/$slug.release" ]; do sleep 0.02; done
-    rm -f "$control/$slug.release"
-    continue
-  fi
+  case "$line" in
+    @HOLD@)
+      while [ ! -f "$control/$slug.release" ]; do sleep 0.02; done
+      rm -f "$control/$slug.release"
+      continue ;;
+    @ACK@)
+      IFS= read -r command <&3
+      printf '%s\n' "$command" >> "$control/$slug-$segment.commands"
+      continue ;;
+    @DIE@) exit 9 ;;
+  esac
   printf '%s\n' "$line"
 done
 `
@@ -76,11 +86,31 @@ done
 const fixtureWorkerRun = "20261002T091500Z-2c3d4e5f"
 
 // newV2Host is a queue host whose worker speaks weft-worker/v2 as
-// worker-version.json declares it.
+// worker-version.json declares it, less land and reconcile: landing is not
+// served, so its segments launch without --land, as the developmental slice
+// launches them (§2.4).
 func newV2Host(t *testing.T) *queueHost {
 	t.Helper()
+	return newWorkerHost(t, "land", "reconcile")
+}
+
+// newWorkerHost is a queue host whose worker speaks weft-worker/v2 with
+// worker-version.json's capabilities less those named.
+func newWorkerHost(t *testing.T, without ...string) *queueHost {
+	t.Helper()
 	h := newQueueHost(t)
-	h.writeControl("version.json", fixtureBytes(t, "worker-version.json"))
+	version := decode(t, fixtureBytes(t, "worker-version.json")).(map[string]any)
+	for _, c := range version["capabilities"].([]any) {
+		if !slices.Contains(without, c.(string)) {
+			h.capabilities = append(h.capabilities, c)
+		}
+	}
+	version["capabilities"] = h.capabilities
+	doc, err := json.Marshal(version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.writeControl("version.json", doc)
 	h.worker(strings.Replace(v2WorkerScript, "CONTROL", h.control, 1))
 	t.Cleanup(func() { h.service.probes.Wait() })
 	return h
@@ -126,6 +156,7 @@ func (h *queueHost) fixtureSegment(ticketID string) workerLines {
 			continue
 		case "hello":
 			ev["worktree"], ev["land"], ev["ticket"], ev["branch"] = h.worktree(ticketID), false, ticketID, ticketID
+			ev["capabilities"] = h.capabilities
 		case "graded":
 			ev["summary"].(map[string]any)["report"].(map[string]any)["ticket"] = ticketID
 		case "ended":
@@ -168,6 +199,10 @@ func (h *queueHost) script(ticketID string, segment int, lines workerLines) {
 	for _, ev := range lines {
 		if ev == nil {
 			b.WriteString("@HOLD@\n")
+			continue
+		}
+		if marker, ok := ev["@"].(string); ok {
+			b.WriteString("@" + marker + "@\n")
 			continue
 		}
 		seq++

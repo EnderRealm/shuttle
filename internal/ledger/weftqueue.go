@@ -12,11 +12,13 @@ import (
 
 // The admission queue's vocabulary (weft-service/v2 §6.3).
 const (
-	WeftEntryLaunch   = "launch"
-	WeftEntryFrontier = "frontier"
-	WeftEntryAnswer   = "answer"
-	WeftEntryResume   = "resume"
-	WeftEntryFresh    = "fresh"
+	WeftEntryLaunch    = "launch"
+	WeftEntryFrontier  = "frontier"
+	WeftEntryAnswer    = "answer"
+	WeftEntryResume    = "resume"
+	WeftEntryFresh     = "fresh"
+	WeftEntryReconcile = "reconcile"
+	WeftEntryCleanup   = "cleanup"
 
 	WeftEntryWaiting     = "waiting"
 	WeftEntryDispatched  = "dispatched"
@@ -32,6 +34,8 @@ const (
 	WeftInvalidTicket  = "ticket_ineligible"
 	WeftInvalidBinding = "binding_changed"
 	WeftInvalidRun     = "run_changed"
+	WeftInvalidArchive = "archive_refused"
+	WeftInvalidCleanup = "cleanup_refused"
 
 	// WeftRecordedV2 is the protocol a run admitted through the queue is
 	// recorded under, whatever worker contract its segments launch with.
@@ -46,11 +50,13 @@ const (
 	weftQueueRevisionKey = "queue_revision"
 )
 
-// weftRunningSQL counts the slots in use (§6.1): every dispatched segment the
-// host has not yet reaped — its phase-1 row still claimed or running, so a
-// parked run, which has no process, holds none — and every archiving entry.
+// weftRunningSQL counts the slots in use (§6.1): every dispatched pipeline
+// segment the host has not yet reaped — its phase-1 row still claimed or
+// running, so a parked run, which has no process, holds none — and every
+// archiving entry. Reconcile, cleanup and archive workers launch no model and
+// hold no slot of their own.
 const weftRunningSQL = `SELECT (SELECT count(*) FROM weft_segments s JOIN runs r ON r.id=s.ledger_run_id
-	WHERE r.status IN ('` + StatusClaimed + `','` + StatusRunning + `'))
+	WHERE s.kind IN ` + weftPipelineKinds + ` AND r.status IN ('` + StatusClaimed + `','` + StatusRunning + `'))
 	+ (SELECT count(*) FROM weft_entries WHERE state='` + WeftEntryArchiving + `')`
 
 // WeftRefusal is a command the queue refuses with one of weft-service/v2
@@ -436,7 +442,7 @@ func (t *WeftTx) change(action string, e *WeftEntry, runID, detail string) {
 // key admitted it.
 type WeftAdmission struct {
 	Kind, Ticket, Project, RepositoryID, Repository string
-	SelectionID, RunID, AnswerID                    string
+	SelectionID, RunID, AnswerID, Supersedes        string
 	TokenID, RequestKey                             string
 }
 
@@ -486,11 +492,11 @@ func (t *WeftTx) AdmitFrontier(project string, items []WeftAdmission) (string, [
 }
 
 // guard is §6.2's per-ticket guard: no other run of the ticket starting,
-// running or parked, and no entry of it waiting or archiving.
+// running, parked or settling, and no entry of it waiting or archiving.
 func (t *WeftTx) guard(ticket, runID string) error {
 	var other, phase string
-	err := t.tx.QueryRow(`SELECT id,phase FROM weft_runs WHERE ticket=? AND id<>? AND phase IN (?,?,?)
-		ORDER BY created_at LIMIT 1`, ticket, runID, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked).Scan(&other, &phase)
+	err := t.tx.QueryRow(`SELECT id,phase FROM weft_runs WHERE ticket=? AND id<>? AND phase IN (?,?,?,?)
+		ORDER BY created_at LIMIT 1`, ticket, runID, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked, WeftPhaseSettling).Scan(&other, &phase)
 	switch {
 	case err == nil:
 		return refuse("ticket_in_flight", "%s has run %s, which is %s", ticket, other, WeftV2Phase(phase))
@@ -511,17 +517,8 @@ func (t *WeftTx) guard(ticket, runID string) error {
 }
 
 func (t *WeftTx) insertEntry(a WeftAdmission) (*WeftEntry, error) {
-	now := t.store.now()
-	stamp := weftTimestamp(now)
-	id, err := newRemoteID("e", now)
+	id, err := insertEntryTx(t.tx, a, WeftEntryWaiting, t.store.now())
 	if err != nil {
-		return nil, err
-	}
-	if _, err := t.tx.Exec(`INSERT INTO weft_entries(id,kind,ticket,project,repository_id,repository,selection_id,
-		position,state,run_id,answer_id,token_id,request_key,created_at,updated_at,revision)
-		VALUES(?,?,?,?,?,?,?,(SELECT COALESCE(MAX(position),0)+1 FROM weft_entries),?,?,?,?,?,?,?,1)`,
-		id, a.Kind, a.Ticket, a.Project, a.RepositoryID, a.Repository, nullString(a.SelectionID),
-		WeftEntryWaiting, nullString(a.RunID), nullString(a.AnswerID), a.TokenID, a.RequestKey, stamp, stamp); err != nil {
 		return nil, err
 	}
 	t.admitted[id] = true
@@ -549,6 +546,9 @@ func (t *WeftTx) RecordAnswer(runID, questionID, text string, a WeftAdmission) (
 	}
 	if run.ActionRequired.String == WeftActionStaleBase {
 		return nil, nil, staleBase(run)
+	}
+	if err := t.refuseUnderCleanup(runID); err != nil {
+		return nil, nil, err
 	}
 	question, err := weftQuestion(t.tx, questionID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -612,6 +612,23 @@ func (t *WeftTx) RecordAnswer(runID, questionID, text string, a WeftAdmission) (
 	return question, entry, nil
 }
 
+// insertEntryTx inserts an entry in state at the next global position. An
+// entry the host admits itself has no request behind it, and empty token and
+// key say so.
+func insertEntryTx(tx *sql.Tx, a WeftAdmission, state string, now time.Time) (string, error) {
+	stamp := weftTimestamp(now)
+	id, err := newRemoteID("e", now)
+	if err != nil {
+		return "", err
+	}
+	_, err = tx.Exec(`INSERT INTO weft_entries(id,kind,ticket,project,repository_id,repository,selection_id,
+		position,state,run_id,supersedes,answer_id,token_id,request_key,created_at,updated_at,revision)
+		VALUES(?,?,?,?,?,?,?,(SELECT COALESCE(MAX(position),0)+1 FROM weft_entries),?,?,?,?,?,?,?,?,1)`,
+		id, a.Kind, a.Ticket, a.Project, a.RepositoryID, a.Repository, nullString(a.SelectionID),
+		state, nullString(a.RunID), nullString(a.Supersedes), nullString(a.AnswerID), a.TokenID, a.RequestKey, stamp, stamp)
+	return id, err
+}
+
 func notPending(q *WeftQuestion, runID string) error {
 	if q.RunID != runID {
 		return refuse("question_not_pending", "%s is not run %s's question: it was asked by run %s", q.ID, runID, q.RunID)
@@ -647,11 +664,21 @@ func (t *WeftTx) AdmitResume(runID string, revision int64, worktreeExists func(s
 	if err := loadWeftChildren(t.tx, run); err != nil {
 		return nil, err
 	}
+	if run.Origin == WeftOriginArchive {
+		return nil, refuse("run_not_resumable", "run %s is legacy history imported from archive %s and is never resumed",
+			runID, run.ArchiveID.String)
+	}
 	if run.Revision != revision {
 		return nil, refuse("revision_conflict", "run %s is at revision %d and the request was for %d", runID, run.Revision, revision)
 	}
 	if run.ActionRequired.String == WeftActionStaleBase {
 		return nil, staleBase(run)
+	}
+	if run.Disposition == WeftDispositionArchived {
+		return nil, refuse("run_not_resumable", "run %s is archived, superseded by %s", runID, run.SupersededBy.String)
+	}
+	if err := t.refuseUnderCleanup(runID); err != nil {
+		return nil, err
 	}
 	a.Kind = WeftEntryResume
 	switch {
@@ -708,8 +735,9 @@ func (t *WeftTx) AdmitResume(runID string, revision int64, worktreeExists func(s
 
 // StopRun stops the run, and only the run (§6.3, §6.6). A parked run is
 // ended here, its pending question withdrawn and its waiting answer or resume
-// entry invalidated run_changed; a live one is marked stopped and live is
-// true: the caller then asks the process to stop.
+// entry invalidated run_changed; a live one is marked stopped — a settling
+// one is left to report how far its landing got — and live is true: the
+// caller then asks the process to stop.
 func (t *WeftTx) StopRun(runID string, revision int64) (live bool, err error) {
 	run, err := getWeftRunTx(t.tx, runID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -725,6 +753,19 @@ func (t *WeftTx) StopRun(runID string, revision int64) (live bool, err error) {
 		return false, refuse("revision_conflict", "run %s is at revision %d and the request was for %d", runID, run.Revision, revision)
 	}
 	stamp := t.Stamp()
+	if run.Phase == WeftPhaseSettling {
+		// A landing in flight finishes the step it is taking and takes no
+		// other; its ended reads not_landed stopped, which pauses its
+		// repository (§6.6). The grade it landed under stands, so the outcome
+		// is left as it is. The stop lasts the attempt: a reconcile of a
+		// landing lost after it, or after a restart, gets no step
+		// acknowledged either.
+		if _, err := t.tx.Exec(`UPDATE weft_runs SET stopped=1,updated_at=?,revision=revision+1 WHERE id=?`,
+			stamp, runID); err != nil {
+			return false, err
+		}
+		return true, appendRunEventTx(t.tx, runID, stamp)
+	}
 	if run.Phase != WeftPhaseParked {
 		return true, markWeftStoppedTx(t.tx, runID, stamp)
 	}
@@ -822,6 +863,9 @@ func (t *WeftTx) SetCapacity(capacity int, revision int64) error {
 // WeftDispatch is what dispatch needs from the host.
 type WeftDispatch struct {
 	WeftRoot, RunDirRoot string
+	// Land is whether the host serves landing: a run minted while it does is
+	// pending its landing from the start (§7.1).
+	Land bool
 	// Check revalidates an entry against tk and its project's binding as they
 	// are now, answering an invalidation reason and detail, or "" when the
 	// entry may still dispatch.
@@ -869,28 +913,30 @@ func (t *WeftTx) Dispatch(d WeftDispatch) error {
 			}
 			continue
 		}
-		dispatched, err := t.dispatch(e, d)
+		slot, err := t.dispatch(e, d)
 		if err != nil {
 			return err
 		}
-		if dispatched {
+		if slot {
 			c.Running++
 		}
 	}
 	return nil
 }
 
-// blocking is the first wait that applies to the entry (§6.3).
+// blocking is the first wait that applies to the entry (§6.3). Reconcile and
+// cleanup entries ignore a landing pause and hold no slot (§6.1, §7.5).
 func (t *WeftTx) blocking(e *WeftEntry, paused bool, c WeftCapacity) (reason, holderKind, holderID string, err error) {
 	if paused {
 		return WeftWaitHostPaused, "", "", nil
 	}
+	repair := e.Kind == WeftEntryReconcile || e.Kind == WeftEntryCleanup
 	var dispatch string
 	err = t.tx.QueryRow(`SELECT dispatch FROM weft_repositories WHERE repository_id=?`, e.RepositoryID).Scan(&dispatch)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", "", "", err
 	}
-	if dispatch == "paused" {
+	if dispatch == WeftDispatchPaused && !repair {
 		return WeftWaitRepositoryPaused, "", "", nil
 	}
 	err = t.tx.QueryRow(`SELECT holder_kind,holder_id FROM weft_reservations WHERE repository_id=?`, e.RepositoryID).
@@ -901,7 +947,7 @@ func (t *WeftTx) blocking(e *WeftEntry, paused bool, c WeftCapacity) (reason, ho
 	case !errors.Is(err, sql.ErrNoRows):
 		return "", "", "", err
 	}
-	if c.Running >= c.Cap {
+	if c.Running >= c.Cap && !repair {
 		return WeftWaitCapacity, "", "", nil
 	}
 	return "", "", "", nil
@@ -935,7 +981,11 @@ func (t *WeftTx) revalidate(e *WeftEntry, check func(*WeftEntry) (string, string
 	if reason, detail := check(e); reason != "" {
 		return reason, detail, nil
 	}
-	if e.Kind != WeftEntryAnswer && e.Kind != WeftEntryResume {
+	switch e.Kind {
+	case WeftEntryReconcile, WeftEntryCleanup, WeftEntryFresh:
+		return t.revalidateMaintenance(e)
+	case WeftEntryAnswer, WeftEntryResume:
+	default:
 		return "", "", nil
 	}
 	run, err := getWeftRunTx(t.tx, e.RunID.String)
@@ -981,24 +1031,69 @@ func (t *WeftTx) invalidate(e *WeftEntry, reason, detail string) error {
 	return queueStepTx(t.tx, stamp, true, e.ID)
 }
 
+// mintSettlement is the settlement a run minted now starts with (§2.4, §7.1).
+func (d WeftDispatch) mintSettlement() (string, string) {
+	if d.Land {
+		return WeftSettlementPending, ""
+	}
+	return WeftSettlementNone, WeftLandingNotServed
+}
+
 // dispatch takes the entry's reservation and slot in this transaction: a
 // launch or frontier entry mints its run, an answer or resume claims its
-// run's next segment, and the entry is marked dispatched with the run.
+// run's next segment, a reconcile, cleanup or fresh entry its maintenance
+// worker's segment, and the entry is marked dispatched with the run — or, for
+// fresh, archiving. It answers whether a slot was taken.
 func (t *WeftTx) dispatch(e *WeftEntry, d WeftDispatch) (bool, error) {
 	now := t.store.now()
 	stamp := weftTimestamp(now)
 	var runID string
 	switch e.Kind {
+	case WeftEntryReconcile, WeftEntryCleanup, WeftEntryFresh:
+		if t.admitted[e.ID] {
+			stamp = e.UpdatedAt
+		}
+		runID, slot, err := t.dispatchMaintenance(e, d, stamp)
+		if errors.Is(err, ErrWeftSegmentLimit) {
+			target := e.RunID.String
+			if e.Kind == WeftEntryFresh {
+				target = e.Supersedes.String
+			}
+			return false, t.invalidate(e, WeftInvalidRun, fmt.Sprintf("run %s has claimed all %d segments", target, WeftSegmentLimit))
+		}
+		if err != nil {
+			return false, err
+		}
+		revision, err := bumpQueueRevisionTx(t.tx)
+		if err != nil {
+			return false, err
+		}
+		if err := appendQueueEventTx(t.tx, e.ID, revision, stamp); err != nil {
+			return false, err
+		}
+		if err := appendRunEventTx(t.tx, runID, stamp); err != nil {
+			return false, err
+		}
+		if err := appendCapacityEventTx(t.tx, revision, stamp); err != nil {
+			return false, err
+		}
+		t.Spawn = append(t.Spawn, runID)
+		t.change("dispatched", e, runID, "")
+		return slot, nil
 	case WeftEntryLaunch, WeftEntryFrontier:
 		worktree, err := sandbox.WorktreePath(d.WeftRoot, e.Repository, e.Ticket)
 		if err != nil {
 			return false, t.invalidate(e, WeftInvalidBinding, fmt.Sprintf("%s cannot be resolved: %v", e.Repository, err))
 		}
+		settlement, detail := d.mintSettlement()
 		runID, err = mintWeftRunTx(t.tx, WeftLaunch{
 			Ticket: e.Ticket, Project: e.Project, Repo: e.Repository, Branch: e.Ticket,
 			Worktree: worktree, RunDirRoot: d.RunDirRoot,
-		}, now, e.ID, WeftRecordedV2, WeftLandingNotServed)
+		}, now, e.ID, WeftRecordedV2, settlement, detail)
 		if err != nil {
+			return false, err
+		}
+		if err := acquireRepository(t.tx, e.RepositoryID, e.Repository, WeftHolderRun, runID, stamp); err != nil {
 			return false, err
 		}
 	case WeftEntryAnswer, WeftEntryResume:
@@ -1114,7 +1209,9 @@ const weftInFlightSQL = `EXISTS (SELECT 1 FROM weft_segments s JOIN runs r ON r.
 // refs/weft/archive/<run> names in the repository, or "" when absent. At the
 // superseded run's head, the maintenance → run transaction of §6.7 runs and
 // its new run is named in spawn; otherwise the row and slot are released and
-// the entry waits again. Nothing interrupted is relaunched.
+// the entry waits again. Nothing interrupted is relaunched: spawn names only
+// those new runs and the runs whose reconcile step 2 claimed, which the
+// caller starts before dispatch.
 func (s *Store) RestartWeftQueue(d WeftDispatch, archiveHead func(repo, ref string) (string, error)) (released []WeftReservation, changes []WeftChange, spawn []string, err error) {
 	err = s.WeftTx(func(t *WeftTx) error {
 		rows, err := t.tx.Query(`SELECT repository_id,repository,holder_kind,holder_id,acquired_at FROM weft_reservations
@@ -1142,7 +1239,7 @@ func (s *Store) RestartWeftQueue(d WeftDispatch, archiveHead func(repo, ref stri
 			if !gone {
 				continue
 			}
-			if _, err := t.tx.Exec(`DELETE FROM weft_reservations WHERE repository_id=? AND holder_kind=? AND holder_id=?`,
+			if err := releaseRepositoriesTx(t.tx, t.Stamp(), `repository_id=? AND holder_kind=? AND holder_id=?`,
 				r.RepositoryID, r.HolderKind, r.HolderID); err != nil {
 				return err
 			}
@@ -1153,9 +1250,37 @@ func (s *Store) RestartWeftQueue(d WeftDispatch, archiveHead func(repo, ref stri
 			return err
 		}
 		for _, e := range archiving {
-			if err := t.settleArchiving(e, d, archiveHead); err != nil {
+			var live bool
+			if err := t.tx.QueryRow(`SELECT `+weftInFlightSQL, e.Supersedes.String).Scan(&live); err != nil {
 				return err
 			}
+			if live {
+				continue
+			}
+			ref := WeftArchiveRef(e.Supersedes.String)
+			head, err := archiveHead(e.Repository, ref)
+			if err != nil {
+				return fmt.Errorf("entry %s: read %s in %s: %w", e.ID, ref, e.Repository, err)
+			}
+			if err := t.settleArchiving(e, d, head); err != nil {
+				return err
+			}
+		}
+		rows, err = t.tx.Query(`SELECT s.run_id FROM weft_segments s JOIN runs r ON r.id=s.ledger_run_id
+			WHERE s.kind=? AND r.status=? ORDER BY r.claimed_at`, WeftSegmentReconcile, StatusClaimed)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var runID string
+			if err := rows.Scan(&runID); err != nil {
+				rows.Close()
+				return err
+			}
+			t.Spawn = append(t.Spawn, runID)
+		}
+		if err := rows.Close(); err != nil {
+			return err
 		}
 		changes, spawn = t.Changes, t.Spawn
 		return nil
@@ -1173,6 +1298,9 @@ func (t *WeftTx) holderGone(r WeftReservation) (bool, error) {
 		err := t.tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM weft_terminals WHERE repository_id=?
 			AND state IN ('starting','live','detached'))`, r.RepositoryID).Scan(&live)
 		return !live, err
+	case WeftHolderSettlement:
+		// Kept for the reconcile step 2 dispatched under it, which releases it.
+		return false, nil
 	case "maintenance":
 		var state string
 		var run sql.NullString
@@ -1189,28 +1317,25 @@ func (t *WeftTx) holderGone(r WeftReservation) (bool, error) {
 	return false, nil
 }
 
-func (t *WeftTx) settleArchiving(e *WeftEntry, d WeftDispatch, archiveHead func(repo, ref string) (string, error)) error {
+// settleArchiving is §6.7's settlement of a fresh entry whose archive step
+// is over, by the head the archive ref names ("" when absent). At the
+// head the entry archives at, ONE transaction mints the new run, rewrites the
+// maintenance row in place to the run holder, marks the entry dispatched and
+// ends the old run archived; the slot is carried, so no capacity event is
+// written. Otherwise the row and slot are released and the entry waits again.
+func (t *WeftTx) settleArchiving(e *WeftEntry, d WeftDispatch, head string) error {
 	old := e.Supersedes.String
-	var live bool
-	if err := t.tx.QueryRow(`SELECT `+weftInFlightSQL, old).Scan(&live); err != nil || live {
-		return err
-	}
-	run, err := getWeftRunTx(t.tx, old)
-	if err != nil {
-		return err
-	}
-	ref := "refs/weft/archive/" + old
-	head, err := archiveHead(e.Repository, ref)
-	if err != nil {
-		return fmt.Errorf("entry %s: read %s in %s: %w", e.ID, ref, e.Repository, err)
-	}
+	ref := WeftArchiveRef(old)
 	now := t.store.now()
 	stamp := weftTimestamp(now)
-	if _, err := t.tx.Exec(`DELETE FROM weft_reservations WHERE repository_id=? AND holder_kind='maintenance' AND holder_id=?`,
-		e.RepositoryID, e.ID); err != nil {
+	want, err := weftArchiveHead(t.tx, e.ID)
+	if err != nil {
 		return err
 	}
-	if head == "" || head != run.Head.String {
+	if head == "" || head != want {
+		if err := releaseRepositoriesTx(t.tx, stamp, `holder_kind=? AND holder_id=?`, WeftHolderMaintenance, e.ID); err != nil {
+			return err
+		}
 		paused, _, _, err := weftHostPaused(t.tx)
 		if err != nil {
 			return err
@@ -1230,25 +1355,56 @@ func (t *WeftTx) settleArchiving(e *WeftEntry, d WeftDispatch, archiveHead func(
 			revision=revision+1 WHERE id=?`, WeftEntryWaiting, reason, nullString(holderKind), nullString(holderID), stamp, e.ID); err != nil {
 			return err
 		}
-		t.change("archive_absent", e, old, ref+" does not name "+run.Head.String)
+		t.change("archive_absent", e, old, ref+" does not name "+want)
 		return queueStepTx(t.tx, stamp, true, e.ID)
 	}
 	worktree, err := sandbox.WorktreePath(d.WeftRoot, e.Repository, e.Ticket)
 	if err != nil {
 		return err
 	}
+	settlement, detail := d.mintSettlement()
 	runID, err := mintWeftRunTx(t.tx, WeftLaunch{
 		Ticket: e.Ticket, Project: e.Project, Repo: e.Repository, Branch: e.Ticket,
 		Worktree: worktree, RunDirRoot: d.RunDirRoot,
-	}, now, e.ID, WeftRecordedV2, WeftLandingNotServed)
+	}, now, e.ID, WeftRecordedV2, settlement, detail)
+	if err != nil {
+		return err
+	}
+	res, err := t.tx.Exec(`UPDATE weft_reservations SET holder_kind=?,holder_id=?,acquired_at=? WHERE repository_id=?
+		AND holder_kind=? AND holder_id=?`, WeftHolderRun, runID, stamp, e.RepositoryID, WeftHolderMaintenance, e.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 1 {
+		err = repositoryStepTx(t.tx, e.RepositoryID, e.Repository, stamp)
+	} else {
+		err = acquireRepository(t.tx, e.RepositoryID, e.Repository, WeftHolderRun, runID, stamp)
+	}
 	if err != nil {
 		return err
 	}
 	if _, err := t.tx.Exec(`UPDATE weft_runs SET supersedes=? WHERE id=?`, old, runID); err != nil {
 		return err
 	}
+	pending, err := pendingWeftQuestion(t.tx, old)
+	switch {
+	case err == nil:
+		if _, err := t.tx.Exec(`UPDATE weft_questions SET state='withdrawn' WHERE id=?`, pending.ID); err != nil {
+			return err
+		}
+		withdrawn, err := getQuestionTx(t.tx, pending.ID)
+		if err != nil {
+			return err
+		}
+		if err := appendQuestionEventTx(t.tx, withdrawn, stamp); err != nil {
+			return err
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
 	if _, err := t.tx.Exec(`UPDATE weft_runs SET phase=?,outcome='stopped',stopped=1,disposition=?,superseded_by=?,
-		archive_ref=?,ended_at=COALESCE(ended_at,?),updated_at=?,revision=revision+1 WHERE id=?`,
+		archive_ref=?,action_required=NULL,action_detail=NULL,ended_at=COALESCE(ended_at,?),updated_at=?,
+		revision=revision+1 WHERE id=?`,
 		WeftPhaseEnded, WeftDispositionArchived, runID, ref, stamp, stamp, old); err != nil {
 		return err
 	}
@@ -1263,8 +1419,22 @@ func (t *WeftTx) settleArchiving(e *WeftEntry, d WeftDispatch, archiveHead func(
 	if err := appendRunEventTx(t.tx, runID, stamp); err != nil {
 		return err
 	}
+	if _, err := settleUngradedTx(t.tx, old); err != nil {
+		return err
+	}
 	if err := appendRunEventTx(t.tx, old, stamp); err != nil {
 		return err
+	}
+	// A retry of the archived run's landing waiting here would reconcile
+	// superseded work.
+	retries, err := loadWeftEntries(t.tx, `state=? AND kind=? AND run_id=?`, WeftEntryWaiting, WeftEntryReconcile, old)
+	if err != nil {
+		return err
+	}
+	for _, retry := range retries {
+		if err := t.invalidate(retry, WeftInvalidRun, fmt.Sprintf("run %s was archived, superseded by %s", old, runID)); err != nil {
+			return err
+		}
 	}
 	t.Spawn = append(t.Spawn, runID)
 	t.change("dispatched", e, runID, "archived "+old+" at "+ref)

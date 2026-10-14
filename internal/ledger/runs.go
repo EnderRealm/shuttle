@@ -34,6 +34,9 @@ const (
 	SkipOverlap = "overlap"
 	SkipPaused  = "paused"
 	SkipLimit   = "limit"
+	// SkipRefused is a weft maintenance segment refused before launch: a
+	// refusal, not a failure, so it counts toward no failure streak.
+	SkipRefused = "refused"
 )
 
 // Delivery statuses. A separate column from the run status on purpose (§6.1):

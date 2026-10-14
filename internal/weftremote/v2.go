@@ -27,9 +27,10 @@ type capability struct {
 	Reason string
 }
 
-// developmentalCapabilities mirrors docs/service-v2/service-developmental.json,
-// the first developmental slice (§2.4), in the contract's order. output is
-// gated by the worker probe instead (outputGate).
+// developmentalCapabilities is §2.3's list in the contract's order, as
+// docs/service-v2/service-developmental.json began it (§2.4). output, landing
+// and cleanup are gated by the worker probe instead (workerGate); archive
+// import is the host's alone and served.
 var developmentalCapabilities = []capability{
 	{ID: "dashboard"},
 	{ID: "catalog"},
@@ -40,11 +41,11 @@ var developmentalCapabilities = []capability{
 	{ID: "control"},
 	{ID: "output"},
 	{ID: "history"},
-	{ID: "landing", Reason: "not served by this host build: runs end with their branch unlanded until shuttle/reconcile-hosted-landing-5675 and weft/expose-recoverable-hosted-b935"},
-	{ID: "cleanup", Reason: "not served by this host build: dismiss and fresh work arrive with shuttle/reconcile-hosted-landing-5675; until then a run refused prior_run or stale_base stays retained and its ticket cannot be relaunched through the service"},
+	{ID: "landing"},
+	{ID: "cleanup"},
 	{ID: "terminals", Reason: "not served by this host build: hosted terminals arrive with shuttle/host-terminal-sessions-bbbe; until then a stale branch cannot be resolved by hand through the service"},
 	{ID: "folders", Reason: "not served by this host build: the host folder picker arrives with shuttle/host-terminal-sessions-bbbe"},
-	{ID: "archive", Reason: "not served by this host build: legacy archive import arrives with weft/migrate-local-history-7d8d"},
+	{ID: "archive"},
 	{ID: "trial_launch", Reason: "not served by this host build: checkout launches arrive with warp/host-weft-worker-cd59"},
 }
 
@@ -81,22 +82,27 @@ func unspokenVersion(segment string) bool {
 // capabilities is §2.3's list as this host serves it now.
 func (s *Service) capabilities() []capability {
 	listed := slices.Clone(developmentalCapabilities)
+	worker := s.segments.worker.Load()
 	for i := range listed {
-		if listed[i].ID == "output" {
-			listed[i].Reason = s.outputGate()
+		switch listed[i].ID {
+		case "output":
+			listed[i].Reason = s.workerGate(worker, "stage output and liveness need", "output", "liveness")
+		case "landing":
+			listed[i].Reason = s.workerGate(worker, "landing needs", "land", "reconcile")
+		case "cleanup":
+			listed[i].Reason = s.workerGate(worker, "dismiss and fresh work need", "cleanup", "archive")
 		}
 	}
 	return listed
 }
 
-// outputGate is why output is not served, or "" when it is: it needs a
-// worker that speaks weft-worker/v2 with the output and liveness
-// capabilities (§2.3, §2.6).
-func (s *Service) outputGate() string {
-	const needs = "not served by this host: stage output and liveness need a worker speaking " + WorkerContractV2 +
-		" with the output and liveness capabilities, and "
+// workerGate is why a host capability that needs worker capabilities is not
+// served, or "" when it is: it needs a worker that speaks weft-worker/v2 with
+// every one of them (§2.3, §2.6).
+func (s *Service) workerGate(worker *workerInfo, what string, needed ...string) string {
+	needs := "not served by this host: " + what + " a worker speaking " + WorkerContractV2 +
+		" with the " + strings.Join(needed, " and ") + " capabilities, and "
 	bin := s.cfg.Weft.WorkerBin
-	worker := s.segments.worker.Load()
 	switch {
 	case worker == nil:
 		return needs + bin + " has not been probed yet"
@@ -106,7 +112,7 @@ func (s *Service) outputGate() string {
 		return needs + bin + " (" + worker.Version + ") speaks only " + strings.Join(worker.Contracts, " and ")
 	}
 	var missing []string
-	for _, c := range []string{"output", "liveness"} {
+	for _, c := range needed {
 		if !worker.has(c) {
 			missing = append(missing, c)
 		}
@@ -178,6 +184,12 @@ func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 		s.handleV2Question(w, strings.TrimPrefix(path, "/v2/questions/"))
 	case r.Method == http.MethodGet && path == "/v2/events":
 		s.handleV2Events(w, r)
+	case r.Method == http.MethodGet && path == "/v2/repositories":
+		s.handleRepositories(w)
+	case r.Method == http.MethodPost && repositoryContinue.MatchString(path):
+		s.handleContinue(w, r, repositoryContinue.FindStringSubmatch(path)[1])
+	case r.Method == http.MethodPost && path == "/v2/archives":
+		s.handleArchiveImport(w, r)
 	default:
 		s.v2Error(w, http.StatusNotFound, "malformed", r.Method+" "+path+" is not a weft-service/v2 route on host "+s.hostID)
 	}

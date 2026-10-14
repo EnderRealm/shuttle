@@ -313,7 +313,7 @@ func TestSchemaTwoMigrationKeepsStageAttemptsAndProvenance(t *testing.T) {
 }
 
 // A ledger stamped 3 by the build before run visibility gains its tables and
-// columns, and its runs read.
+// columns, and every later schema's, and its runs read.
 func TestSchemaThreeMigratesToFour(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runs.db")
 	schemaTwo(t, path, "")
@@ -345,7 +345,7 @@ func TestSchemaThreeMigratesToFour(t *testing.T) {
 	}
 	defer s.Close()
 	var version string
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "4" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "5" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	run, err := s.GetWeftRun("r-20260913T142233Z-6b2f0c1a")

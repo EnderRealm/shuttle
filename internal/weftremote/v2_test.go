@@ -596,14 +596,27 @@ func TestServiceDiscoveryMirrorsDevelopmentalSlice(t *testing.T) {
 	var want map[string]any
 	fixtureJSON(t, "service-developmental.json", &want)
 	got, slice := doc["service"].(map[string]any), want["service"].(map[string]any)
-	// output is gated by the worker probe (§2.6): unprobed, it is not served
-	// and says what it needs, where the fixture names the ticket that adds it.
+	// output, landing and cleanup are gated by the worker probe (§2.6):
+	// unprobed, each is not served and says what it needs, where the fixture
+	// names the ticket that adds it. Archive import is the host's own and is
+	// served (§14.3). The rest is the slice as the fixture declares it.
+	fixtureReasons := map[string]any{}
+	for _, c := range slice["capabilities"].([]any) {
+		fixtureReasons[c.(map[string]any)["id"].(string)] = c.(map[string]any)["reason"]
+	}
 	for _, c := range got["capabilities"].([]any) {
-		if c := c.(map[string]any); c["id"] == "output" {
+		c := c.(map[string]any)
+		switch c["id"] {
+		case "output", "landing", "cleanup":
 			if c["state"] != "not_served" || !strings.Contains(c["reason"].(string), "has not been probed yet") {
-				t.Errorf("unprobed output = %v", c)
+				t.Errorf("unprobed %s = %v", c["id"], c)
 			}
-			c["reason"] = "not served by this host build: stage output and liveness arrive with shuttle/serve-hosted-run-6a0b and weft/stream-hosted-output-f94e"
+			c["reason"] = fixtureReasons[c["id"].(string)]
+		case "archive":
+			if c["state"] != "served" || c["reason"] != nil {
+				t.Errorf("archive = %v", c)
+			}
+			c["state"], c["reason"] = "not_served", fixtureReasons["archive"]
 		}
 	}
 	for _, key := range []string{"service_versions", "worker_versions", "conformance", "capabilities", "limits"} {
@@ -662,8 +675,6 @@ func TestServiceRefusesUnauthorizedUnspokenAndNotServed(t *testing.T) {
 		{http.MethodGet, "/v2/terminals/t-1/attach", "terminals"},
 		{http.MethodPost, "/v2/terminals/t-1/close", "terminals"},
 		{http.MethodGet, "/v2/folders", "folders"},
-		{http.MethodPost, "/v2/archives", "archive"},
-		{http.MethodGet, "/v2/runs?origin=archive", "archive"},
 	} {
 		body := s.errorBody(route.method, route.path, http.StatusNotImplemented, "capability_not_served")
 		shape.check(t, route.path, body)
@@ -1407,7 +1418,7 @@ func TestStateStreamCarriesV2RunEvents(t *testing.T) {
 		samples[name] = append(samples[name], more...)
 	}
 	previous := int64(0)
-	for i, name := range []string{"run", "run", "stage", "question", "run"} {
+	for i, name := range []string{"repository", "run", "run", "stage", "question", "run"} {
 		ev := str.next(t)
 		if ev.name != name {
 			t.Fatalf("event %d = %s, want %s", i, ev.name, name)
@@ -1419,7 +1430,7 @@ func TestStateStreamCarriesV2RunEvents(t *testing.T) {
 			t.Fatalf("event %s id %s = %v", ev.name, ev.id, doc)
 		}
 		previous = seq
-		if i == 0 && (doc["run_id"] != run.ID || doc["phase"] != "starting" || doc["landing"] != "not_applicable" ||
+		if i == 1 && (doc["run_id"] != run.ID || doc["phase"] != "starting" || doc["landing"] != "not_applicable" ||
 			doc["disposition"] != "retained" || doc["revision"] != float64(1)) {
 			t.Errorf("claimed run event = %v", doc)
 		}

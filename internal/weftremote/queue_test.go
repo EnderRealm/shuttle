@@ -35,6 +35,8 @@ type queueHost struct {
 	control  string
 	projects map[string]string
 	logs     *syncBuffer
+	// capabilities are what a weft-worker/v2 fixture worker's probe lists.
+	capabilities []any
 }
 
 type syncBuffer struct {

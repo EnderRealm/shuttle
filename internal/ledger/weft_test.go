@@ -235,10 +235,17 @@ func TestWeftRunParksAnswersAndResumesDurably(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 8 {
-		t.Fatalf("events = %d, want launch, hello, stage, question, park, the reap's capacity, the answered question and the requeue", len(events))
+	var kinds []string
+	for _, event := range events {
+		kinds = append(kinds, event.Type)
 	}
-	if reaped := events[5]; reaped.Type != "capacity" || !strings.Contains(string(reaped.Payload), `"capacity":{"cap":3,"running":0,"waiting":0}`) {
+	// The repository events are its reservation taken by the launch, released
+	// at reap and taken again by the answer.
+	if want := []string{"repository", "run", "run", "stage", "question", "run", "repository", "capacity",
+		"repository", "question", "run"}; !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("events = %v, want %v", kinds, want)
+	}
+	if reaped := events[7]; reaped.Type != "capacity" || !strings.Contains(string(reaped.Payload), `"capacity":{"cap":3,"running":0,"waiting":0}`) {
 		t.Fatalf("reap recorded as %s %s", reaped.Type, reaped.Payload)
 	}
 	for _, event := range events {
@@ -246,7 +253,7 @@ func TestWeftRunParksAnswersAndResumesDurably(t *testing.T) {
 			t.Fatalf("event payload order = %s", event.Payload)
 		}
 	}
-	if answered := events[6]; answered.Type != "question" || !strings.Contains(string(answered.Payload), `"state":"answered"`) ||
+	if answered := events[9]; answered.Type != "question" || !strings.Contains(string(answered.Payload), `"state":"answered"`) ||
 		!strings.Contains(string(answered.Payload), `"entry_id":null`) {
 		t.Fatalf("answer recorded as %s %s", answered.Type, answered.Payload)
 	}
@@ -385,9 +392,9 @@ func TestRestartSettlesArchivingEntriesByTheirArchiveRef(t *testing.T) {
 		{"e-20261011T120000Z-00000003", "weft/cleaned-0003", cleaned, first.ID, WeftEntryCancelled},
 	} {
 		if _, err := s.db.Exec(`INSERT INTO weft_entries(id,kind,ticket,project,repository_id,repository,position,state,
-			supersedes,token_id,request_key,created_at,updated_at,revision)
-			VALUES(?,'fresh',?,'weft',?,?,?,?,?,'token','key','2026-10-11T12:00:00.000Z','2026-10-11T12:00:00.000Z',2)`,
-			e.id, e.ticket, sandboxID(e.repo), e.repo, i+1, e.state, e.supersedes); err != nil {
+			supersedes,archive_head,token_id,request_key,created_at,updated_at,revision)
+			VALUES(?,'fresh',?,'weft',?,?,?,?,?,?,'token','key','2026-10-11T12:00:00.000Z','2026-10-11T12:00:00.000Z',2)`,
+			e.id, e.ticket, sandboxID(e.repo), e.repo, i+1, e.state, e.supersedes, "head-"+e.supersedes); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.db.Exec(`INSERT INTO weft_reservations(repository_id,repository,holder_kind,holder_id,acquired_at)
@@ -465,7 +472,10 @@ func TestRestartSettlesArchivingEntriesByTheirArchiveRef(t *testing.T) {
 	for _, e := range events {
 		kinds = append(kinds, e.Type)
 	}
-	if !reflect.DeepEqual(kinds, []string{"queue", "run", "run", "queue", "capacity"}) {
+	// Step 4 releases the cleaned entry's row; step 5 rewrites the archived
+	// repository's row to its new run with one repository event and carries
+	// the slot, and releases the refused one's row and slot.
+	if !reflect.DeepEqual(kinds, []string{"repository", "repository", "queue", "run", "run", "repository", "queue", "capacity"}) {
 		t.Fatalf("events = %v", kinds)
 	}
 }

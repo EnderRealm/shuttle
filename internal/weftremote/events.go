@@ -18,6 +18,8 @@ type workerRead struct {
 	err      error
 	// stage is the last stage the worker reported, for diagnostics.
 	stage string
+	// archive is an archive worker's report, settled at reap.
+	archive *ledger.WeftArchiveReport
 }
 
 // segmentStream reads one segment's worker events (v1 §4.2, weft-worker/v2
@@ -40,21 +42,43 @@ type segmentStream struct {
 	// stage is the last stage reported, for diagnostics.
 	stage  string
 	chunks map[ledger.WeftAttempt]int
+	// land is whether the segment was launched with --land; active is its
+	// process, which acknowledgements are written to (§7.2).
+	land   bool
+	active *activeSegment
+	// landCommit and landBase are the graded head and the run's base, the
+	// only commit and base a landing step may be acknowledged for; intent is
+	// the step intended and not yet reported.
+	landCommit, landBase, intent string
+	// acked is whether the host acknowledged intent.
+	acked bool
+	// observed is a reconcile's reading; archive an archive's report.
+	observed *observedEvent
+	archive  *ledger.WeftArchiveReport
 }
 
 type eventHandler func(line []byte) error
 
-func (s *Supervisor) readEvents(run *ledger.WeftRun, segment ledger.WeftSegment, contract string, worker *workerInfo, stdout io.Reader, record io.Writer) workerRead {
+func (s *Supervisor) readEvents(run *ledger.WeftRun, segment ledger.WeftSegment, contract string, worker *workerInfo,
+	land bool, active *activeSegment, stdout io.Reader, record io.Writer) workerRead {
 	r := &segmentStream{
 		s: s, run: run, segment: segment, contract: contract, worker: worker,
-		seq: 1, first: true, chunks: map[ledger.WeftAttempt]int{},
+		seq: 1, first: true, chunks: map[ledger.WeftAttempt]int{}, land: land, active: active,
 	}
-	handlers := r.v1Handlers()
-	if contract == WorkerContractV2 {
+	var handlers map[string]eventHandler
+	switch {
+	case segment.Kind == ledger.WeftSegmentReconcile:
+		r.landCommit, r.landBase = reconcileCommit(run)
+		handlers = r.reconcileHandlers()
+	case segment.Kind == ledger.WeftSegmentCleanup || segment.Kind == ledger.WeftSegmentArchive:
+		handlers = map[string]eventHandler{"maintained": r.maintained}
+	case contract == WorkerContractV2:
 		handlers = r.v2Handlers()
+	default:
+		handlers = r.v1Handlers()
 	}
 	read := r.read(handlers, stdout, record)
-	read.stage = r.stage
+	read.stage, read.archive = r.stage, r.archive
 	return read
 }
 
@@ -104,15 +128,19 @@ func (r *segmentStream) v1Handlers() map[string]eventHandler {
 	}
 }
 
-// v2Handlers are a weft-worker/v2 segment's events (§11.3). Landing is not
-// served, so no segment is launched with --land and a landing event is a
+// v2Handlers are a weft-worker/v2 segment's events (§11.3). A segment
+// launched without --land takes no landing step, so its landing events are a
 // protocol failure.
 func (r *segmentStream) v2Handlers() map[string]eventHandler {
-	return map[string]eventHandler{
+	handlers := map[string]eventHandler{
 		"hello": r.helloV2, "stage": r.stageEvent, "output": r.output, "liveness": r.liveness,
 		"allowance": r.allowance, "parked": r.parked, "graded": r.gradedEvent, "ended": r.endedV2,
 		"land_intent": r.unlanded("land_intent"), "land_step_result": r.unlanded("land_step_result"),
 	}
+	if r.land {
+		handlers["land_intent"], handlers["land_step_result"] = r.landIntent, r.landStepResult
+	}
+	return handlers
 }
 
 func (r *segmentStream) envelope(e envelope) error {
@@ -173,13 +201,20 @@ func (r *segmentStream) helloV2(line []byte) error {
 	if r.worker == nil || event.WorkerVersion != r.worker.Version || !sameSet(event.Capabilities, r.worker.Capabilities) {
 		return fmt.Errorf("hello worker_version or capabilities differ from the probe's")
 	}
-	if event.Land {
+	if event.Land && !r.land {
 		return fmt.Errorf("hello reports land, but the segment was launched without --land")
+	}
+	if !event.Land && r.land {
+		return fmt.Errorf("hello does not report land, but the segment was launched with --land")
 	}
 	if event.Environment.TKStoreRoot != nil || event.Environment.WorkEvidenceDir != nil || !event.Registered {
 		return fmt.Errorf("hello reports a trial environment or unregistered checkout no launch named")
 	}
-	return r.recordHello(event.helloEvent)
+	r.workerID, r.landBase = event.WorkerRunID, event.Base
+	r.s.stateMu.Lock()
+	err := r.s.store.RecordWeftLandingHello(r.run.ID, r.segment.Segment, event.WorkerRunID, event.Base, event.Criteria, r.land)
+	r.s.stateMu.Unlock()
+	return err
 }
 
 func (r *segmentStream) checkHello(event helloEvent) error {
@@ -218,10 +253,12 @@ func (r *segmentStream) checkHello(event helloEvent) error {
 	return nil
 }
 
+// recordHello records a weft-remote/v1 hello: a segment that lands nothing,
+// whatever its run was minted expecting.
 func (r *segmentStream) recordHello(event helloEvent) error {
 	r.workerID = event.WorkerRunID
 	r.s.stateMu.Lock()
-	err := r.s.store.RecordWeftHello(r.run.ID, r.segment.Segment, event.WorkerRunID, event.Base, event.Criteria)
+	err := r.s.store.RecordWeftLandingHello(r.run.ID, r.segment.Segment, event.WorkerRunID, event.Base, event.Criteria, false)
 	r.s.stateMu.Unlock()
 	return err
 }
@@ -270,6 +307,12 @@ func (r *segmentStream) parked(line []byte) error {
 	}
 	if err := r.afterHello("parked"); err != nil {
 		return err
+	}
+	// A graded segment never parks: its run may already have landing steps,
+	// so the failure goes to reconciliation and no answer restarts the
+	// pipeline over them.
+	if r.graded != nil {
+		return fmt.Errorf("parked after graded")
 	}
 	if event.WorkerOutcome != "blocked" || event.Question == "" ||
 		len([]byte(event.Question)) > maxAnswerBytes || event.Occurrence < 1 || event.Attempt < 1 {
@@ -460,18 +503,25 @@ func (r *segmentStream) gradedEvent(line []byte) error {
 		haltStage, haltReason, haltDetail = event.Halt.Stage, event.Halt.Reason, event.Halt.Detail
 	}
 	r.s.stateMu.Lock()
-	err := r.s.store.RecordWeftEnded(r.run.ID, r.segment.Segment, event.Outcome, event.Stopped,
-		haltStage, haltReason, haltDetail, "", text(event.Detail), text(event.Head), event.Summary)
+	var err error
+	if r.land {
+		err = r.s.store.RecordWeftGraded(r.run.ID, r.segment.Segment, event.Outcome, event.Stopped,
+			haltStage, haltReason, haltDetail, text(event.Detail), text(event.Head), event.Summary)
+	} else {
+		err = r.s.store.RecordWeftEnded(r.run.ID, r.segment.Segment, event.Outcome, event.Stopped,
+			haltStage, haltReason, haltDetail, "", text(event.Detail), text(event.Head), event.Summary)
+	}
 	r.s.stateMu.Unlock()
 	if err != nil {
 		return err
 	}
-	r.graded = &event
+	r.graded, r.landCommit = &event, text(event.Head)
 	return nil
 }
 
 // endedV2 is the terminal event of a weft-worker/v2 segment: after graded it
-// repeats the outcome; with no graded before it, it is a refusal.
+// repeats the outcome, and a landing segment's carries the landing (§7.3);
+// with no graded before it, it is a refusal that landed nothing.
 func (r *segmentStream) endedV2(line []byte) error {
 	var event endedV2Event
 	if err := decodeEvent(line, &event, "ended"); err != nil {
@@ -484,12 +534,25 @@ func (r *segmentStream) endedV2(line []byte) error {
 	if !oneOf(event.Outcome, "finished", "halted", "failed", "stopped") {
 		return fmt.Errorf("ended outcome is not finished, halted, failed or stopped")
 	}
-	if event.Landing.State != ledger.WeftSettlementNone {
-		return fmt.Errorf("ended reports a landing other than not_applicable, but the segment was launched without --land")
+	landing := event.Landing.landing()
+	if landing.State != ledger.WeftSettlementNone && (!r.land || r.graded == nil) {
+		if !r.land {
+			return fmt.Errorf("ended reports a landing other than not_applicable, but the segment was launched without --land")
+		}
+		return fmt.Errorf("ended reports a landing with no graded before it")
 	}
 	if r.graded != nil {
 		if event.Outcome != r.graded.Outcome || event.Failure != nil {
 			return fmt.Errorf("ended does not repeat the graded outcome")
+		}
+		// A finished grade's landing ends only landed or not landed.
+		if r.land && r.graded.Outcome == "finished" && landing.State == ledger.WeftSettlementNone {
+			return fmt.Errorf("ended reports no landing after a finished grade")
+		}
+		if r.land {
+			if err := r.recordLanding(landing); err != nil {
+				return err
+			}
 		}
 		r.terminal = true
 		return nil
@@ -506,6 +569,13 @@ func (r *segmentStream) endedV2(line []byte) error {
 	r.s.stateMu.Unlock()
 	if err != nil {
 		return err
+	}
+	// A refused landing segment lands nothing: its run is not pending any
+	// landing.
+	if r.land {
+		if err := r.recordLanding(landing); err != nil {
+			return err
+		}
 	}
 	r.terminal = true
 	return nil
@@ -686,17 +756,10 @@ type gradedEvent struct {
 
 type endedV2Event struct {
 	envelope
-	Outcome string  `json:"outcome"`
-	Failure *string `json:"failure"`
-	Detail  *string `json:"detail"`
-	Landing struct {
-		State  string  `json:"state"`
-		Step   *string `json:"step"`
-		Reason *string `json:"reason"`
-		Detail *string `json:"detail"`
-		Branch *string `json:"branch"`
-		Commit *string `json:"commit"`
-	} `json:"landing"`
+	Outcome string        `json:"outcome"`
+	Failure *string       `json:"failure"`
+	Detail  *string       `json:"detail"`
+	Landing landingReport `json:"landing"`
 }
 
 // validateEnvelopeAt checks an event's envelope against the launched segment

@@ -9,7 +9,9 @@ package ledger
 // schemaVersion 3: weft-service/v2's host records (weft-service/v2 §6.9, §14.1).
 // schemaVersion 4: run visibility — output high-water marks, liveness, worker
 // contracts and allowance (weft-service/v2 §5.3, §8).
-const schemaVersion = 4
+// schemaVersion 5: landing — each project's repository binding and whether a
+// segment was launched to land (weft-service/v2 §6.2, §7).
+const schemaVersion = 5
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -27,7 +29,7 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at      TEXT,
   ended_at        TEXT,
   status          TEXT NOT NULL,         -- claimed | running | completed | failed | unknown | skipped
-  skip_reason     TEXT,                  -- missed | overlap | paused | limit
+  skip_reason     TEXT,                  -- missed | overlap | paused | limit | refused
   failure_class   TEXT,                  -- §7.6
   error_signature TEXT,                  -- normalised first line, for incidents
   pid             INTEGER,
@@ -267,4 +269,31 @@ CREATE TABLE weft_allowance (
 ALTER TABLE weft_runs ADD COLUMN output_cursor INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE weft_runs ADD COLUMN liveness TEXT;
 ALTER TABLE weft_segments ADD COLUMN worker_contract TEXT;
+`
+
+// weftLandingSQL is schema 5, landing (§6.2, §7): weft_catalog keeps the
+// repository each project was last bound to, so a repository resource names
+// its projects in the transaction that changes it; weft_segments.land is set
+// when a segment that was launched with --land says hello, which is what
+// makes it a landing segment (§7.4); weft_segments.graded that the segment
+// sent graded, so a failed grade is never resumable (§4); weft_segments.observed,
+// observed_outcome and the observed state of each step are a reconcile's
+// reading, and weft_land_steps' result_segment and observed_segment the
+// segment that reported each result and observation — a step is
+// acknowledged only on its own segment's evidence; weft_entries.archive_head
+// the head a fresh entry archives its run at (§6.7). A retained run has none of them: its segments were never
+// launched to land.
+const weftLandingSQL = `
+ALTER TABLE weft_catalog ADD COLUMN repository_id TEXT;
+ALTER TABLE weft_catalog ADD COLUMN repository TEXT;
+ALTER TABLE weft_segments ADD COLUMN land INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_segments ADD COLUMN graded INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_segments ADD COLUMN observed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_segments ADD COLUMN observed_outcome TEXT;
+ALTER TABLE weft_segments ADD COLUMN observed_fast_forward TEXT;
+ALTER TABLE weft_segments ADD COLUMN observed_push TEXT;
+ALTER TABLE weft_segments ADD COLUMN observed_mark_done TEXT;
+ALTER TABLE weft_land_steps ADD COLUMN result_segment INTEGER;
+ALTER TABLE weft_land_steps ADD COLUMN observed_segment INTEGER;
+ALTER TABLE weft_entries ADD COLUMN archive_head TEXT;
 `

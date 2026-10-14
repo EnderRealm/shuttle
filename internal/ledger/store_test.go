@@ -43,8 +43,8 @@ func TestOpenStampsSchemaVersion(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatalf("read marker: %v", err)
 	}
-	if v != "4" {
-		t.Fatalf("marker = %q, want \"4\"", v)
+	if v != "5" {
+		t.Fatalf("marker = %q, want \"5\"", v)
 	}
 }
 
@@ -89,6 +89,7 @@ func TestCheckVersion(t *testing.T) {
 	}{
 		{"fresh database", 0, nil},
 		{"current", schemaVersion, nil},
+		{"supported migration from 4", 4, nil},
 		{"supported migration from 3", 3, nil},
 		{"supported migration from 2", 2, nil},
 		{"outdated", 1, ErrSchemaOutdated},

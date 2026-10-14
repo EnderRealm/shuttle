@@ -111,10 +111,6 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	return s, nil
 }
 
-func (s *Service) weftRunsRoot() string {
-	return filepath.Join(s.home, "runs", ledger.WeftAgent)
-}
-
 // ValidateListen refuses public and non-tailnet listener addresses.
 func ValidateListen(address string) error {
 	host, _, err := net.SplitHostPort(address)

@@ -179,13 +179,21 @@ func (s *Store) WeftStreamBounds() (floor, oldest, newest int64, err error) {
 	return floor, oldest, newest, err
 }
 
+// WeftBinding is one registered project as a catalog read found it: the
+// digest its tickets were read at and the repository it is bound to, empty
+// when it names none.
+type WeftBinding struct {
+	Digest, RepositoryID, Repository string
+}
+
 // SyncWeftCatalog records the digest each registered project's tickets were
 // read at. A project seen for the first time is recorded at revision 0; one
-// whose digest moved, or that is no longer in digests, has its revision
+// whose digest moved, or that is no longer in bindings, has its revision
 // raised. Each recorded or raised project writes its catalog event in the same
 // transaction, so a revision a read reports is one the stream carries; changed
-// names them.
-func (s *Store) SyncWeftCatalog(digests map[string]string) (revisions map[string]int64, changed []string, err error) {
+// names them. Each project's repository binding is kept as read, so a
+// repository resource names its projects (§6.2).
+func (s *Store) SyncWeftCatalog(bindings map[string]WeftBinding) (revisions map[string]int64, changed []string, err error) {
 	revisions = map[string]int64{}
 	err = s.withTx(func(tx *sql.Tx) error {
 		type row struct {
@@ -213,7 +221,7 @@ func (s *Store) SyncWeftCatalog(digests map[string]string) (revisions map[string
 		for name := range recorded {
 			names = append(names, name)
 		}
-		for name := range digests {
+		for name := range bindings {
 			if _, ok := recorded[name]; !ok {
 				names = append(names, name)
 			}
@@ -221,11 +229,19 @@ func (s *Store) SyncWeftCatalog(digests map[string]string) (revisions map[string
 		slices.Sort(names)
 		stamp := weftTimestamp(s.now())
 		for _, name := range names {
-			digest := digests[name]
+			binding := bindings[name]
+			digest := binding.Digest
 			prior, seen := recorded[name]
+			if seen {
+				if _, err := tx.Exec(`UPDATE weft_catalog SET repository_id=?,repository=? WHERE project=?`,
+					nullString(binding.RepositoryID), nullString(binding.Repository), name); err != nil {
+					return err
+				}
+			}
 			switch {
 			case !seen:
-				if _, err := tx.Exec(`INSERT INTO weft_catalog(project,revision,digest) VALUES(?,0,?)`, name, digest); err != nil {
+				if _, err := tx.Exec(`INSERT INTO weft_catalog(project,revision,digest,repository_id,repository) VALUES(?,0,?,?,?)`,
+					name, digest, nullString(binding.RepositoryID), nullString(binding.Repository)); err != nil {
 					return err
 				}
 			case prior.digest != digest:
@@ -279,7 +295,7 @@ func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
 	var capacity sql.NullString
 	err := s.db.QueryRow(`SELECT
 		(SELECT value FROM weft_settings WHERE key=?),
-		(SELECT count(*) FROM weft_runs WHERE phase IN (?,?)),
+		(SELECT count(*) FROM weft_runs WHERE phase IN (?,?,?)),
 		(SELECT count(*) FROM weft_runs WHERE phase=?),
 		(SELECT count(*) FROM weft_runs WHERE action_required IS NOT NULL),
 		(SELECT count(*) FROM weft_questions WHERE state='pending'),
@@ -287,7 +303,7 @@ func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
 		(`+weftRunningSQL+`),
 		(SELECT count(*) FROM weft_repositories WHERE dispatch='paused'),
 		(SELECT count(*) FROM weft_terminals WHERE state IN ('starting','live','detached'))`,
-		weftCapacityKey, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked).
+		weftCapacityKey, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseSettling, WeftPhaseParked).
 		Scan(&capacity, &c.Active, &c.Blocked, &c.ActionRequired, &c.QuestionsPending, &c.Waiting,
 			&c.Running, &c.RepositoriesPaused, &c.TerminalsOpen)
 	if err != nil {
@@ -345,7 +361,7 @@ func (s *Store) QueryWeftRuns(q WeftRunQuery) ([]*WeftRun, error) {
 	}
 	switch q.State {
 	case "active":
-		where = append(where, "phase IN ('queued','running')")
+		where = append(where, "phase IN ('queued','running','settling')")
 	case "blocked":
 		where = append(where, "phase='parked'")
 	case "over":
