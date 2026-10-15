@@ -345,7 +345,7 @@ func TestSchemaThreeMigratesToFour(t *testing.T) {
 	}
 	defer s.Close()
 	var version string
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "5" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "6" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	run, err := s.GetWeftRun("r-20260913T142233Z-6b2f0c1a")

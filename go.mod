@@ -4,6 +4,8 @@ go 1.26
 
 require (
 	github.com/EnderRealm/ticket/v8 v8.6.1-0.20260920223255-92c83ead0e9a
+	github.com/coder/websocket v1.8.15
+	github.com/creack/pty v1.1.24
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cobra v1.10.2
 	github.com/yuin/goldmark v1.7.13

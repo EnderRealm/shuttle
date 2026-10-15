@@ -17,3 +17,5 @@ func processStart(int) (time.Time, error) { return time.Time{}, errNoIdentity }
 func processIsRun(int, string) (bool, error) { return false, errNoIdentity }
 
 func groupMembers(int) ([]member, error) { return nil, errNoIdentity }
+
+func sessionMembers(int) ([]sessionMember, error) { return nil, errNoIdentity }

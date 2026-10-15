@@ -122,3 +122,31 @@ func parseProcArgs(buf []byte) ([]string, error) {
 	}
 	return argv, nil
 }
+
+// sessionMembers is every live process whose session id is sid, with its
+// process group: what is left of a session whose leader the pass recorded.
+// Processes that went between the listing and the getsid are skipped.
+func sessionMembers(sid int) ([]sessionMember, error) {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, fmt.Errorf("kern.proc.all: %w", err)
+	}
+	var members []sessionMember
+	for _, kp := range procs {
+		if kp.Proc.P_stat == szomb {
+			continue
+		}
+		pid := int(kp.Proc.P_pid)
+		s, err := unix.Getsid(pid)
+		if errors.Is(err, unix.ESRCH) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("getsid %d: %w", pid, err)
+		}
+		if s == sid {
+			members = append(members, sessionMember{PID: pid, PGID: int(kp.Eproc.Pgid)})
+		}
+	}
+	return members, nil
+}

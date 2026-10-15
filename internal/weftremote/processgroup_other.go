@@ -18,3 +18,8 @@ func processGroupLive(pgid int) (bool, error) {
 	}
 	return false, fmt.Errorf("probe worker process group %d: %w", pgid, err)
 }
+
+// ttyGroups lists nothing where the kernel's process table cannot be read by
+// terminal: a hosted terminal's close then rests on the shell's own group and
+// the PTY's foreground group.
+func ttyGroups(int) ([]int, error) { return nil, nil }

@@ -35,11 +35,13 @@ const settledEntryWindow = 12 * time.Hour
 type v2Commit func(t *ledger.WeftTx) (v2Outcome, error)
 
 // v2Outcome is a successful mutation: its status, its body's fields — the
-// read envelope is added — and what runs once the transaction commits.
+// read envelope is added — what runs once the transaction commits, and what
+// undoes the commit's work outside the ledger when the transaction does not.
 type v2Outcome struct {
-	status int
-	fields map[string]any
-	after  func()
+	status  int
+	fields  map[string]any
+	after   func()
+	abandon func()
 }
 
 func refused(code, format string, args ...any) v2Commit {
@@ -164,6 +166,9 @@ func (s *Service) mutateV2Limit(w http.ResponseWriter, r *http.Request, limit in
 	})
 	s.stateMu.Unlock()
 	if err != nil {
+		if outcome.abandon != nil {
+			outcome.abandon()
+		}
 		s.log.Printf("weft service host=%s key=%s: %s %s: %v", s.hostID, keyHash, r.Method, r.URL.Path, err)
 		s.v2Internal(w, err)
 		return
@@ -335,12 +340,15 @@ func (s *Service) dispatchWith(c *catalog) {
 	s.spawn(spawn)
 }
 
-// Restart is §12's steps 4 and 5, which follow the restart pass the daemon
-// has already run (steps 1 and 2) and precede the listener and any dispatch;
-// then the worker probe (§2.6), the retention prune (§8.1) and the Codex
-// allowance probe, which runs in the background (§5.3). The reconciles step
-// 2 claimed start here, with the runs step 5 minted, before dispatch.
+// Restart is §12's steps 3, 4 and 5, which follow the restart pass the
+// daemon has already run (steps 1 and 2) and precede the listener and any
+// dispatch; then the worker probe (§2.6), the retention prune (§8.1) and the
+// Codex allowance probe, which runs in the background (§5.3). The reconciles
+// step 2 claimed start here, with the runs step 5 minted, before dispatch.
 func (s *Service) Restart() error {
+	if err := s.interruptTerminals(); err != nil {
+		return err
+	}
 	s.stateMu.Lock()
 	released, changes, spawn, err := s.store.RestartWeftQueue(s.segments.dispatchBase(), archiveHead)
 	s.stateMu.Unlock()

@@ -11,7 +11,9 @@ package ledger
 // contracts and allowance (weft-service/v2 §5.3, §8).
 // schemaVersion 5: landing — each project's repository binding and whether a
 // segment was launched to land (weft-service/v2 §6.2, §7).
-const schemaVersion = 5
+// schemaVersion 6: terminal sessions — what a session resource carries beyond
+// §6.9's columns, and the process identity the restart pass checks (§9).
+const schemaVersion = 6
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -296,4 +298,25 @@ ALTER TABLE weft_segments ADD COLUMN observed_mark_done TEXT;
 ALTER TABLE weft_land_steps ADD COLUMN result_segment INTEGER;
 ALTER TABLE weft_land_steps ADD COLUMN observed_segment INTEGER;
 ALTER TABLE weft_entries ADD COLUMN archive_head TEXT;
+`
+
+// weftTerminalSQL is schema 6, terminal sessions (§9): the project, size,
+// title, owner, attachment count and output offsets a session resource
+// carries, kept so a closed or interrupted session reads as it last was;
+// process_start, the kernel's start time of the session's shell, which is
+// what establishes a recorded pid as that shell's rather than the same pid
+// reused; and group_unresolved, why the restart pass could not establish an
+// interrupted session's process group gone — while it is set the session
+// keeps its share of the repository's terminal reservation.
+const weftTerminalSQL = `
+ALTER TABLE weft_terminals ADD COLUMN project TEXT;
+ALTER TABLE weft_terminals ADD COLUMN width INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_terminals ADD COLUMN height INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_terminals ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE weft_terminals ADD COLUMN owner TEXT;
+ALTER TABLE weft_terminals ADD COLUMN attachments INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_terminals ADD COLUMN output_offset INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_terminals ADD COLUMN retained_from INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE weft_terminals ADD COLUMN process_start TEXT;
+ALTER TABLE weft_terminals ADD COLUMN group_unresolved TEXT;
 `

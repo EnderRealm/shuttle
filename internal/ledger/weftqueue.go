@@ -1202,10 +1202,10 @@ const weftInFlightSQL = `EXISTS (SELECT 1 FROM weft_segments s JOIN runs r ON r.
 // RestartWeftQueue is §12's steps 4 and 5, run after the restart pass and
 // before the listener accepts or anything dispatches. Step 4 deletes every
 // reservation whose holder is gone — a run with no segment left in flight, a
-// terminal with no open session, a maintenance entry with nothing in flight —
-// keeping settlement holders for their reconcile and archiving entries'
-// rows for step 5. Step 5 settles each archiving entry whose archive worker is
-// gone by the ref it was to write: archiveHead answers the commit
+// terminal with no session holding a share, a maintenance entry with nothing
+// in flight — keeping settlement holders for their reconcile and archiving
+// entries' rows for step 5. Step 5 settles each archiving entry whose archive
+// worker is gone by the ref it was to write: archiveHead answers the commit
 // refs/weft/archive/<run> names in the repository, or "" when absent. At the
 // superseded run's head, the maintenance → run transaction of §6.7 runs and
 // its new run is named in spawn; otherwise the row and slot are released and
@@ -1294,9 +1294,9 @@ func (t *WeftTx) holderGone(r WeftReservation) (bool, error) {
 	case "run":
 		err := t.tx.QueryRow(`SELECT `+weftInFlightSQL, r.HolderID).Scan(&live)
 		return !live, err
-	case "terminal":
+	case WeftHolderTerminal:
 		err := t.tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM weft_terminals WHERE repository_id=?
-			AND state IN ('starting','live','detached'))`, r.RepositoryID).Scan(&live)
+			AND `+weftTerminalShareSQL+`)`, r.RepositoryID).Scan(&live)
 		return !live, err
 	case WeftHolderSettlement:
 		// Kept for the reconcile step 2 dispatched under it, which releases it.

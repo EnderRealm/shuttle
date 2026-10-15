@@ -55,6 +55,11 @@ type Service struct {
 	codex   codexProbe
 	// probes counts the provider probes in flight.
 	probes sync.WaitGroup
+	// folders are the folder handles this process minted (§9.2), and terms
+	// the terminal sessions it owns (§9).
+	folders *folderHandles
+	termMu  sync.Mutex
+	terms   map[string]*terminalSession
 }
 
 func New(cfg *config.Config, store *ledger.Store, token, home string, logger *log.Logger) (*Service, error) {
@@ -101,6 +106,7 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	s := &Service{
 		cfg: cfg, store: store, token: token, tokenID: ledger.TokenID(token), hostID: hostID,
 		home: home, log: logger, catalogPoll: 5 * time.Second, started: time.Now(),
+		folders: newFolderHandles(), terms: map[string]*terminalSession{},
 	}
 	// Dispatch spawns segments through the supervisor, under the contract the
 	// worker probe found; each settled segment may free the slot and

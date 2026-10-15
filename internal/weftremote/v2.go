@@ -30,7 +30,7 @@ type capability struct {
 // developmentalCapabilities is §2.3's list in the contract's order, as
 // docs/service-v2/service-developmental.json began it (§2.4). output, landing
 // and cleanup are gated by the worker probe instead (workerGate); archive
-// import is the host's alone and served.
+// import, terminals and the folder picker are the host's alone and served.
 var developmentalCapabilities = []capability{
 	{ID: "dashboard"},
 	{ID: "catalog"},
@@ -43,8 +43,8 @@ var developmentalCapabilities = []capability{
 	{ID: "history"},
 	{ID: "landing"},
 	{ID: "cleanup"},
-	{ID: "terminals", Reason: "not served by this host build: hosted terminals arrive with shuttle/host-terminal-sessions-bbbe; until then a stale branch cannot be resolved by hand through the service"},
-	{ID: "folders", Reason: "not served by this host build: the host folder picker arrives with shuttle/host-terminal-sessions-bbbe"},
+	{ID: "terminals"},
+	{ID: "folders"},
 	{ID: "archive"},
 	{ID: "trial_launch", Reason: "not served by this host build: checkout launches arrive with warp/host-weft-worker-cd59"},
 }
@@ -61,9 +61,6 @@ var notServedRoutes = []struct {
 	{http.MethodPost, regexp.MustCompile(`^/v2/repositories/[^/]+/continue$`), "landing"},
 	{http.MethodPost, regexp.MustCompile(`^/v2/runs/[^/]+/reconcile$`), "landing"},
 	{http.MethodPost, regexp.MustCompile(`^/v2/runs/[^/]+/(dismiss|fresh)$`), "cleanup"},
-	{http.MethodGet, regexp.MustCompile(`^/v2/terminals(/[^/]+(/attach)?)?$`), "terminals"},
-	{http.MethodPost, regexp.MustCompile(`^/v2/terminals(/[^/]+/close)?$`), "terminals"},
-	{http.MethodGet, regexp.MustCompile(`^/v2/folders$`), "folders"},
 	{http.MethodPost, regexp.MustCompile(`^/v2/archives$`), "archive"},
 }
 
@@ -190,6 +187,18 @@ func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 		s.handleContinue(w, r, repositoryContinue.FindStringSubmatch(path)[1])
 	case r.Method == http.MethodPost && path == "/v2/archives":
 		s.handleArchiveImport(w, r)
+	case r.Method == http.MethodGet && path == "/v2/folders":
+		s.handleFolders(w, r)
+	case r.Method == http.MethodGet && path == "/v2/terminals":
+		s.handleTerminals(w)
+	case r.Method == http.MethodPost && path == "/v2/terminals":
+		s.handleTerminalOpen(w, r)
+	case r.Method == http.MethodGet && terminalAttach.MatchString(path):
+		s.handleTerminalAttach(w, r, terminalAttach.FindStringSubmatch(path)[1])
+	case r.Method == http.MethodGet && terminalPath.MatchString(path):
+		s.handleTerminal(w, terminalPath.FindStringSubmatch(path)[1])
+	case r.Method == http.MethodPost && terminalClose.MatchString(path):
+		s.handleTerminalClose(w, r, terminalClose.FindStringSubmatch(path)[1])
 	default:
 		s.v2Error(w, http.StatusNotFound, "malformed", r.Method+" "+path+" is not a weft-service/v2 route on host "+s.hostID)
 	}

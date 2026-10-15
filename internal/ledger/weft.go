@@ -1602,6 +1602,10 @@ func nullJSON(v json.RawMessage) sql.NullString {
 	return sql.NullString{String: string(v), Valid: len(v) > 0 && string(v) != "null"}
 }
 
+// NewRemoteID mints a weft-service/v2 id of the given prefix (§4.1):
+// <prefix>-<stamp>-<8 hex>.
+func NewRemoteID(prefix string, now time.Time) (string, error) { return newRemoteID(prefix, now) }
+
 func newRemoteID(prefix string, now time.Time) (string, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {

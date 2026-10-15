@@ -68,7 +68,10 @@ Direct dependencies, deliberately few: `github.com/spf13/cobra`, `modernc.org/sq
 (pure Go, driver name `sqlite`, as loom), `github.com/robfig/cron/v3` (parsing and
 `Next` only; shuttle owns the loop), `github.com/yuin/goldmark` (markdown to HTML with
 raw HTML disabled), `github.com/EnderRealm/ticket/v8` (only `pkg/ticket` and
-`pkg/journal`; `internal/project` is unimportable, see §8.4).
+`pkg/journal`; `internal/project` is unimportable, see §8.4), `github.com/creack/pty`
+(opening and sizing a hosted terminal's PTY) and `github.com/coder/websocket` (the
+terminal attachment WebSocket). The terminal emulator behind a session's snapshot is
+in-repo, `internal/vt`.
 
 State lives under `$SHUTTLE_HOME`, default `~/.shuttle`:
 

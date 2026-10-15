@@ -598,8 +598,9 @@ func TestServiceDiscoveryMirrorsDevelopmentalSlice(t *testing.T) {
 	got, slice := doc["service"].(map[string]any), want["service"].(map[string]any)
 	// output, landing and cleanup are gated by the worker probe (§2.6):
 	// unprobed, each is not served and says what it needs, where the fixture
-	// names the ticket that adds it. Archive import is the host's own and is
-	// served (§14.3). The rest is the slice as the fixture declares it.
+	// names the ticket that adds it. Archive import, terminals and the folder
+	// picker are the host's own and are served (§9, §14.3). The rest is the
+	// slice as the fixture declares it.
 	fixtureReasons := map[string]any{}
 	for _, c := range slice["capabilities"].([]any) {
 		fixtureReasons[c.(map[string]any)["id"].(string)] = c.(map[string]any)["reason"]
@@ -612,11 +613,11 @@ func TestServiceDiscoveryMirrorsDevelopmentalSlice(t *testing.T) {
 				t.Errorf("unprobed %s = %v", c["id"], c)
 			}
 			c["reason"] = fixtureReasons[c["id"].(string)]
-		case "archive":
+		case "archive", "terminals", "folders":
 			if c["state"] != "served" || c["reason"] != nil {
-				t.Errorf("archive = %v", c)
+				t.Errorf("%s = %v", c["id"], c)
 			}
-			c["state"], c["reason"] = "not_served", fixtureReasons["archive"]
+			c["state"], c["reason"] = "not_served", fixtureReasons[c["id"].(string)]
 		}
 	}
 	for _, key := range []string{"service_versions", "worker_versions", "conformance", "capabilities", "limits"} {
@@ -655,12 +656,32 @@ func TestServiceRefusesUnauthorizedUnspokenAndNotServed(t *testing.T) {
 	}
 	s.errorBody(http.MethodPost, "/v9/launches", http.StatusUpgradeRequired, "upgrade_required")
 
+	// The fixture refuses terminals, which this host serves; its message is
+	// the shape every not-served capability's refusal takes.
 	var fixture map[string]any
 	fixtureJSON(t, "error-capability-not-served.json", &fixture)
-	terminals := s.errorBody(http.MethodGet, "/v2/terminals", http.StatusNotImplemented, "capability_not_served")
-	message := strings.ReplaceAll(fixture["error"].(map[string]any)["message"].(string), "h-studio-7c41e09a", s.service.hostID)
-	if terminals["error"].(map[string]any)["message"] != message {
-		t.Errorf("501 message = %v, want %q", terminals["error"], message)
+	template := strings.ReplaceAll(fixture["error"].(map[string]any)["message"].(string), "h-studio-7c41e09a", s.service.hostID)
+	var terminalsReason string
+	for _, c := range decode(t, fixtureBytes(t, "service-developmental.json")).(map[string]any)["service"].(map[string]any)["capabilities"].([]any) {
+		if c.(map[string]any)["id"] == "terminals" {
+			terminalsReason = c.(map[string]any)["reason"].(string)
+		}
+	}
+	var outputReason string
+	for _, c := range s.service.capabilities() {
+		if c.ID == "output" {
+			outputReason = c.Reason
+		}
+	}
+	message := "output" + strings.TrimSuffix(strings.TrimPrefix(template, "terminals"), terminalsReason) + outputReason
+	output := s.errorBody(http.MethodGet, "/v2/runs/r-1/output", http.StatusNotImplemented, "capability_not_served")
+	if output["error"].(map[string]any)["message"] != message {
+		t.Errorf("501 message = %v, want %q", output["error"], message)
+	}
+	for _, path := range []string{"/v2/terminals", "/v2/folders"} {
+		if rec := s.request(t, http.MethodGet, path, "", ""); rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d %s; it is served", path, rec.Code, rec.Body.String())
+		}
 	}
 	for _, route := range []struct{ method, path, capability string }{
 		{http.MethodGet, "/v2/runs/r-1/output", "output"},
@@ -670,11 +691,6 @@ func TestServiceRefusesUnauthorizedUnspokenAndNotServed(t *testing.T) {
 		{http.MethodPost, "/v2/runs/r-1/reconcile", "landing"},
 		{http.MethodPost, "/v2/runs/r-1/dismiss", "cleanup"},
 		{http.MethodPost, "/v2/runs/r-1/fresh", "cleanup"},
-		{http.MethodPost, "/v2/terminals", "terminals"},
-		{http.MethodGet, "/v2/terminals/t-1", "terminals"},
-		{http.MethodGet, "/v2/terminals/t-1/attach", "terminals"},
-		{http.MethodPost, "/v2/terminals/t-1/close", "terminals"},
-		{http.MethodGet, "/v2/folders", "folders"},
 	} {
 		body := s.errorBody(route.method, route.path, http.StatusNotImplemented, "capability_not_served")
 		shape.check(t, route.path, body)
