@@ -150,3 +150,46 @@ func sessionMembers(sid int) ([]sessionMember, error) {
 	}
 	return members, nil
 }
+
+// sstop is a process the kernel has stopped (SSTOP in sys/proc.h).
+const sstop = 4
+
+// userProcesses is every live process of this user but the daemon itself,
+// each with the start time that tells it from the same pid reused.
+func userProcesses() ([]member, error) {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.uid", unix.Geteuid())
+	if err != nil {
+		return nil, fmt.Errorf("kern.proc.uid %d: %w", unix.Geteuid(), err)
+	}
+	self := unix.Getpid()
+	members := make([]member, 0, len(procs))
+	for _, kp := range procs {
+		if kp.Proc.P_stat == szomb || int(kp.Proc.P_pid) == self {
+			continue
+		}
+		sec, nsec := kp.Proc.P_starttime.Unix()
+		members = append(members, member{
+			PID: int(kp.Proc.P_pid), Start: time.Unix(sec, nsec), Comm: unix.ByteSliceToString(kp.Proc.P_comm[:]),
+		})
+	}
+	return members, nil
+}
+
+// processState is the kernel's current answer for pid: the process holding
+// it, and whether the kernel has it stopped. errProcessGone is a pid with no
+// live process.
+func processState(pid int) (member, bool, error) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if errors.Is(err, unix.ESRCH) {
+		return member{}, false, errProcessGone
+	}
+	if err != nil {
+		return member{}, false, fmt.Errorf("kern.proc.pid %d: %w", pid, err)
+	}
+	// A dead pid can answer with a zeroed record rather than ESRCH.
+	if kp.Proc.P_pid != int32(pid) || kp.Proc.P_stat == szomb {
+		return member{}, false, errProcessGone
+	}
+	sec, nsec := kp.Proc.P_starttime.Unix()
+	return member{PID: pid, Start: time.Unix(sec, nsec)}, kp.Proc.P_stat == sstop, nil
+}

@@ -73,6 +73,9 @@ const startSlack = 2 * time.Second
 type member struct {
 	PID   int
 	Start time.Time
+	// Comm is the kernel's short command name, where the listing carried it;
+	// it names the process in a log line and identifies nothing.
+	Comm string
 }
 
 // Action is what the pass did with one row's recorded pid.
@@ -128,7 +131,12 @@ type Outcome struct {
 type Ledger interface {
 	InFlight() ([]*ledger.Run, error)
 	MarkUnknown(id string) error
+	WeftCodingWorktree(ledgerRunID string) (string, bool, error)
 }
+
+// contain is the sweep Restart runs for a hosted coding segment. A var so a
+// test can drive a boundary that will not empty.
+var contain = Contain
 
 var _ Ledger = (*ledger.Store)(nil)
 
@@ -154,9 +162,14 @@ var _ Ledger = (*ledger.Store)(nil)
 // account for must not halt the estate — and the next daemon start re-checks
 // that pid.
 //
-// It returns one Outcome per row, in ledger order. A MarkUnknown failure stops
-// the pass and is returned with the outcomes recorded so far: the daemon must
-// not go on to tick over a row it could not close.
+// A hosted coding segment's row is held the same way until containRow's sweep
+// establishes that no detached descendant still holds the segment's sandbox
+// grant: the group being empty is not the segment being gone.
+//
+// It returns one Outcome per row, in ledger order. A MarkUnknown failure, or a
+// ledger read that cannot say whether a row is a coding segment, stops the
+// pass and is returned with the outcomes recorded so far: the daemon must not
+// go on to tick over a row it could not close.
 func Restart(l Ledger) ([]Outcome, error) {
 	runs, err := l.InFlight()
 	if err != nil {
@@ -171,6 +184,14 @@ func Restart(l Ledger) ([]Outcome, error) {
 		} else {
 			out.Action, out.Detail = action, detail
 		}
+		if out.Action != ActionKillFailed && out.Action != ActionUnresolved && out.Action != ActionNoPID {
+			if out.Action, out.Detail, err = containRow(l, run, out.Action, out.Detail); err != nil {
+				// No sweep ran, so the row is held: an outcome left closing would
+				// let the daemon's reconcile release the repository unswept.
+				out.Action, out.Detail = ActionUnresolved, "containment: "+err.Error()
+				return append(outcomes, out), fmt.Errorf("run %s: %w", run.ID, err)
+			}
+		}
 		outcomes = append(outcomes, out)
 		if out.Action == ActionKillFailed || out.Action == ActionUnresolved {
 			continue
@@ -180,6 +201,32 @@ func Restart(l Ledger) ([]Outcome, error) {
 		}
 	}
 	return outcomes, nil
+}
+
+// containRow sweeps a hosted coding segment's boundary once its process group
+// is accounted for: a descendant that called setsid left the group with the
+// segment's write grant, and the row may close only once no process holds it.
+// A sweep that fails holds the row in flight — kill_failed when it stopped a
+// holder, unresolved otherwise — so its repository stays reserved. A row with no pid never released its worker's start gate, so no
+// sandboxed process of it ever ran, and the caller skips it.
+func containRow(l Ledger, run *ledger.Run, action Action, detail string) (Action, string, error) {
+	worktree, coding, err := l.WeftCodingWorktree(run.ID)
+	if err != nil || !coding {
+		return action, detail, err
+	}
+	c, err := contain(SegmentBoundary(run.RunDir.String, worktree))
+	switch {
+	case err != nil && len(c.Stopped) > 0:
+		return ActionKillFailed, fmt.Sprintf("containment %s: %v", c, err), nil
+	case err != nil:
+		return ActionUnresolved, "containment: " + err.Error(), nil
+	case c.Found():
+		if detail != "" {
+			detail += "; "
+		}
+		return action, detail + "containment " + c.String(), nil
+	}
+	return action, detail, nil
 }
 
 // identify answers actionOwned when the row's recorded pid is established as

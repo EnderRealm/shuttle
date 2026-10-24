@@ -20,6 +20,7 @@ import (
 	"shuttle/internal/config"
 	"shuttle/internal/keychain"
 	"shuttle/internal/ledger"
+	"shuttle/internal/reap"
 	"shuttle/internal/sandbox"
 )
 
@@ -30,6 +31,10 @@ var segmentKillGrace = 5 * time.Second
 const segmentKillPoll = 50 * time.Millisecond
 
 var afterWorkerSpawn = func() {}
+
+// containSegment is the sweep a coding segment's settlement waits on. A var
+// so a test can drive a boundary that will not empty.
+var containSegment = reap.Contain
 
 type activeSegment struct {
 	stdin    io.WriteCloser
@@ -411,6 +416,11 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	if err := ensureProcessGroupGone(cmd.Process.Pid); err != nil {
 		return nil, err
 	}
+	if !maintenance(segment.Kind) {
+		if err := s.contain(run, segment, runDir); err != nil {
+			return nil, err
+		}
+	}
 	select {
 	case <-stderrDone:
 	case <-time.After(segmentKillGrace):
@@ -645,6 +655,22 @@ func ensureProcessGroupGone(pgid int) error {
 	}
 	if !waitProcessGroupGone(pgid, segmentKillGrace) {
 		return fmt.Errorf("worker process group %d outlived SIGKILL; reservation retained", pgid)
+	}
+	return nil
+}
+
+// contain is the rest of that boundary for a segment that ran under the
+// coding profile: a descendant that called setsid left the process group with
+// the profile's write grant. Until the sweep establishes that no process holds
+// it, the segment is not settled and its reservation is retained.
+func (s *Supervisor) contain(run *ledger.WeftRun, segment ledger.WeftSegment, runDir string) error {
+	ids := segmentIDs(s.hostID, run.ID, segment, "")
+	c, err := containSegment(reap.SegmentBoundary(runDir, run.Worktree))
+	if c.Found() {
+		s.log.Printf("weft segment %s: containment %s", ids, c)
+	}
+	if err != nil {
+		return fmt.Errorf("weft segment %s: containment: %w; reservation retained", ids, err)
 	}
 	return nil
 }

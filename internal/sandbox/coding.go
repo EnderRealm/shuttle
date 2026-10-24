@@ -34,7 +34,13 @@ type CodingOptions struct {
 }
 
 func (o CodingOptions) ProfilePath() string { return filepath.Join(o.RunDir, profileFile) }
-func (o CodingOptions) tmpDir() string      { return filepath.Join(o.RunDir, "tmp") }
+func (o CodingOptions) tmpDir() string      { return SegmentTmpDir(o.RunDir) }
+
+// SegmentTmpDir is the segment's TMPDIR under its run directory. Only that
+// segment's profile grants it, which is what makes it the canary the host
+// recognises the segment's surviving processes by; the run directory around
+// it is granted to none of them.
+func SegmentTmpDir(runDir string) string { return filepath.Join(runDir, "tmp") }
 
 // WorktreePath mirrors WeftKit's hosted WorktreeProvider derivation.
 func WorktreePath(root, repo, ticket string) (string, error) {
@@ -241,7 +247,16 @@ func CheckCoding(ctx context.Context, o CodingOptions) error {
 	if err := os.MkdirAll(o.tmpDir(), 0o700); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, o.SRTBin, "-s", o.ProfilePath(), "-c", "true")
+	// The containment sweep tells a segment's processes from the rest by the
+	// profile granting its canary and denying its run directory. Seatbelt
+	// judges real paths, through every symlink and case alias, so that is
+	// checked by the sandbox itself rather than by comparing configured
+	// strings: the canary must take a write, and the run directory must not.
+	canaryProbe := filepath.Join(o.tmpDir(), controlProbe)
+	runDirProbe := filepath.Join(o.RunDir, controlProbe)
+	script := ": > " + shellQuote(canaryProbe) + " && rm -f " + shellQuote(canaryProbe) + " || exit 1; " +
+		": > " + shellQuote(runDirProbe) + " 2>/dev/null; exit 0"
+	cmd := exec.CommandContext(ctx, o.SRTBin, "-s", o.ProfilePath(), "-c", script)
 	cmd.Dir = o.RunDir
 	cmd.Env = []string{
 		"PATH=" + o.PATH,
@@ -257,8 +272,21 @@ func CheckCoding(ctx context.Context, o CodingOptions) error {
 		}
 		return fmt.Errorf("srt -s %s: %w", o.ProfilePath(), err)
 	}
+	switch _, err := os.Lstat(runDirProbe); {
+	case err == nil:
+		_ = os.Remove(runDirProbe)
+		return fmt.Errorf("srt -s %s: the profile lets the segment write its run dir %s, which containment must deny it", o.ProfilePath(), o.RunDir)
+	case !os.IsNotExist(err):
+		return err
+	}
 	return nil
 }
+
+// controlProbe is the file CheckCoding has the sandbox try to write.
+const controlProbe = ".shuttle-control-probe"
+
+// shellQuote is path as one sh word.
+func shellQuote(path string) string { return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'" }
 
 func requireCoding(o CodingOptions) error {
 	for name, path := range map[string]string{
@@ -279,6 +307,12 @@ func requireCoding(o CodingOptions) error {
 	for _, path := range o.AllowWrite {
 		if !filepath.IsAbs(path) || path != filepath.Clean(path) {
 			return fmt.Errorf("sandbox.allow_write: %q is not a clean absolute path", path)
+		}
+		// The run directory is the control the containment sweep holds a
+		// survivor against: a process of this segment must be denied it, and
+		// one granted it would read as outside the segment and be left alive.
+		if path == o.RunDir || strings.HasPrefix(o.RunDir, path+"/") || path == "/" {
+			return fmt.Errorf("sandbox.allow_write: %q covers run dir %q", path, o.RunDir)
 		}
 	}
 	for _, domain := range o.AllowedDomains {

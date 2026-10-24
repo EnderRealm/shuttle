@@ -130,6 +130,11 @@ because the coding sandbox denies the Keychain where the CLI keeps the
 subscription credential. The daemon refuses a listener outside loopback or
 `100.64.0.0/10`, and refuses each segment before spawning the worker if that item
 is missing or if its coding sandbox cannot be generated and preflighted.
+An `allow_write` entry equal to or containing the segment's run directory
+(`~/.shuttle/runs/weft/<id>`) is refused: at settlement the daemon finds every
+sandboxed process still holding the segment's write grant, including one that
+left the worker's process group, by its being denied that directory, and kills
+it before the repository is released.
 
 ```sh
 ./shuttle run daily --dry-run

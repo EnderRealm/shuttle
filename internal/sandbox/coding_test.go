@@ -261,6 +261,29 @@ func TestCodingProfileRefusesMissingUserTempDir(t *testing.T) {
 	}
 }
 
+// The run directory is the control the host's containment sweep tells the
+// segment's processes apart by, so no allow_write entry may grant it.
+func TestCodingProfileRefusesAllowWriteCoveringRunDir(t *testing.T) {
+	root := shortCodingRoot(t)
+	runDir := filepath.Join(root, "runs", "weft", "segment")
+	options := func(allow string) CodingOptions {
+		return CodingOptions{
+			SRTBin: "/usr/local/bin/srt", RunDir: runDir, HomeDir: root, PATH: testPATH,
+			Repo: filepath.Join(root, "repo"), TicketsRoot: filepath.Join(root, "tickets"),
+			Worktree: filepath.Join(root, "worktree"), UserTempDir: filepath.Join(root, "user-temp"),
+			AllowWrite: []string{allow},
+		}
+	}
+	for _, allow := range []string{runDir, filepath.Dir(runDir), root, "/"} {
+		if _, err := CodingProfileJSON(options(allow)); err == nil || !strings.Contains(err.Error(), "covers run dir") {
+			t.Errorf("allow_write %s: profile error = %v, want a run dir refusal", allow, err)
+		}
+	}
+	if _, err := CodingProfileJSON(options(runDir + "-sibling")); err != nil {
+		t.Fatalf("allow_write sibling of the run dir: %v", err)
+	}
+}
+
 func TestCheckCodingRefusesMissingSandbox(t *testing.T) {
 	root := shortCodingRoot(t)
 	o := CodingOptions{
@@ -283,6 +306,75 @@ func TestCheckCodingRefusesMissingSandbox(t *testing.T) {
 	}
 	if err := CheckCoding(context.Background(), o); err == nil {
 		t.Fatal("missing srt established a coding sandbox")
+	}
+}
+
+// checkableCoding is a coding profile's directories laid out under root, the
+// run directory at runDir, ready for WriteCodingProfile and CheckCoding.
+func checkableCoding(t *testing.T, root, runDir, srt string, allowWrite ...string) CodingOptions {
+	t.Helper()
+	o := CodingOptions{
+		SRTBin: srt, RunDir: runDir, HomeDir: filepath.Join(root, "home"), PATH: testPATH,
+		Repo: filepath.Join(root, "repo"), TicketsRoot: filepath.Join(root, "tickets"),
+		Worktree: filepath.Join(root, "worktree"), UserTempDir: filepath.Join(root, "user-temp"),
+		AllowWrite: allowWrite,
+	}
+	admin := filepath.Join(o.Repo, ".git", "worktrees", filepath.Base(o.Worktree))
+	for _, dir := range []string{o.RunDir, o.HomeDir, o.TicketsRoot, o.Worktree, o.UserTempDir, admin} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(o.Worktree, ".git"), []byte("gitdir: "+admin), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteCodingProfile(o); err != nil {
+		t.Fatal(err)
+	}
+	return o
+}
+
+// The preflight has the sandbox itself try the run directory: a profile that
+// lets the segment write it is refused, whatever the configured strings say.
+// The stand-in srt runs the probe unconfined, so the write lands.
+func TestCheckCodingRefusesASandboxThatGrantsTheRunDir(t *testing.T) {
+	root := shortCodingRoot(t)
+	srt := filepath.Join(root, "srt")
+	if err := os.WriteFile(srt, []byte("#!/bin/sh\nexec /bin/sh -c \"$4\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	o := checkableCoding(t, root, filepath.Join(root, "run"), srt)
+	if err := CheckCoding(context.Background(), o); err == nil || !strings.Contains(err.Error(), "run dir") {
+		t.Fatalf("check = %v, want the run dir refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(o.RunDir, controlProbe)); !os.IsNotExist(err) {
+		t.Fatalf("control probe left behind: %v", err)
+	}
+}
+
+// An allow_write entry spelled through /private/tmp covers a run directory
+// spelled through /tmp: the strings differ, but seatbelt judges the real
+// path, so real srt grants the run directory and the preflight refuses it.
+func TestLiveCodingSRTRefusesAnAliasedRunDirGrant(t *testing.T) {
+	if os.Getenv("SHUTTLE_LIVE_SRT") != "1" {
+		t.Skip("set SHUTTLE_LIVE_SRT=1 to run the coding profile against real srt")
+	}
+	bin := os.Getenv("SHUTTLE_SRT_BIN")
+	if bin == "" {
+		bin = defaultSRTBin
+	}
+	root := shortCodingRoot(t)
+	if !strings.HasPrefix(root, "/private/tmp/") {
+		t.Skipf("temp root %s is not under /private/tmp", root)
+	}
+	aliased := strings.TrimPrefix(root, "/private")
+	denied := checkableCoding(t, root, filepath.Join(aliased, "run-denied"), bin)
+	if err := CheckCoding(context.Background(), denied); err != nil {
+		t.Fatalf("a profile denying the run dir was refused: %v", err)
+	}
+	o := checkableCoding(t, root, filepath.Join(aliased, "run"), bin, root)
+	if err := CheckCoding(context.Background(), o); err == nil || !strings.Contains(err.Error(), "run dir") {
+		t.Fatalf("check = %v, want the run dir refusal", err)
 	}
 }
 
