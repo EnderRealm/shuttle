@@ -841,9 +841,10 @@ func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.D
 }
 
 // finishReconciledObserver is the finish of a converged reconciliation, in
-// the order a live run takes it. result.json reads completed only once the
-// row does, so a failure anywhere here leaves both failed for the next
-// reconciliation to finish.
+// the order a live run takes it: result.json is written before the row moves
+// to completed, so the ledger transition is the commit point. A failure
+// anywhere here leaves the row failed, which the status guard admits to the
+// next reconciliation, and that one rewrites result.json and moves the row.
 func (p *Pipeline) finishReconciledObserver(def *agentdef.Definition, row *ledger.Run, run *preparedRun, state *observerRunState, out *validatedObserverOutput, applied *observerApplied) error {
 	if err := p.prepareObserverReport(def, row, run, Options{}, out, applied); err != nil {
 		return err
@@ -859,12 +860,12 @@ func (p *Pipeline) finishReconciledObserver(def *agentdef.Definition, row *ledge
 	if err := json.Unmarshal(resultData, &record); err != nil {
 		return fmt.Errorf("retained %s: %w", resultFile, err)
 	}
-	if err := p.Ledger.Reconciled(row.ID, out.Silent); err != nil {
-		return err
-	}
 	record.Status, record.FailureClass, record.Detail = ledger.StatusCompleted, "", ""
 	record.Silent = boolPointer(out.Silent)
-	return writeResult(run.Dir, record)
+	if err := writeResult(run.Dir, record); err != nil {
+		return err
+	}
+	return p.Ledger.Reconciled(row.ID, out.Silent)
 }
 
 // observerReconcilable reports whether a reconciliation has anything to

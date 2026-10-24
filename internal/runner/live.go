@@ -435,7 +435,21 @@ func writeResult(runDir string, result resultRecord) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(runDir, resultFile), append(data, '\n'), 0o600)
+	// Replaced by rename so a failed write leaves the previous result.json
+	// whole: a reconciliation reads it back and cannot finish past a torn one.
+	tmp, err := os.CreateTemp(runDir, ".result-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), filepath.Join(runDir, resultFile))
 }
 
 func (p *Pipeline) logger() *log.Logger {

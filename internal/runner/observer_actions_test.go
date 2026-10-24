@@ -1644,6 +1644,105 @@ func TestObserverReconciliationHealsAFinishThatFailed(t *testing.T) {
 	}
 }
 
+func TestObserverReconciliationHealsAFinishWhoseResultWriteFailed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only run directory that fails the result write")
+	}
+	answer := observedAnswer(t)
+	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+	to.f.def.Manifest.Outputs.Email = &agentdef.EmailOutput{Max: 1}
+	to.f.pipeline.Config.Email = config.Email{
+		Provider: "cloudflare", AccountID: "account", From: "from@example.test",
+		To: []string{"to@example.test"}, KeychainItem: "mail",
+	}
+	sender := &recordingSender{}
+	to.f.pipeline.Sender = sender
+	state := to.notebook(t)
+	state.CrashClaim = 2
+	writeJSONFixture(t, to.o.state, state)
+	note := proposal(to.question.Identity, "confirm", observercontract.ActionTicketNote, to.question.ID, to.ticketID,
+		"Three nights after the restart every report still repeated a headline.", answer.Evidence.Sources[:1])
+	report := "# Observer report\n\n" + strings.Repeat("Every night of the window repeated its headline. ", 6)
+	installObserverModel(t, to.f, map[string]any{
+		"silent": false, "subject": "Headline repeats", "assessments": []any{answer}, "actions": []any{note},
+	}, report)
+	to.f.slot = to.f.slot.Add(-24 * time.Hour)
+	run := to.f.claim(t, ledger.TriggerManual)
+	if _, err := to.f.pipeline.Run(context.Background(), to.f.def, run, Options{}); err == nil || !strings.Contains(err.Error(), run.ID+"-claim-001") {
+		t.Fatalf("err = %v, want the lost claim surfaced", err)
+	}
+	row, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// result.json reads back, and the files the finish rewrites in place stay
+	// writable, but its replacement cannot be created beside it, so the finish
+	// fails at its last write.
+	resultPath := filepath.Join(row.RunDir.String, resultFile)
+	retainedResult, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retained resultRecord
+	if err := json.Unmarshal(retainedResult, &retained); err != nil || retained.Status != ledger.StatusFailed {
+		t.Fatalf("result.json = %s, %v; want the failed run's record", retainedResult, err)
+	}
+	info, err := os.Stat(row.RunDir.String)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(row.RunDir.String, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(row.RunDir.String, info.Mode().Perm()) })
+
+	err = to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row)
+	if err == nil || !strings.Contains(err.Error(), ".result-") {
+		t.Fatalf("err = %v, want the failed result write surfaced", err)
+	}
+	if after, err := os.ReadFile(resultPath); err != nil || string(after) != string(retainedResult) {
+		t.Fatalf("result.json = %s, %v; want the failed run's record left whole", after, err)
+	}
+	if failed, err := to.f.store.Get(run.ID); err != nil || failed.Status != ledger.StatusFailed {
+		t.Fatalf("row = %+v, %v; want it left failed with result.json", failed, err)
+	}
+	if outcome := readObserverResult(t, row.RunDir.String); !strings.Contains(outcome.Detail, ".result-") {
+		t.Fatalf("observer-result.json = %+v, want the finish's failure", outcome)
+	}
+	if len(sender.messages) != 0 {
+		t.Fatalf("sent = %+v, want nothing delivered before the finish", sender.messages)
+	}
+
+	if err := os.Chmod(row.RunDir.String, info.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row); err != nil {
+		t.Fatal(err)
+	}
+	var healed resultRecord
+	readJSONFixture(t, resultPath, &healed)
+	if healed.Status != ledger.StatusCompleted || healed.FailureClass != "" || healed.Detail != "" ||
+		healed.Silent == nil || *healed.Silent {
+		t.Fatalf("result.json = %+v", healed)
+	}
+	applied := readApplied(t, row.RunDir.String)
+	outcome := readObserverResult(t, row.RunDir.String)
+	if outcome.NotebookStatus != "applied" || outcome.Detail != "" ||
+		outcome.ActionsApplied != 1 || outcome.ActionsFailed != 0 || outcome.NotebookRevision != applied.NotebookRevision {
+		t.Fatalf("observer-result.json = %+v, want the reconciled counts", outcome)
+	}
+	converged, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged.Status != ledger.StatusCompleted || converged.DeliveryStatus.String != ledger.DeliveryDelivered {
+		t.Fatalf("row = %+v, want it completed and delivered", converged)
+	}
+	if len(sender.messages) != 1 || sender.messages[0].RunID != run.ID {
+		t.Fatalf("sent = %+v, want the report once", sender.messages)
+	}
+}
+
 func TestObserverNotesAreTheWholeWriteSurface(t *testing.T) {
 	answer := observedAnswer(t)
 	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
