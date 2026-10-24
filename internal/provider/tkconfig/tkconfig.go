@@ -15,6 +15,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// RootNamespace is tk's built-in Root namespace. It mirrors
+// internal/project.RootNamespace in github.com/EnderRealm/ticket, which
+// pkg/ticket does not export. Root holds tickets and a mutation log but is
+// bound to no repository, whatever config.yaml says about it.
+const RootNamespace = "_root"
+
 // Config is the part of config.yaml the providers read. Every other key —
 // verify_allow, the per-project auto_link flags — is ignored rather than
 // refused, because this is tk's file and tk owns its schema.
@@ -52,6 +58,33 @@ func (c Config) Names() []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+// Unbound is a registered project that names no repository on this machine,
+// with the reason, so a provider that walks repositories reports it rather
+// than scanning nothing.
+type Unbound struct {
+	Name   string
+	Reason string
+}
+
+// Repositories splits the registered projects into those bound to a
+// repository — a non-empty path, never Root — and those that are not, both
+// sorted. Ticket namespaces are a separate set: a namespace may hold tickets
+// with no repository behind it, and only a bound one is ever handed to git,
+// the commit journal or an execution path.
+func (c Config) Repositories() (bound []string, unbound []Unbound) {
+	for _, name := range c.Names() {
+		switch {
+		case name == RootNamespace:
+			unbound = append(unbound, Unbound{Name: name, Reason: "Root is a ticket namespace bound to no repository"})
+		case strings.TrimSpace(c.Projects[name].Path) == "":
+			unbound = append(unbound, Unbound{Name: name, Reason: "registered with no repository path"})
+		default:
+			bound = append(bound, name)
+		}
+	}
+	return bound, unbound
 }
 
 // TicketsRoot is the multistore root: <central_root>/tickets/<project>/*.md.

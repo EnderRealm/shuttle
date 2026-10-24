@@ -15,6 +15,7 @@ import (
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
 	observercontract "shuttle/internal/observer"
+	"shuttle/internal/provider/tkconfig"
 )
 
 const tkProject = "shuttle"
@@ -426,6 +427,16 @@ func TestObserverActionAuthorizationReasons(t *testing.T) {
 	noTicket.Ticket = ""
 	foreign := *question
 	foreign.Ticket = "other/some-ticket-1234"
+	// A Root ticket, and a reopen on a ticket in another namespace, are
+	// writable only when their own namespace is configured. Authorization
+	// reads no relationships, so membership in a configured project's epic
+	// cannot widen it.
+	root := *question
+	root.Ticket = tkconfig.RootNamespace + "/unified-work-ab12"
+	foreignReopen := *question
+	foreignReopen.Ticket = "loom/some-ticket-5678"
+	foreignLive := *live
+	foreignLive.Ticket = foreignReopen.Ticket
 
 	tickets := &config.ObserverTickets{Projects: []string{tkProject}, DiscoveryProject: tkProject, MaxDiscoveries: 1}
 	entry := func(q *observercontract.Question, exp *observercontract.Experiment) *observercontract.Entry {
@@ -467,6 +478,12 @@ func TestObserverActionAuthorizationReasons(t *testing.T) {
 			want:   "is not the entry's provenance"},
 		{name: "outside the projects", tickets: tickets, state: state(entry(&foreign, nil)), assessment: observed,
 			action: proposal(identity, "n", observercontract.ActionTicketNote, question.ID, foreign.Ticket, "Note.", absent.Evidence.Sources),
+			want:   "outside the configured projects"},
+		{name: "a Root ticket", tickets: tickets, state: state(entry(&root, nil)), assessment: observed,
+			action: proposal(identity, "n", observercontract.ActionTicketNote, question.ID, root.Ticket, "Note.", absent.Evidence.Sources),
+			want:   "outside the configured projects"},
+		{name: "a reopen in another namespace", tickets: tickets, state: state(entry(&foreignReopen, &foreignLive)), assessment: absent,
+			action: proposal(identity, "r", observercontract.ActionTicketReopen, question.ID, foreignReopen.Ticket, "Reopen.", absent.Evidence.Sources),
 			want:   "outside the configured projects"},
 		{name: "note on a confirmation", tickets: tickets, state: state(entry(question, live)), assessment: observed, action: note},
 		{name: "note on an absence", tickets: tickets, state: state(entry(question, live)), assessment: absent, action: note},

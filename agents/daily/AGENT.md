@@ -65,6 +65,11 @@ local time.
     written at that moment, and `limitations` explains why. Write "is now done", not
     "moved from open to done". Dozens of writes within a few seconds are a bulk edit, so
     describe them as one event.
+  - An epic's status is derived from its children, which can live in other projects or
+    in `_root`, tk's project-less planning namespace. `changed_by` names the epic's
+    children that were updated, completed or had a status change in the window. The
+    epic may have been edited too. Credit a child with moving the epic's status only
+    when the epic's `status` or `completed` shows the move.
 - `loom-sessions.json`: agent sessions that started in the window, grouped by
   repository, with counts, token totals, commits made in those sessions, and each
   session's stated `intent`. That intent is the first 300 characters of its first
@@ -79,12 +84,14 @@ local time.
   also contain.
 
 A missing source matters too. Report `"available": false`, a non-empty tk-tickets `skips`,
-a non-zero `skipped_lines` in tk-journal or tk-tickets, or a git-log `skipped` entry whose
+a tk-tickets `"complete": false` (its `diagnostics` say what could not be read), a non-zero `skipped_lines` in tk-journal or tk-tickets, or a git-log `skipped` entry whose
 `reason` starts with `git log:` as a data gap in one line. `skipped_lines` counts malformed
 lines anywhere in tk's commit or mutation log, so some of the day's ticket activity may be
 missing and the same count can recur day after day. Zero is normal, so leave it out. A
 git-log `skipped` entry whose `reason` says "no such file or directory" is a checkout
-registered from another machine. That is routine, so leave it out. When
+registered from another machine. That is routine, so leave it out. So is a git-log or
+tk-journal `skipped` entry for `_root` or a project with no repository path: those hold
+tickets, not commits. When
 loom-sessions reports `"available": false`, the day is never quiet, because its sessions
 could not be seen: write a short email whose H1 names the gap. Any other gap is one line
 and does not change whether the day is quiet.

@@ -126,7 +126,7 @@ func TestEmptyWindowEmitsAnEmptyDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if string(data) != `{"entries":[],"skipped_lines":0}` {
+	if string(data) != `{"entries":[],"skipped_lines":0,"skipped":[]}` {
 		t.Fatalf("data = %s, want an empty document", data)
 	}
 }
@@ -149,5 +149,39 @@ func TestMalformedLinesAreLoggedSkippedAndCounted(t *testing.T) {
 	}
 	if logs.Len() == 0 {
 		t.Fatal("the skipped lines were not logged")
+	}
+}
+
+// tk's journal records commits made in a project's repository, so a
+// registration bound to none — Root, even when config.yaml gives it a path,
+// or a project with no path — is reported as skipped and its journal is not
+// read, whatever the state directory holds.
+func TestRegistrationsBoundToNoRepositoryAreSkipped(t *testing.T) {
+	w := testWindow(t)
+	tkConfig := tkHome(t, "shuttle")
+	f, err := os.OpenFile(tkConfig, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("    " + tkconfig.RootNamespace + ":\n        path: /Users/steve/code/root\n    unbound:\n        path: \"\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	inside := w.From.Add(time.Hour).Format(time.RFC3339)
+	for _, project := range []string{"shuttle", tkconfig.RootNamespace, "unbound"} {
+		writeJournal(t, tkConfig, project, marshal(t, journal.Entry{SHA: project, TS: inside, Action: "link"}))
+	}
+
+	doc := run(t, tkConfig, &bytes.Buffer{})
+	if len(doc.Entries) != 1 || doc.Entries[0].Project != "shuttle" {
+		t.Fatalf("entries = %+v, want only the bound project's", doc.Entries)
+	}
+	if len(doc.Skipped) != 2 || doc.Skipped[0].Project != tkconfig.RootNamespace || doc.Skipped[1].Project != "unbound" {
+		t.Fatalf("skipped = %+v, want Root and the path-less project, in name order", doc.Skipped)
+	}
+	for _, s := range doc.Skipped {
+		if s.Reason == "" {
+			t.Errorf("skip %+v: no reason", s)
+		}
 	}
 }

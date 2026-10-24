@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"shuttle/internal/provider"
+	"shuttle/internal/provider/tkconfig"
 )
 
 func git(t *testing.T, dir string, env []string, args ...string) {
@@ -162,5 +163,33 @@ func TestTheReportsRepoIsIncludedWhenItExists(t *testing.T) {
 	doc, _ = run(t, env)
 	if len(doc.Repos) != 0 || len(doc.Skipped) != 0 {
 		t.Fatalf("document = %+v, want a reports repo that does not exist yet left out entirely", doc)
+	}
+}
+
+// Root is a ticket namespace, not a checkout, even when config.yaml binds it
+// to a path; a project registered with no path names no checkout either. Both
+// are reported as skipped and neither reaches git.
+func TestRegistrationsBoundToNoRepositoryAreSkipped(t *testing.T) {
+	w := testWindow(t)
+	repo := newRepo(t, w.From.Add(time.Hour))
+	rootPath := newRepo(t, w.From.Add(2*time.Hour))
+	doc, _ := run(t, provider.Env{TKConfig: tkHome(t, map[string]string{
+		"shuttle": repo, tkconfig.RootNamespace: rootPath, "unbound": "",
+	})})
+	if len(doc.Repos) != 1 || doc.Repos[0].Name != "shuttle" || len(doc.Repos[0].Commits) != 1 {
+		t.Fatalf("repos = %+v, want only the bound checkout", doc.Repos)
+	}
+	skipped := map[string]skip{}
+	for _, s := range doc.Skipped {
+		skipped[s.Name] = s
+	}
+	if len(doc.Skipped) != 2 {
+		t.Fatalf("skipped = %+v, want Root and the path-less project", doc.Skipped)
+	}
+	for _, name := range []string{tkconfig.RootNamespace, "unbound"} {
+		s, ok := skipped[name]
+		if !ok || s.Path != "" || s.Reason == "" {
+			t.Fatalf("skipped = %+v, want %s named with a reason and no path", doc.Skipped, name)
+		}
 	}
 }

@@ -658,16 +658,29 @@ map, because `internal/project` is unimportable from another module. `TK_STORE_R
 is deliberately not used: it relocates config and state paths and disables the
 watch loops in any `tk serve` that inherits it.
 
+Ticket namespaces and repositories are enumerated separately. Root (`_root`) is
+a ticket namespace bound to no repository, and a project registered with no
+`path` names none either: both are reported as `skipped` with a reason by the
+providers that walk repositories (`tk-journal`, `git-log`) and never reach git,
+a journal path or execution. `tk-tickets` walks namespaces, Root included.
+
 `tk-journal` reads `~/.ticket/state/<project>/commits.jsonl` for every registered
-project and keeps entries whose `ts` is in the window: sha, ticket, repo, message,
+project bound to a repository and keeps entries whose `ts` is in the window: sha, ticket, repo, message,
 action (`link` or `close`), files changed, lines added and removed, branch, and
 `duration_seconds` when present.
 
 `tk-tickets` imports `pkg/ticket`, opens `ticket.NewMultiStore(<central_root>/tickets)`
-and lists with `ListWithSkips` (skips are reported in the document, not swallowed).
-It emits tickets whose `updated` is in the window with id, project, title, status,
-type, priority, `completed`, and notes added in the window. For status changes it
-reads `~/.ticket/state/<project>/mutations.jsonl` and keeps entries in the window
+and reads one `Snapshot` (skips are reported in the document, not swallowed, with
+the snapshot's `complete`, the `namespaces` it read in full and its
+`diagnostics`). It emits tickets whose `updated` is in the window with id,
+project, title, status, type, priority, `completed`, and notes added in the
+window; an epic's status and `completed` are the snapshot's, derived from every
+child in every namespace. Deriving an epic writes nothing to it, so an epic is
+also emitted when a child of any namespace changed in the window, with
+`changed_by` naming those children. For status changes it reads
+`~/.ticket/state/<namespace>/mutations.jsonl` once for every ticket namespace —
+the ones the snapshot read and the ones it could not, the registered ones
+and Root — and keeps entries in the window
 whose `fields_changed` contains `status`; paired with the ticket's current status
 that yields "moved to done on 2026-09-01" without the transition ledger tk does not
 have. The limitation is recorded in the document: mutations are logged only for
@@ -675,14 +688,14 @@ writes made on this machine, so a status change synced in from elsewhere shows a
 ticket updated in the window with no mutation. A from/to status ledger in tk is a
 phase 2 nicety, not a phase 1 prerequisite.
 
-Reads take no lock in `pkg/ticket`, and `pkg/ticket` starts no goroutines and runs no
-git, so a running `tk serve` is unaffected. `ticket.Warnf` is replaced with the
+The snapshot takes only the store's shared lock, and `pkg/ticket` starts no
+goroutines and runs no git, so a running `tk serve` is unaffected. `ticket.Warnf` is replaced with the
 shuttle logger so skip warnings land in the run's stderr log rather than the
 daemon's.
 
 ### 8.5 `git-log`
 
-For each registered project's `path`, plus the reports repo and the knowledge repo
+For each registered project bound to a repository (§8.4), plus the reports repo and the knowledge repo
 if configured: `git log --since=<from> --until=<to> --all --format=<fields> --shortstat`
 run with `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` unset and a 30 s timeout.
 Hash, author date, subject, branch names from `--decorate`, files and lines changed.

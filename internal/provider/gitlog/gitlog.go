@@ -1,5 +1,6 @@
 // Package gitlog reports the window's commits across every registered project
-// checkout plus the reports repo (§8.5).
+// checkout plus the reports repo (§8.5). Ticket namespaces with no repository
+// — Root among them — are never handed to git.
 package gitlog
 
 import (
@@ -66,8 +67,11 @@ type commit struct {
 // registers checkouts from every machine, so a path this one does not have is
 // routine — and one broken checkout must not take the whole run down, so a git
 // that fails for any other reason is a skip too rather than a provider failure.
+// A registration bound to no repository — Root, or a project with no path —
+// is a skip with no path, named so the reader knows it was not scanned.
 type skip struct {
-	Path   string `json:"path"`
+	Name   string `json:"name"`
+	Path   string `json:"path,omitempty"`
 	Reason string `json:"reason"`
 }
 
@@ -78,8 +82,12 @@ func Run(ctx context.Context, env provider.Env, _ map[string]any, w provider.Win
 		return nil, err
 	}
 	doc := document{Repos: []repo{}, Skipped: []skip{}}
-	targets := make([]repo, 0, len(cfg.Projects)+1)
-	for _, name := range cfg.Names() {
+	bound, unbound := cfg.Repositories()
+	for _, u := range unbound {
+		doc.Skipped = append(doc.Skipped, skip{Name: u.Name, Reason: u.Reason})
+	}
+	targets := make([]repo, 0, len(bound)+1)
+	for _, name := range bound {
 		targets = append(targets, repo{Name: name, Path: cfg.Projects[name].Path})
 	}
 	if env.ReportsDir != "" {
@@ -90,12 +98,12 @@ func Run(ctx context.Context, env provider.Env, _ map[string]any, w provider.Win
 
 	for _, target := range targets {
 		if _, err := os.Stat(target.Path); err != nil {
-			doc.Skipped = append(doc.Skipped, skip{Path: target.Path, Reason: err.Error()})
+			doc.Skipped = append(doc.Skipped, skip{Name: target.Name, Path: target.Path, Reason: err.Error()})
 			continue
 		}
 		out, err := gitLog(ctx, target.Path, w)
 		if err != nil {
-			doc.Skipped = append(doc.Skipped, skip{Path: target.Path, Reason: err.Error()})
+			doc.Skipped = append(doc.Skipped, skip{Name: target.Name, Path: target.Path, Reason: err.Error()})
 			continue
 		}
 		target.Commits = parse(out, w)

@@ -1,5 +1,6 @@
 // Package tkjournal reports the commits tk's journal linked to tickets in the
-// window, read from every registered project's commits.jsonl (§8.4).
+// window, read from the commits.jsonl of every registered project bound to a
+// repository (§8.4).
 package tkjournal
 
 import (
@@ -23,6 +24,16 @@ const journalFile = "commits.jsonl"
 type document struct {
 	Entries      []entry `json:"entries"`
 	SkippedLines int     `json:"skipped_lines"`
+	Skipped      []skip  `json:"skipped"`
+}
+
+// skip is a registration whose journal is not read, and why. tk's journal
+// records commits made in a project's repository, so a registration bound to
+// none — Root, or a project with no path — has no commits to report, and is
+// named rather than read.
+type skip struct {
+	Project string `json:"project"`
+	Reason  string `json:"reason"`
 }
 
 type entry struct {
@@ -46,8 +57,12 @@ func Run(_ context.Context, env provider.Env, _ map[string]any, w provider.Windo
 	if err != nil {
 		return nil, err
 	}
-	doc := document{Entries: []entry{}}
-	for _, project := range cfg.Names() {
+	doc := document{Entries: []entry{}, Skipped: []skip{}}
+	bound, unbound := cfg.Repositories()
+	for _, u := range unbound {
+		doc.Skipped = append(doc.Skipped, skip{Project: u.Name, Reason: u.Reason})
+	}
+	for _, project := range bound {
 		path := filepath.Join(tkconfig.StateDir(env.TKConfig, project), journalFile)
 		f, err := os.Open(path)
 		if err != nil {
