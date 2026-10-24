@@ -31,8 +31,10 @@ func (s *Store) CompleteEvent(id string, res Result) (Event, error) {
 		event = Event{Agent: agent, RunID: id}
 		// Resume clears the counter but does not turn a failed run into a
 		// success. Consult the terminal history so recovery survives resume.
+		// A reconciled run is completed but keeps its failure class (see
+		// Reconciled); it did not recover the agent, so it reads as failed.
 		var last sql.NullString
-		if err := tx.QueryRow(`SELECT (SELECT status FROM runs WHERE agent = ? AND status IN (?, ?) ORDER BY ended_at DESC, rowid DESC LIMIT 1)`, agent, StatusCompleted, StatusFailed).Scan(&last); err != nil {
+		if err := tx.QueryRow(`SELECT (SELECT CASE WHEN failure_class IS NULL THEN status ELSE ? END FROM runs WHERE agent = ? AND status IN (?, ?) ORDER BY ended_at DESC, rowid DESC LIMIT 1)`, StatusFailed, agent, StatusCompleted, StatusFailed).Scan(&last); err != nil {
 			return err
 		}
 		event.Recovered = last.String == StatusFailed

@@ -838,6 +838,7 @@ shuttle run <agent> [--slot D] [--dry-run] [--no-deliver] [--unsafe-no-sandbox]
 shuttle status                      agents, next slot, last outcome, streak, paused, open incidents, today's spend
 shuttle runs [--agent A] [-n 20]    ledger rows
 shuttle show <run-id>               result.json, applied.json, paths
+shuttle reconcile <run-id>          resume a failed observer run's actions (observer-contract §11)
 shuttle agents                      load and validate every definition
 shuttle preflight                   §7.5 without a run
 shuttle deliver --test              one test email through §10

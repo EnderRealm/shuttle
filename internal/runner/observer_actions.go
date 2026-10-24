@@ -17,6 +17,7 @@ import (
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
 	observercontract "shuttle/internal/observer"
+	"shuttle/internal/provider"
 	"shuttle/internal/provider/tkconfig"
 )
 
@@ -716,9 +717,19 @@ func observerDiscoveryBody(identity observercontract.Identity, action *observerc
 // record receipt is replayed first under its original request id; one the
 // notebook still refuses is returned as the failure it is, after the actions
 // are driven, and the action it would have authorized stays unadmitted.
+//
+// Only a failed run is reconciled, as RetryDelivery takes only a completed
+// one. A failed run whose records are all terminal makes no notebook call —
+// the retained notebook_revision stands — and goes straight to the finish, so
+// a reconciliation whose finish failed part-way is healed by running it again.
+// A reconciliation that converges finishes the run the way a live one does:
+// the report is prepared, observer-result.json is rewritten from the retained
+// collection and the reconciled records, the row moves to completed and the
+// report is delivered. One that does not records its counts as
+// conflict-or-failure and leaves the row failed.
 func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.Definition, row *ledger.Run) error {
-	if !row.RunDir.Valid {
-		return fmt.Errorf("run %s: no run directory is retained", row.ID)
+	if row.Status != ledger.StatusFailed || !row.RunDir.Valid {
+		return fmt.Errorf("run %s: only a failed run with a retained directory is reconciled; it is %s", row.ID, row.Status)
 	}
 	runDir := row.RunDir.String
 	recordData, err := os.ReadFile(filepath.Join(runDir, "run.json"))
@@ -732,7 +743,10 @@ func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.D
 	if retained.Observer == nil {
 		return fmt.Errorf("run %s is not an observer run", row.ID)
 	}
+	// The report is prepared and delivered under the capabilities the run
+	// retained, as a delivery retry is, not whatever the definition says now.
 	retainedDef := *def
+	retainedDef.Manifest.Outputs = retained.Outputs
 	retainedDef.Manifest.Observer = &agentdef.Observer{Config: retained.Observer.Config}
 	registration, err := observerRegistration(p.Config, &retainedDef)
 	if err != nil {
@@ -772,22 +786,103 @@ func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.D
 	if err := json.Unmarshal(appliedData, &applied); err != nil {
 		return err
 	}
+	if observerDeliveryEligible(&retainedDef, validated) {
+		if err := validateObserverSubject(validated.Subject); err != nil {
+			return err
+		}
+	}
+	collectionData, err := readBounded(filepath.Join(runDir, "observer", "evidence.json"), maxCollectorResponse)
+	if err != nil {
+		return err
+	}
+	collection, err := validateCollection(collectionData, definition.Identity)
+	if err != nil {
+		return fmt.Errorf("retained collection: %w", err)
+	}
+	slot, err := time.Parse(time.RFC3339, retained.Slot)
+	if err != nil {
+		return fmt.Errorf("retained run.json slot %q: %w", retained.Slot, err)
+	}
+	window, err := provider.Resolve(provider.WindowPreviousDay, slot, loc)
+	if err != nil {
+		return err
+	}
 	state := &observerRunState{
 		Registration: registration, Definition: definition,
 		Notebook: newObserverNotebook(registration, domainCommandEnv(p.HomeDir, loc)),
-		Snapshot: snapshot,
+		Snapshot: snapshot, Collection: collection,
 	}
-	var recordErr error
-	for i, assessment := range validated.Assessments {
-		if observationRecorded(&applied, assessmentRequestID(row.ID, i)) {
-			continue
+	if observerReconcilable(row.ID, validated, &applied) {
+		var recordErr error
+		for i, assessment := range validated.Assessments {
+			if observationRecorded(&applied, assessmentRequestID(row.ID, i)) {
+				continue
+			}
+			if recordErr = p.recordObserverAssessment(ctx, row.ID, runDir, state, &applied, i, assessment); recordErr != nil {
+				// Each later record's revision assumes this one landed.
+				break
+			}
 		}
-		if recordErr = p.recordObserverAssessment(ctx, row.ID, runDir, state, &applied, i, assessment); recordErr != nil {
-			// Each later record's revision assumes this one landed.
-			break
+		if err := errors.Join(recordErr, p.applyObserverActions(ctx, row.ID, runDir, state, validated, &applied)); err != nil {
+			return errors.Join(err, writeObserverResult(runDir, observerOutcome(state, validated, &applied, "conflict-or-failure", err.Error())))
 		}
 	}
-	return errors.Join(recordErr, p.applyObserverActions(ctx, row.ID, runDir, state, validated, &applied))
+
+	run := &preparedRun{ID: row.ID, Dir: runDir, Window: window, Loc: loc}
+	if err := p.finishReconciledObserver(&retainedDef, row, run, state, validated, &applied); err != nil {
+		// Every record has converged, so the counts are the reconciled ones;
+		// the detail and the row still failed say the finish did not.
+		return errors.Join(err, writeObserverResult(runDir, observerOutcome(state, validated, &applied, "applied", err.Error())))
+	}
+	if err := p.deliverObserverReport(ctx, &retainedDef, row, run, validated, &applied); err != nil {
+		return fmt.Errorf("observer delivery: %w", err)
+	}
+	return nil
+}
+
+// finishReconciledObserver is the finish of a converged reconciliation, in
+// the order a live run takes it. result.json reads completed only once the
+// row does, so a failure anywhere here leaves both failed for the next
+// reconciliation to finish.
+func (p *Pipeline) finishReconciledObserver(def *agentdef.Definition, row *ledger.Run, run *preparedRun, state *observerRunState, out *validatedObserverOutput, applied *observerApplied) error {
+	if err := p.prepareObserverReport(def, row, run, Options{}, out, applied); err != nil {
+		return err
+	}
+	if err := writeObserverResult(run.Dir, observerOutcome(state, out, applied, "applied", "")); err != nil {
+		return err
+	}
+	resultData, err := os.ReadFile(filepath.Join(run.Dir, resultFile))
+	if err != nil {
+		return err
+	}
+	var record resultRecord
+	if err := json.Unmarshal(resultData, &record); err != nil {
+		return fmt.Errorf("retained %s: %w", resultFile, err)
+	}
+	if err := p.Ledger.Reconciled(row.ID, out.Silent); err != nil {
+		return err
+	}
+	record.Status, record.FailureClass, record.Detail = ledger.StatusCompleted, "", ""
+	record.Silent = boolPointer(out.Silent)
+	return writeResult(run.Dir, record)
+}
+
+// observerReconcilable reports whether a reconciliation has anything to
+// drive: an assessment without its record receipt, or an action short of
+// settled or refused. A run whose records are all terminal makes no notebook
+// call, so nothing moves the revision it retained.
+func observerReconcilable(runID string, out *validatedObserverOutput, applied *observerApplied) bool {
+	for i := range out.Assessments {
+		if !observationRecorded(applied, assessmentRequestID(runID, i)) {
+			return true
+		}
+	}
+	for _, record := range applied.Actions {
+		if record.Stage != actionStageRefused && record.Stage != actionStageSettled {
+			return true
+		}
+	}
+	return false
 }
 
 // observerActionCounts folds the action records into the outcome counts

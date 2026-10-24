@@ -334,7 +334,10 @@ func writeObserverApplied(p *Pipeline, runID, runDir string, applied *observerAp
 
 func (p *Pipeline) prepareObserverReport(def *agentdef.Definition, row *ledger.Run, run *preparedRun, opts Options, out *validatedObserverOutput, applied *observerApplied) error {
 	report := &output.Outputs{Silent: out.Silent, Subject: out.Subject, Report: out.Report}
-	if len(out.Report) > 0 {
+	// A report already prepared for this run — a reconciliation finishing a
+	// tail that failed after the apply — is not filed again: the archive holds
+	// it and applied.json keeps the commit that filed it.
+	if len(out.Report) > 0 && applied.Report == nil {
 		if file := def.Manifest.Outputs.File; file != nil && file.Max > 0 {
 			var err error
 			applied.Report, err = p.apply(output.Target{

@@ -336,6 +336,28 @@ func (s *Store) Fail(id, class, errText string, res Result) error {
 	return err
 }
 
+// Reconciled moves a failed run to completed once an operator's
+// reconciliation has converged the work it left in flight. It is not a
+// success of the agent, the same way resume clears a counter without turning a
+// failure into one: the failure streak, the incident and any pause the failure
+// caused are left as they are, last_success_at is not stamped and no terminal
+// event is emitted. The row keeps its failure_class and error_signature —
+// no other completed row carries them — and CompleteEvent reads it as the
+// failure it was, so the agent's next success still recovers it. ended_at
+// keeps the time the run ended, so the terminal history keeps its order.
+func (s *Store) Reconciled(id string, silent bool) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := requireStatus(tx, id, StatusCompleted, StatusFailed); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`UPDATE runs SET status = ?, silent = ? WHERE id = ?`,
+			StatusCompleted, silent, id,
+		)
+		return err
+	})
+}
+
 func finishRun(tx *sql.Tx, id, status, now string, res Result, class, signature string) error {
 	_, err := tx.Exec(
 		`UPDATE runs SET status = ?, ended_at = ?, failure_class = ?, error_signature = ?,

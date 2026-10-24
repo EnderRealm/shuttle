@@ -14,7 +14,8 @@ var helpText = `shuttle - scheduled, sandboxed, ledgered unattended agent runs
 Usage: shuttle <command> [args]
 
 Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack',
-'preflight', 'pause', 'resume', 'install', 'uninstall', 'deliver' and 'run'.
+'preflight', 'pause', 'resume', 'install', 'uninstall', 'deliver', 'reconcile'
+and 'run'.
 Manual and daemon claims execute the same retained, sandboxed pipeline; --dry-run
 stops after inputs and prompt. The rest is the phase 1 surface (docs/phase1-design.md §12) that the
 remaining phase 1 tickets fill in.
@@ -26,6 +27,8 @@ Runs:
   run <agent> [--slot D] [--dry-run] [--no-deliver] [--unsafe-no-sandbox]
   runs [--agent A] [-n 20]     Ledger rows
   show <run-id>                One run's ledger row
+  reconcile <run-id>           Resume a failed observer run's notebook and
+                                 ticket actions from their recorded stage
   agents                       Load and validate every definition
   preflight                    The per-run checks without a run
 

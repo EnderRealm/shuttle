@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
+	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
 	observercontract "shuttle/internal/observer"
@@ -898,6 +900,19 @@ func TestObserverActionsReconcileAfterLostResponses(t *testing.T) {
 			if entry := to.entry(t, to.question.ID); len(entry.InFlight) != 0 {
 				t.Fatalf("entry still carries %v in flight", entry.InFlight)
 			}
+			converged, err := to.f.store.Get(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if converged.Status != ledger.StatusCompleted || converged.FailureClass.String != ledger.ClassOutput || !converged.Silent {
+				t.Fatalf("row after reconciliation = %+v, want it completed with its failure class kept", converged)
+			}
+			reconciled := readObserverResult(t, row.RunDir.String)
+			if reconciled.NotebookStatus != "applied" || reconciled.Detail != "" ||
+				reconciled.ActionsApplied != 1 || reconciled.ActionsRefused != 0 || reconciled.ActionsFailed != 0 ||
+				reconciled.NotebookRevision != readApplied(t, row.RunDir.String).NotebookRevision {
+				t.Fatalf("observer-result.json after reconciliation = %+v", reconciled)
+			}
 		})
 	}
 }
@@ -1143,6 +1158,15 @@ func TestObserverReconciliationHoldsTheDecidedDestination(t *testing.T) {
 			if held := to.receipt(t, open.ID); held.Status != observercontract.ReceiptInFlight {
 				t.Fatalf("notebook receipt = %+v, want the claim left in flight for a person", held)
 			}
+			// What did not converge is counted from the reconciled records and
+			// the row stays failed.
+			if outcome := readObserverResult(t, row.RunDir.String); outcome.NotebookStatus != "conflict-or-failure" ||
+				outcome.ActionsFailed != 1 || outcome.ActionsApplied != 0 || !strings.Contains(outcome.Detail, want) {
+				t.Fatalf("observer-result.json = %+v", outcome)
+			}
+			if after, err := to.f.store.Get(run.ID); err != nil || after.Status != ledger.StatusFailed {
+				t.Fatalf("row = %+v, %v; want it left failed", after, err)
+			}
 		})
 	}
 }
@@ -1314,6 +1338,309 @@ func TestObserverReconciliationDoesNotAdmitAnUnrecordedAssessment(t *testing.T) 
 	}
 	if notebook := to.notebook(t); len(notebook.Requests) != 0 || len(notebook.Receipts) != 0 {
 		t.Fatalf("notebook requests = %d, receipts = %d; want no record and no claim", len(notebook.Requests), len(notebook.Receipts))
+	}
+}
+
+func TestObserverReconciliationFinishesTheRunItConverges(t *testing.T) {
+	answer := observedAnswer(t)
+	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+	to.f.def.Manifest.Outputs.Email = &agentdef.EmailOutput{Max: 1}
+	to.f.pipeline.Config.Email = config.Email{
+		Provider: "cloudflare", AccountID: "account", From: "from@example.test",
+		To: []string{"to@example.test"}, KeychainItem: "mail",
+	}
+	sender := &recordingSender{}
+	to.f.pipeline.Sender = sender
+	state := to.notebook(t)
+	state.CrashClaim = 2
+	writeJSONFixture(t, to.o.state, state)
+	note := proposal(to.question.Identity, "confirm", observercontract.ActionTicketNote, to.question.ID, to.ticketID,
+		"Three nights after the restart every report still repeated a headline.", answer.Evidence.Sources[:1])
+	report := "# Observer report\n\n" + strings.Repeat("Every night of the window repeated its headline. ", 6)
+	installObserverModel(t, to.f, map[string]any{
+		"silent": false, "subject": "Headline repeats", "assessments": []any{answer}, "actions": []any{note},
+	}, report)
+	to.f.slot = to.f.slot.Add(-24 * time.Hour)
+	run := to.f.claim(t, ledger.TriggerManual)
+	if _, err := to.f.pipeline.Run(context.Background(), to.f.def, run, Options{}); err == nil || !strings.Contains(err.Error(), run.ID+"-claim-001") {
+		t.Fatalf("err = %v, want the lost claim surfaced", err)
+	}
+	row, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := readObserverResult(t, row.RunDir.String)
+	if row.Status != ledger.StatusFailed || before.NotebookStatus != "conflict-or-failure" ||
+		before.ActionsFailed != 1 || before.ActionsApplied != 0 || before.EvidenceCount != 1 || len(sender.messages) != 0 {
+		t.Fatalf("row = %+v, observer-result.json = %+v, %d sent; want a failed run with nothing delivered", row, before, len(sender.messages))
+	}
+	// A re-collection would now find nothing: the reconciled summary has to
+	// come from the collection the run retained.
+	writeJSONFixture(t, to.o.evidence, []*observercontract.Bundle{})
+
+	if err := to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row); err != nil {
+		t.Fatal(err)
+	}
+	applied := readApplied(t, row.RunDir.String)
+	outcome := readObserverResult(t, row.RunDir.String)
+	if outcome.NotebookStatus != "applied" || outcome.Detail != "" ||
+		outcome.ActionsApplied != 1 || outcome.ActionsFailed != 0 || outcome.ActionsRefused != 0 ||
+		outcome.Collection != before.Collection || outcome.EvidenceCount != before.EvidenceCount ||
+		outcome.AssessmentCount != 1 || outcome.ActionCount != 1 || !outcome.Report ||
+		outcome.Silent == nil || *outcome.Silent || outcome.NotebookRevision != applied.NotebookRevision {
+		t.Fatalf("observer-result.json = %+v, want the reconciled counts over the retained collection", outcome)
+	}
+	var record resultRecord
+	readJSONFixture(t, filepath.Join(row.RunDir.String, resultFile), &record)
+	if record.Status != ledger.StatusCompleted || record.FailureClass != "" || record.Detail != "" ||
+		record.Silent == nil || *record.Silent {
+		t.Fatalf("result.json = %+v", record)
+	}
+	converged, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged.Status != ledger.StatusCompleted || converged.FailureClass != row.FailureClass || converged.Silent ||
+		converged.EndedAt != row.EndedAt || converged.DeliveryStatus.String != ledger.DeliveryDelivered {
+		t.Fatalf("row = %+v, want it completed and delivered with its failure class and end time kept", converged)
+	}
+	if len(sender.messages) != 1 || sender.messages[0].Subject != "Headline repeats" || sender.messages[0].RunID != run.ID {
+		t.Fatalf("sent = %+v, want the report once", sender.messages)
+	}
+	if applied.DeliveryStatus != ledger.DeliveryDelivered || applied.Report == nil || applied.Report.ReportPath == "" {
+		t.Fatalf("applied = %+v, want the report archived and delivered", applied)
+	}
+	// The run's failure stays in the agent's history: reconciliation is not
+	// a success that clears the streak or the incident.
+	agent, err := to.f.store.Agent(to.f.def.Name)
+	if err != nil || agent.FailureStreak != 1 || agent.LastSuccessAt.Valid {
+		t.Fatalf("agent = %+v, %v; want the failure streak left", agent, err)
+	}
+	if incidents, err := to.f.store.OpenIncidents(); err != nil || len(incidents) != 1 || incidents[0].LastRunID.String != run.ID {
+		t.Fatalf("incidents = %+v, %v; want the run's incident left open", incidents, err)
+	}
+}
+
+// reportedManifest is a non-silent run with a report the fixture files under
+// outputs.file and does not email.
+func reportedManifest(assessments []any, actions []any) (map[string]any, string) {
+	report := "# Observer report\n\n" + strings.Repeat("Every night of the window repeated its headline. ", 6)
+	return map[string]any{"silent": false, "assessments": assessments, "actions": actions}, report
+}
+
+// runReported runs the ticket observer with a filed report, an earlier slot
+// each time as run does.
+func (to *ticketObserver) runReported(t *testing.T, assessments []any, actions []any) (*ledger.Run, error) {
+	t.Helper()
+	manifest, report := reportedManifest(assessments, actions)
+	installObserverModel(t, to.f, manifest, report)
+	to.f.slot = to.f.slot.Add(-24 * time.Hour)
+	run := to.f.claim(t, ledger.TriggerManual)
+	_, err := to.f.pipeline.Run(context.Background(), to.f.def, run, Options{})
+	return run, err
+}
+
+// blockReports puts a file where the observer's report directory goes, so the
+// report apply fails, and returns the function that clears it.
+func blockReports(t *testing.T, to *ticketObserver) func() {
+	t.Helper()
+	path := filepath.Join(to.f.root, reportsDir, "fixture")
+	if err := os.WriteFile(path, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		t.Helper()
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// reportCommits counts the commits in the reports repo that touched the run's
+// filed report.
+func reportCommits(t *testing.T, to *ticketObserver, path string) int {
+	t.Helper()
+	cmd := exec.Command("git", "-C", filepath.Join(to.f.root, reportsDir), "log", "--format=%H", "--", path)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(strings.Fields(string(out)))
+}
+
+func TestObserverReconciliationRefusesARunThatIsNotFailed(t *testing.T) {
+	answer := observedAnswer(t)
+	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+	note := proposal(to.question.Identity, "confirm", observercontract.ActionTicketNote, to.question.ID, to.ticketID,
+		"Three nights after the restart every report still repeated a headline.", answer.Evidence.Sources[:1])
+	run, _, err := to.run(t, silentManifest([]any{answer}, []any{note}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A sentinel revision no notebook would report: any notebook call the
+	// reconciliation made would replace it.
+	applied := readApplied(t, row.RunDir.String)
+	applied.NotebookRevision = 9999
+	if err := writeObserverApplied(to.f.pipeline, run.ID, row.RunDir.String, &applied); err != nil {
+		t.Fatal(err)
+	}
+	beforeResult, err := os.ReadFile(filepath.Join(row.RunDir.String, "observer-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := len(to.notebook(t).Requests)
+
+	err = to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row)
+	if err == nil || !strings.Contains(err.Error(), "only a failed run") || !strings.Contains(err.Error(), run.ID) {
+		t.Fatalf("err = %v, want the completed run refused", err)
+	}
+	if after := readApplied(t, row.RunDir.String); after.NotebookRevision != 9999 {
+		t.Fatalf("notebook_revision = %d, want the retained one untouched", after.NotebookRevision)
+	}
+	if got := len(to.notebook(t).Requests); got != requests {
+		t.Fatalf("notebook requests = %d, want %d", got, requests)
+	}
+	afterResult, err := os.ReadFile(filepath.Join(row.RunDir.String, "observer-result.json"))
+	if err != nil || string(afterResult) != string(beforeResult) {
+		t.Fatalf("observer-result.json changed under a refusal: %s, %v", afterResult, err)
+	}
+	if after, err := to.f.store.Get(run.ID); err != nil || after.Status != ledger.StatusCompleted {
+		t.Fatalf("row = %+v, %v; want it left completed", after, err)
+	}
+}
+
+func TestObserverReconciliationFinishesAnAllTerminalRunWithoutTheNotebook(t *testing.T) {
+	answer := observedAnswer(t)
+	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+	note := proposal(to.question.Identity, "confirm", observercontract.ActionTicketNote, to.question.ID, to.ticketID,
+		"Three nights after the restart every report still repeated a headline.", answer.Evidence.Sources[:1])
+	// Every record lands, then the run fails filing its report.
+	unblock := blockReports(t, to)
+	run, err := to.runReported(t, []any{answer}, []any{note})
+	if err == nil {
+		t.Fatal("want the report apply failure surfaced")
+	}
+	row, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := readApplied(t, row.RunDir.String)
+	if row.Status != ledger.StatusFailed || len(applied.Observations) != 1 ||
+		applied.Actions[0].Stage != actionStageSettled || applied.Actions[0].Outcome != observercontract.ReceiptApplied {
+		t.Fatalf("row = %+v, applied = %+v; want a failed run whose records are all terminal", row, applied)
+	}
+	unblock()
+	applied.NotebookRevision = 9999
+	if err := writeObserverApplied(to.f.pipeline, run.ID, row.RunDir.String, &applied); err != nil {
+		t.Fatal(err)
+	}
+	requests := len(to.notebook(t).Requests)
+
+	if err := to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(to.notebook(t).Requests); got != requests {
+		t.Fatalf("notebook requests = %d, want %d: nothing was left for the notebook", got, requests)
+	}
+	after := readApplied(t, row.RunDir.String)
+	if after.NotebookRevision != 9999 || after.Report == nil || after.Report.ReportPath == "" {
+		t.Fatalf("applied = %+v, want the retained revision and the filed report", after)
+	}
+	if _, err := os.Stat(after.Report.ReportPath); err != nil {
+		t.Fatal(err)
+	}
+	outcome := readObserverResult(t, row.RunDir.String)
+	if outcome.NotebookStatus != "applied" || outcome.Detail != "" || outcome.NotebookRevision != 9999 ||
+		outcome.ActionsApplied != 1 || outcome.ActionsFailed != 0 || !outcome.Report {
+		t.Fatalf("observer-result.json = %+v", outcome)
+	}
+	if converged, err := to.f.store.Get(run.ID); err != nil || converged.Status != ledger.StatusCompleted {
+		t.Fatalf("row = %+v, %v; want it completed", converged, err)
+	}
+}
+
+func TestObserverReconciliationHealsAFinishThatFailed(t *testing.T) {
+	answer := observedAnswer(t)
+	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+	state := to.notebook(t)
+	state.CrashClaim = 2
+	writeJSONFixture(t, to.o.state, state)
+	note := proposal(to.question.Identity, "confirm", observercontract.ActionTicketNote, to.question.ID, to.ticketID,
+		"Three nights after the restart every report still repeated a headline.", answer.Evidence.Sources[:1])
+	run, err := to.runReported(t, []any{answer}, []any{note})
+	if err == nil || !strings.Contains(err.Error(), run.ID+"-claim-001") {
+		t.Fatalf("err = %v, want the lost claim surfaced", err)
+	}
+	row, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The finish fails after the report is filed and committed: result.json
+	// cannot be read back.
+	resultPath := filepath.Join(row.RunDir.String, resultFile)
+	retainedResult, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(resultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(resultPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err = to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row)
+	if err == nil || !strings.Contains(err.Error(), resultFile) {
+		t.Fatalf("err = %v, want the failed finish surfaced", err)
+	}
+	applied := readApplied(t, row.RunDir.String)
+	if a := applied.Actions[0]; a.Stage != actionStageSettled || a.Outcome != observercontract.ReceiptApplied {
+		t.Fatalf("record = %+v, want the action converged", a)
+	}
+	if applied.Report == nil || applied.Report.Commit == "" {
+		t.Fatalf("report = %+v, want it filed and committed before the failure", applied.Report)
+	}
+	outcome := readObserverResult(t, row.RunDir.String)
+	if outcome.NotebookStatus != "applied" || outcome.ActionsApplied != 1 || outcome.ActionsFailed != 0 ||
+		!strings.Contains(outcome.Detail, resultFile) {
+		t.Fatalf("observer-result.json = %+v, want the reconciled counts with the finish's failure", outcome)
+	}
+	if failed, err := to.f.store.Get(run.ID); err != nil || failed.Status != ledger.StatusFailed {
+		t.Fatalf("row = %+v, %v; want it left failed", failed, err)
+	}
+	requests := len(to.notebook(t).Requests)
+
+	if err := os.Remove(resultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, retainedResult, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(to.notebook(t).Requests); got != requests {
+		t.Fatalf("notebook requests = %d, want %d: the second pass only finishes", got, requests)
+	}
+	after := readApplied(t, row.RunDir.String)
+	if after.Report == nil || after.Report.Commit != applied.Report.Commit || reportCommits(t, to, after.Report.ReportPath) != 1 {
+		t.Fatalf("report = %+v, want the first filing kept and committed once", after.Report)
+	}
+	healed := readObserverResult(t, row.RunDir.String)
+	if healed.NotebookStatus != "applied" || healed.Detail != "" || healed.ActionsApplied != 1 {
+		t.Fatalf("observer-result.json = %+v", healed)
+	}
+	var record resultRecord
+	readJSONFixture(t, resultPath, &record)
+	if record.Status != ledger.StatusCompleted || record.FailureClass != "" {
+		t.Fatalf("result.json = %+v", record)
+	}
+	if converged, err := to.f.store.Get(run.ID); err != nil || converged.Status != ledger.StatusCompleted {
+		t.Fatalf("row = %+v, %v; want it completed", converged, err)
 	}
 }
 

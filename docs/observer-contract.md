@@ -525,7 +525,21 @@ widen it, target another ticket, or stand in for a person's decision.
   action `failed` with both destinations and leaves it for a person. An
   assessment without a record receipt is replayed first under its original
   request id; one the notebook still refuses is reported as the failure it is
-  and its action stays unadmitted.
+  and its action stays unadmitted. The operator entry point is
+  `shuttle reconcile <run-id>`. It takes only a failed run and refuses any
+  other before a notebook call. A failed run with nothing left to drive — every
+  assessment holds its receipt and every action is settled or refused — makes
+  no notebook call, so the retained `notebook_revision` is not rewritten, and
+  goes straight to the finish. A reconciliation that converges finishes the
+  run as a live one would: the report is prepared, `observer-result.json` is
+  rewritten as `applied` with the reconciled counts over the retained
+  collection, the row moves to `completed`, `result.json` follows it, and the
+  report is delivered. The failure streak, its incident and any pause it
+  caused stand. A report already filed for the run is not filed again. One
+  that does not converge rewrites `observer-result.json` with its counts as
+  `conflict-or-failure`; one whose finish fails rewrites it as `applied` with
+  the failure as its detail. Either leaves the row `failed`, and running the
+  reconciliation again resumes from there.
 - **Retirement.** §6's ordering holds at the apply layer: a retirement ahead of
   the claim refuses it, and one behind it reports the action in flight while
   the write lands and settles under its own id, leaving the question retired.
