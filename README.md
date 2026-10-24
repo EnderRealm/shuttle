@@ -134,7 +134,10 @@ An `allow_write` entry equal to or containing the segment's run directory
 (`~/.shuttle/runs/weft/<id>`) is refused: at settlement the daemon finds every
 sandboxed process still holding the segment's write grant, including one that
 left the worker's process group, by its being denied that directory, and kills
-it before the repository is released.
+it before the repository is released. An entry equal to or containing the
+segment's worktree is refused too: `allow_write` is shared by every segment, so
+such an entry would let a concurrent segment's processes write this worktree,
+and this segment's settlement would kill them as its own.
 
 ```sh
 ./shuttle run daily --dry-run

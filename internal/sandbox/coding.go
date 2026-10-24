@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const platformHost = "platform.claude.com"
@@ -314,6 +316,20 @@ func requireCoding(o CodingOptions) error {
 		if path == o.RunDir || strings.HasPrefix(o.RunDir, path+"/") || path == "/" {
 			return fmt.Errorf("sandbox.allow_write: %q covers run dir %q", path, o.RunDir)
 		}
+		// allow_write is shared by every segment's profile: an entry covering
+		// this worktree lets a concurrent segment's processes write it, and the
+		// sweep would read them as this segment's holders and kill them.
+		// Seatbelt judges the real path, so aliases are compared by identity.
+		covered := path == o.Worktree || strings.HasPrefix(o.Worktree, path+"/")
+		if !covered {
+			var err error
+			if covered, err = coversByIdentity(path, o.Worktree); err != nil {
+				return fmt.Errorf("sandbox.allow_write: %q: %w", path, err)
+			}
+		}
+		if covered {
+			return fmt.Errorf("sandbox.allow_write: %q covers worktree %q", path, o.Worktree)
+		}
 	}
 	for _, domain := range o.AllowedDomains {
 		if domain == "" || domain == "*" || strings.ContainsAny(domain, " \t\r\n") {
@@ -321,6 +337,73 @@ func requireCoding(o CodingOptions) error {
 		}
 	}
 	return nil
+}
+
+// coversByIdentity reports whether entry equals or contains worktree by file
+// identity: the deepest existing ancestor of entry is matched with
+// os.SameFile against each real ancestor of worktree, which sees through
+// symlink, firmlink, case and Unicode-normalization aliases, and the
+// not-yet-created components below each are compared literally.
+func coversByIdentity(entry, worktree string) (bool, error) {
+	anchor, rest, err := existingAncestor(entry)
+	if err != nil {
+		return false, err
+	}
+	anchorInfo, err := os.Stat(anchor)
+	if err != nil {
+		return false, err
+	}
+	dir, below, err := existingAncestor(worktree)
+	if err != nil {
+		return false, err
+	}
+	// The worktree's real ancestors, not its spelling's: a symlink's parent
+	// does not contain the symlink's target.
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return false, err
+	}
+	for {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return false, err
+		}
+		if os.SameFile(anchorInfo, info) && len(rest) <= len(below) && slices.EqualFunc(rest, below[:len(rest)], sameName) {
+			return true, nil
+		}
+		if dir == "/" {
+			return false, nil
+		}
+		below = append([]string{filepath.Base(dir)}, below...)
+		dir = filepath.Dir(dir)
+	}
+}
+
+// sameName compares components that do not exist yet as a case- and
+// normalization-insensitive volume would; folding only errs toward refusing,
+// which a preflight may.
+func sameName(a, b string) bool { return strings.EqualFold(norm.NFC.String(a), norm.NFC.String(b)) }
+
+// existingAncestor is path's deepest existing ancestor and the components
+// below it, which do not exist yet: a worktree usually does not at preflight.
+// A dangling symlink is refused: compared as a literal component it would
+// pass, and once its target is created it may cover another segment's
+// worktree.
+func existingAncestor(path string) (string, []string, error) {
+	var rest []string
+	for {
+		_, err := os.Stat(path)
+		if err == nil {
+			return path, rest, nil
+		}
+		if !os.IsNotExist(err) || path == "/" {
+			return "", nil, err
+		}
+		if _, err := os.Lstat(path); err == nil {
+			return "", nil, fmt.Errorf("%s is a dangling symlink", path)
+		}
+		rest = append([]string{filepath.Base(path)}, rest...)
+		path = filepath.Dir(path)
+	}
 }
 
 func codingDomains(configured []string) []string {

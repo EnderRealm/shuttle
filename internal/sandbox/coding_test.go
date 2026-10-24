@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -282,6 +284,97 @@ func TestCodingProfileRefusesAllowWriteCoveringRunDir(t *testing.T) {
 	if _, err := CodingProfileJSON(options(runDir + "-sibling")); err != nil {
 		t.Fatalf("allow_write sibling of the run dir: %v", err)
 	}
+}
+
+// allow_write is shared by every segment's profile, so an entry covering one
+// segment's worktree would let another segment's processes write it and be
+// swept as its holders. Seatbelt judges the real path, so an entry covering
+// the worktree through a symlink, /tmp alias, case alias or Unicode
+// normalization alias is refused too, whether or not the aliased component
+// exists yet.
+func TestCodingProfileRefusesAllowWriteCoveringWorktree(t *testing.T) {
+	root := shortCodingRoot(t)
+	weft := filepath.Join(root, "weft")
+	link := filepath.Join(root, "link")
+	if err := os.Mkdir(weft, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(weft, link); err != nil {
+		t.Fatal(err)
+	}
+	worktree := filepath.Join(link, "worktrees", "repo-deadbeef", "demo-ticket")
+	options := func(worktree, allow string) CodingOptions {
+		return CodingOptions{
+			SRTBin: "/usr/local/bin/srt", RunDir: filepath.Join(root, "run"), HomeDir: root, PATH: testPATH,
+			Repo: filepath.Join(root, "repo"), TicketsRoot: filepath.Join(root, "tickets"),
+			Worktree: worktree, UserTempDir: filepath.Join(root, "user-temp"),
+			AllowWrite: []string{allow},
+		}
+	}
+	refuses := func(worktree, allow string) {
+		t.Helper()
+		_, err := CodingProfileJSON(options(worktree, allow))
+		if err == nil || !strings.Contains(err.Error(), "covers worktree") || !strings.Contains(err.Error(), strconv.Quote(allow)) {
+			t.Errorf("allow_write %s: profile error = %v, want a worktree refusal naming the entry", allow, err)
+		}
+	}
+	refused := []string{
+		worktree, filepath.Dir(worktree), filepath.Join(link, "worktrees"), filepath.Join(weft, "worktrees"),
+	}
+	if runtime.GOOS == "darwin" {
+		refused = append(refused,
+			filepath.Join(strings.TrimPrefix(root, "/private"), "weft", "worktrees"),
+			filepath.Join(root, "WEFT", "worktrees"))
+	}
+	for _, allow := range refused {
+		refuses(worktree, allow)
+	}
+	for _, allow := range []string{worktree + "-sibling", filepath.Join(weft, "worktrees", "repo-deadbeef", "demo-ticket-sibling")} {
+		if _, err := CodingProfileJSON(options(worktree, allow)); err != nil {
+			t.Fatalf("allow_write sibling of the worktree %s: %v", allow, err)
+		}
+	}
+	// Below an existing worktrees directory, components the worker has not
+	// created yet are compared folded: a missing repository directory spelled
+	// in another case or Unicode normalization is the same once created.
+	worktrees := filepath.Join(root, "missing", "worktrees")
+	if err := os.MkdirAll(worktrees, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	refuses(filepath.Join(worktrees, "repo-deadbeef", "demo-ticket"), filepath.Join(worktrees, "REPO-deadbeef"))
+	refuses(filepath.Join(worktrees, "caf\u00e9", "demo-ticket"), filepath.Join(worktrees, "cafe\u0301"))
+	if _, err := CodingProfileJSON(options(filepath.Join(worktrees, "repo-deadbeef", "demo-ticket"), filepath.Join(worktrees, "REPO-deadbeef-sibling"))); err != nil {
+		t.Fatalf("allow_write sibling of the missing repository directory: %v", err)
+	}
+	// An entry that is a symlink to a worktrees parent not created yet cannot
+	// be compared by identity, so it is refused.
+	shared := filepath.Join(root, "shared")
+	pending := filepath.Join(root, "pending", "worktrees")
+	if err := os.Symlink(pending, shared); err != nil {
+		t.Fatal(err)
+	}
+	_, err := CodingProfileJSON(options(filepath.Join(pending, "repo-deadbeef", "demo-ticket"), shared))
+	if err == nil || !strings.Contains(err.Error(), "dangling symlink") || !strings.Contains(err.Error(), strconv.Quote(shared)) {
+		t.Errorf("allow_write %s: profile error = %v, want a dangling symlink refusal naming the entry", shared, err)
+	}
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	// An existing worktrees parent spelled with a composed é in the worktree
+	// and a decomposed é in the entry.
+	composed := filepath.Join(root, "caf\u00e9", "worktrees")
+	decomposed := filepath.Join(root, "cafe\u0301", "worktrees")
+	if err := os.MkdirAll(composed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, err := os.Stat(composed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.Stat(decomposed); err != nil || !os.SameFile(a, b) {
+		t.Skipf("temp volume is normalization-sensitive: %v", err)
+	}
+	refuses(filepath.Join(composed, "repo-deadbeef", "demo-ticket"), decomposed)
 }
 
 func TestCheckCodingRefusesMissingSandbox(t *testing.T) {

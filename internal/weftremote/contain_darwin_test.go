@@ -155,6 +155,138 @@ func TestSupervisorContainsDetachedHoldersBeforeReleasingRepository(t *testing.T
 	}
 }
 
+// bystanderScript is the model process of a segment on another repository
+// escaping its worker as holderScript's does, under a seatbelt profile
+// granting only that segment's own TMPDIR and worktree, which the worker
+// creates as it does its checkout; its pid is written to $TMPDIR/holder.pid.
+func bystanderScript(worktree string) string {
+	return `rd=$(cd "$TMPDIR" && pwd -P)
+mkdir -p '` + worktree + `' && wt=$(cd '` + worktree + `' && pwd -P)
+printf '(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write* (subpath "%s") (subpath "%s"))\n' "$rd" "$wt" > "$TMPDIR/holder.sb"
+/usr/bin/sandbox-exec -f "$TMPDIR/holder.sb" /usr/bin/perl -e '
+pipe(my $r, my $w) or die; my $p = fork(); die unless defined $p;
+if ($p) { close $w; my $pid = <$r>; open(my $f, ">", "$ENV{TMPDIR}/holder.pid") or die; print $f $pid; close $f; exit 0 }
+close $r; close STDIN; close STDOUT; close STDERR; require POSIX; POSIX::setsid(); print $w "$$\n"; close $w; sleep 300
+' </dev/null >/dev/null 2>&1
+`
+}
+
+// Settling a segment sweeps only its own boundary: a segment running
+// concurrently on another repository, whose detached model process is
+// granted neither the settling segment's run dir, canary nor worktree, is
+// left running, while the settling segment's own detached holder is killed.
+// The bystander is then shown to be a real holder of its own segment's
+// boundary, contained when that segment settles.
+func TestSupervisorSettlementLeavesAConcurrentSegmentAlone(t *testing.T) {
+	f := newSupervisorFixture(t, false)
+	logs := &syncBuffer{}
+	f.supervisor.log = log.New(logs, "", 0)
+	other := filepath.Join(f.root, "other")
+	if err := os.MkdirAll(filepath.Join(other, ".git", "worktrees"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ticket, bystanderTicket := "demo/settling", "other/bystander"
+	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bystanderWorktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, other, bystanderTicket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" + v1WorkerGuard + `case " $* " in *" ` + bystanderTicket + ` "*)
+` + bystanderScript(bystanderWorktree) + `read -r _
+exit 0 ;;
+esac
+mkdir -p '` + worktree + `'
+` + strings.TrimPrefix(fixtureWorkerScript(worktree), "#!/bin/sh\n"+v1WorkerGuard) + holderScript
+	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	run := f.claim(t, ticket)
+	bystander, err := f.store.ClaimWeft(ledger.WeftLaunch{
+		Ticket: bystanderTicket, Project: "other", Repo: other, Branch: bystanderTicket,
+		Worktree: bystanderWorktree, RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDir := run.Segments[0].RunDir.String
+	bystanderPIDFile := filepath.Join(sandbox.SegmentTmpDir(bystander.Segments[0].RunDir.String), "holder.pid")
+	var bystanderPID int
+	var bystanderStart time.Time
+	alive := func(int) {
+		if now, err := reap.ProcessStart(bystanderPID); err != nil || !now.Equal(bystanderStart) {
+			t.Errorf("bystander %d was not left alive by the settling sweep: %v", bystanderPID, err)
+		}
+	}
+	// sweptHolder reads the settling segment's holder on every sweep, so the
+	// bystander's own settlement is routed past it to the real sweep.
+	sweep := containSegment
+	swept := sweptHolder(t, runDir, alive, alive)
+	settling := containSegment
+	containSegment = func(b reap.Boundary) (reap.Containment, error) {
+		if b.Control == runDir {
+			return settling(b)
+		}
+		return sweep(b)
+	}
+
+	// The bystander's run is stopped and joined before sweptHolder restores
+	// containSegment and the fixture is torn down, however the test ends.
+	bystanderDone := make(chan error, 1)
+	bystanderExited := make(chan struct{})
+	go func() {
+		bystanderDone <- f.supervisor.run(bystander.ID)
+		close(bystanderExited)
+	}()
+	t.Cleanup(func() {
+		f.supervisor.Stop(bystander.ID)
+		<-bystanderExited
+	})
+	waitFor(t, func() bool {
+		data, err := os.ReadFile(bystanderPIDFile)
+		if err != nil || len(data) == 0 || data[len(data)-1] != '\n' {
+			return false
+		}
+		bystanderPID, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil
+	})
+	bystanderStart, err = reap.ProcessStart(bystanderPID)
+	if err != nil {
+		t.Fatalf("bystander %d: %v", bystanderPID, err)
+	}
+	t.Cleanup(func() {
+		if now, err := reap.ProcessStart(bystanderPID); err == nil && now.Equal(bystanderStart) {
+			syscall.Kill(bystanderPID, syscall.SIGKILL)
+		}
+	})
+
+	if err := f.supervisor.run(run.ID); err != nil {
+		t.Fatalf("%v\n%s", err, logs.String())
+	}
+	pid := *swept
+	if pid == 0 {
+		t.Fatalf("the settling segment's sweep never ran:\n%s", logs.String())
+	}
+	waitFor(t, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) })
+	if now, err := reap.ProcessStart(bystanderPID); err != nil || !now.Equal(bystanderStart) {
+		t.Fatalf("bystander %d did not survive the settlement: %v", bystanderPID, err)
+	}
+	contained := ": containment stopped 1 [" + strconv.Itoa(pid) + "(perl)], released 0 [], killed 1 [" + strconv.Itoa(pid) + "(perl)]"
+	if !strings.Contains(logs.String(), contained) || strings.Count(logs.String(), ": containment ") != 1 {
+		t.Fatalf("containment log does not name only the settling holder %d:\n%s", pid, logs.String())
+	}
+
+	f.supervisor.Stop(bystander.ID)
+	if err := <-bystanderDone; err != nil {
+		t.Fatalf("%v\n%s", err, logs.String())
+	}
+	if !strings.Contains(logs.String(), ": containment stopped 1 ["+strconv.Itoa(bystanderPID)+"(perl)]") {
+		t.Fatalf("the bystander's own settlement did not contain it:\n%s", logs.String())
+	}
+}
+
 // A boundary the sweep cannot establish empty leaves the segment unsettled:
 // its row stays in flight and the repository stays reserved.
 func TestSupervisorRetainsReservationWhileTheBoundaryIsNotEmpty(t *testing.T) {
