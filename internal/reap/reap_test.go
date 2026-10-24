@@ -289,6 +289,10 @@ func assertOutcome(t *testing.T, got Outcome, run *ledger.Run, action Action, pi
 		t.Fatalf("outcome = %+v, want run %s agent %s pid %d", got, run.ID, run.Agent, pid)
 	}
 	if got.Action != action {
+		if got.Action == ActionUnresolved && strings.Contains(got.Detail, lookupFailed) {
+			t.Fatalf("action = %s (%s), want %s; claimed_at %s; %s",
+				got.Action, got.Detail, action, run.ClaimedAt, describePID(pid))
+		}
 		t.Fatalf("action = %s (%s), want %s", got.Action, got.Detail, action)
 	}
 }

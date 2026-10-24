@@ -2,7 +2,9 @@ package reap
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,5 +89,78 @@ func TestGroupMembersListsTheGroupWithStartTimes(t *testing.T) {
 	}
 	if age := time.Since(start); age < 0 || age > 30*time.Second {
 		t.Fatalf("leader start = %s, want it moments ago", start)
+	}
+}
+
+// pWexit is a process that has begun exiting (P_WEXIT in sys/proc.h, which x/sys
+// does not export). Its address space can already be gone while kill 0, getpgid
+// and kern.proc.pid all still answer for it, so an argv read that fails on it
+// looks like any other lookup error unless the flag is read alongside.
+const pWexit = 0x00002000
+
+// procStates names P_stat (SIDL..SZOMB in sys/proc.h).
+var procStates = map[int8]string{1: "SIDL", 2: "SRUN", 3: "SSLEEP", sstop: "SSTOP", szomb: "SZOMB"}
+
+// describePID is the kernel's view of pid at this moment, for a failure message
+// whose expected outcome was missed on a lookup error: whether the process is a
+// zombie or exiting, when it started, and whether kern.procargs2 still fails on
+// a second read. Together those tell an exiting process, a reused pid and a
+// transiently unreliable interface apart.
+func describePID(pid int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "kernel view of pid %d: ", pid)
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	switch {
+	case err != nil:
+		fmt.Fprintf(&b, "kern.proc.pid: %v", err)
+	case kp.Proc.P_pid != int32(pid):
+		fmt.Fprintf(&b, "kern.proc.pid: record for pid %d", kp.Proc.P_pid)
+	default:
+		sec, nsec := kp.Proc.P_starttime.Unix()
+		fmt.Fprintf(&b, "p_stat %d (%s), exiting %t, started %s",
+			kp.Proc.P_stat, procStates[kp.Proc.P_stat], kp.Proc.P_flag&pWexit != 0,
+			time.Unix(sec, nsec).UTC().Format(time.RFC3339Nano))
+	}
+	if buf, err := unix.SysctlRaw("kern.procargs2", pid); err != nil {
+		fmt.Fprintf(&b, "; kern.procargs2 re-read: %v", err)
+	} else {
+		fmt.Fprintf(&b, "; kern.procargs2 re-read: answers %d bytes", len(buf))
+	}
+	return b.String()
+}
+
+// The dump has to tell the live process a fixture started from one that has
+// exited and is not reaped: that is the state in which every earlier check of
+// identify still answers and the argv read is the first to fail.
+func TestDescribePID(t *testing.T) {
+	live := spawn(t, []string{"sleep", "300"}, false).Process.Pid
+	got := describePID(live)
+	// XNU keeps p_stat at SRUN for a blocked process; sleeping is Mach thread
+	// state, so a live sleeper never reads SSLEEP.
+	if !strings.Contains(got, "(SRUN), exiting false") || !strings.Contains(got, "kern.procargs2 re-read: answers") {
+		t.Fatalf("live: %s", got)
+	}
+
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start true: %v", err)
+	}
+	// Not waited on until the dump is taken, so the exited child stays a zombie.
+	t.Cleanup(func() { cmd.Wait() })
+	zombie := cmd.Process.Pid
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		kp, err := unix.SysctlKinfoProc("kern.proc.pid", zombie)
+		if err == nil && kp.Proc.P_stat == szomb {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %d never became a zombie", zombie)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got = describePID(zombie)
+	if !strings.Contains(got, "(SZOMB), exiting true") || strings.Contains(got, "re-read: answers") {
+		t.Fatalf("zombie: %s", got)
 	}
 }
