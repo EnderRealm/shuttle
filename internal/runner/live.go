@@ -102,7 +102,7 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 		return nil, p.fail(nil, row.ID, ledger.ClassPreflight, fmt.Errorf("scheduled_for %q: %w", row.ScheduledFor, err), ledger.Result{}, resultRecord{})
 	}
 	started := p.now()
-	run, err := prepare(def, slot, row.ID, row.TriggerKind, false, opts.UnsafeNoSandbox, p.Config, p.Home)
+	run, err := prepare(def, slot, row.ID, row.TriggerKind, false, opts.UnsafeNoSandbox, opts.NoDeliver, p.Config, p.Home)
 	if err != nil {
 		return nil, p.fail(nil, row.ID, ledger.ClassPreflight, err, ledger.Result{}, resultRecord{StartedAt: stamp(started)})
 	}

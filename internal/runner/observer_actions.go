@@ -725,8 +725,8 @@ func observerDiscoveryBody(identity observercontract.Identity, action *observerc
 // A reconciliation that converges finishes the run the way a live one does:
 // the report is prepared, observer-result.json is rewritten from the retained
 // collection and the reconciled records, the row moves to completed and the
-// report is delivered. One that does not records its counts as
-// conflict-or-failure and leaves the row failed.
+// report is delivered unless the run was started with --no-deliver. One that
+// does not records its counts as conflict-or-failure and leaves the row failed.
 func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.Definition, row *ledger.Run) error {
 	if row.Status != ledger.StatusFailed || !row.RunDir.Valid {
 		return fmt.Errorf("run %s: only a failed run with a retained directory is reconciled; it is %s", row.ID, row.Status)
@@ -743,8 +743,9 @@ func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.D
 	if retained.Observer == nil {
 		return fmt.Errorf("run %s is not an observer run", row.ID)
 	}
-	// The report is prepared and delivered under the capabilities the run
-	// retained, as a delivery retry is, not whatever the definition says now.
+	// The report is prepared and delivered under the capabilities and the
+	// --no-deliver choice the run retained, as a delivery retry is, not
+	// whatever the definition says now.
 	retainedDef := *def
 	retainedDef.Manifest.Outputs = retained.Outputs
 	retainedDef.Manifest.Observer = &agentdef.Observer{Config: retained.Observer.Config}
@@ -829,7 +830,7 @@ func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.D
 	}
 
 	run := &preparedRun{ID: row.ID, Dir: runDir, Window: window, Loc: loc}
-	if err := p.finishReconciledObserver(&retainedDef, row, run, state, validated, &applied); err != nil {
+	if err := p.finishReconciledObserver(&retainedDef, row, run, Options{NoDeliver: retained.NoDeliver}, state, validated, &applied); err != nil {
 		// Every record has converged, so the counts are the reconciled ones;
 		// the detail and the row still failed say the finish did not.
 		return errors.Join(err, writeObserverResult(runDir, observerOutcome(state, validated, &applied, "applied", err.Error())))
@@ -845,8 +846,8 @@ func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.D
 // to completed, so the ledger transition is the commit point. A failure
 // anywhere here leaves the row failed, which the status guard admits to the
 // next reconciliation, and that one rewrites result.json and moves the row.
-func (p *Pipeline) finishReconciledObserver(def *agentdef.Definition, row *ledger.Run, run *preparedRun, state *observerRunState, out *validatedObserverOutput, applied *observerApplied) error {
-	if err := p.prepareObserverReport(def, row, run, Options{}, out, applied); err != nil {
+func (p *Pipeline) finishReconciledObserver(def *agentdef.Definition, row *ledger.Run, run *preparedRun, opts Options, state *observerRunState, out *validatedObserverOutput, applied *observerApplied) error {
+	if err := p.prepareObserverReport(def, row, run, opts, out, applied); err != nil {
 		return err
 	}
 	if err := writeObserverResult(run.Dir, observerOutcome(state, out, applied, "applied", "")); err != nil {

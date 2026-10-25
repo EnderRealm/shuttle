@@ -63,6 +63,7 @@ type runRecord struct {
 	Trigger         string           `json:"trigger"`
 	DryRun          bool             `json:"dry_run"`
 	UnsafeNoSandbox bool             `json:"unsafe_no_sandbox"`
+	NoDeliver       bool             `json:"no_deliver"`
 	Paths           config.Paths     `json:"paths"`
 	Runtime         agentdef.Runtime `json:"runtime"`
 	Inputs          []agentdef.Input `json:"inputs"`
@@ -100,7 +101,7 @@ func DryRun(ctx context.Context, def *agentdef.Definition, slot time.Time, cfg *
 	if err != nil {
 		return nil, err
 	}
-	run, err := prepare(def, slot, id, ledger.TriggerManual, true, false, cfg, home)
+	run, err := prepare(def, slot, id, ledger.TriggerManual, true, false, false, cfg, home)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +140,7 @@ func DryRun(ctx context.Context, def *agentdef.Definition, slot time.Time, cfg *
 	}, nil
 }
 
-func prepare(def *agentdef.Definition, slot time.Time, id, trigger string, dryRun, unsafe bool, cfg *config.Config, home string) (*preparedRun, error) {
+func prepare(def *agentdef.Definition, slot time.Time, id, trigger string, dryRun, unsafe, noDeliver bool, cfg *config.Config, home string) (*preparedRun, error) {
 	if len(def.Manifest.Triggers) == 0 {
 		return nil, fmt.Errorf("%s: triggers: none", def.Dir)
 	}
@@ -169,7 +170,7 @@ func prepare(def *agentdef.Definition, slot time.Time, id, trigger string, dryRu
 		ID: id, Dir: dir, Window: day, Loc: loc,
 		record: runRecord{
 			RunID: id, Agent: def.Name, Slot: slot.Format(time.RFC3339),
-			Trigger: trigger, DryRun: dryRun, UnsafeNoSandbox: unsafe,
+			Trigger: trigger, DryRun: dryRun, UnsafeNoSandbox: unsafe, NoDeliver: noDeliver,
 			Paths: cfg.Paths, Runtime: def.Manifest.Runtime,
 			Inputs: def.Manifest.Inputs, Outputs: def.Manifest.Outputs,
 			Sandbox: def.Manifest.Sandbox,

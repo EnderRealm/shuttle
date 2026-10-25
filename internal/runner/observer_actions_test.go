@@ -1421,6 +1421,64 @@ func TestObserverReconciliationFinishesTheRunItConverges(t *testing.T) {
 	}
 }
 
+func TestObserverReconciliationHonoursTheRetainedNoDeliver(t *testing.T) {
+	answer := observedAnswer(t)
+	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+	// Email is configured and the report is eligible, so --no-deliver is the
+	// only thing standing between the reconciliation and a send.
+	to.f.def.Manifest.Outputs.Email = &agentdef.EmailOutput{Max: 1}
+	to.f.pipeline.Config.Email = config.Email{
+		Provider: "cloudflare", AccountID: "account", From: "from@example.test",
+		To: []string{"to@example.test"}, KeychainItem: "mail",
+	}
+	sender := &recordingSender{}
+	to.f.pipeline.Sender = sender
+	state := to.notebook(t)
+	state.CrashClaim = 2
+	writeJSONFixture(t, to.o.state, state)
+	note := proposal(to.question.Identity, "confirm", observercontract.ActionTicketNote, to.question.ID, to.ticketID,
+		"Three nights after the restart every report still repeated a headline.", answer.Evidence.Sources[:1])
+	report := "# Observer report\n\n" + strings.Repeat("Every night of the window repeated its headline. ", 6)
+	installObserverModel(t, to.f, map[string]any{
+		"silent": false, "subject": "Headline repeats", "assessments": []any{answer}, "actions": []any{note},
+	}, report)
+	to.f.slot = to.f.slot.Add(-24 * time.Hour)
+	run := to.f.claim(t, ledger.TriggerManual)
+	if _, err := to.f.pipeline.Run(context.Background(), to.f.def, run, Options{NoDeliver: true}); err == nil || !strings.Contains(err.Error(), run.ID+"-claim-001") {
+		t.Fatalf("err = %v, want the lost claim surfaced", err)
+	}
+	row, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != ledger.StatusFailed || row.DeliveryStatus.Valid {
+		t.Fatalf("row = %+v, want a failed run with no delivery status on record", row)
+	}
+	var record map[string]any
+	readJSONFixture(t, filepath.Join(row.RunDir.String, "run.json"), &record)
+	if record["no_deliver"] != true {
+		t.Fatalf("run.json no_deliver = %v, want true", record["no_deliver"])
+	}
+
+	if err := to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row); err != nil {
+		t.Fatal(err)
+	}
+	converged, err := to.f.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged.Status != ledger.StatusCompleted || converged.DeliveryStatus.String != ledger.DeliverySkipped {
+		t.Fatalf("row = %+v, want it completed with delivery skipped", converged)
+	}
+	if len(sender.messages) != 0 {
+		t.Fatalf("sent = %+v, want nothing", sender.messages)
+	}
+	applied := readApplied(t, row.RunDir.String)
+	if applied.DeliveryStatus != ledger.DeliverySkipped || applied.Report == nil || applied.Report.DeliveryStatus != ledger.DeliverySkipped {
+		t.Fatalf("applied = %+v, want the report archived and delivery skipped", applied)
+	}
+}
+
 // reportedManifest is a non-silent run with a report the fixture files under
 // outputs.file and does not email.
 func reportedManifest(assessments []any, actions []any) (map[string]any, string) {
