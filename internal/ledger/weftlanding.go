@@ -207,6 +207,19 @@ func (s *Store) RecordWeftGraded(runID string, segment int, outcome string, stop
 	})
 }
 
+// RecordWeftSummarized records the summary a segment reported after its
+// grade, in place of the null the grade carried.
+func (s *Store) RecordWeftSummarized(runID string, summary json.RawMessage) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		stamp := weftTimestamp(s.now())
+		if _, err := tx.Exec(`UPDATE weft_runs SET summary=?,updated_at=?,revision=revision+1 WHERE id=?`,
+			string(summary), stamp, runID); err != nil {
+			return err
+		}
+		return appendRunEventTx(tx, runID, stamp)
+	})
+}
+
 // landEvidenceTx is what one segment itself established about each step:
 // a result of done it reported, or — a reconcile — an observation of done it
 // made. Another segment's record is history and never evidence: a reconcile's

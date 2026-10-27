@@ -199,7 +199,8 @@ func TestLandingReportedOnAnUnfinishedGradeIsRefused(t *testing.T) {
 // the host cannot tell whether the segment graded, so the run is closed as
 // the segment was lost — a forced stop stays a stop, else failed with the
 // class kept — and held unreconciled at the fast-forward with its repository
-// paused. It is not resumable, and a reconcile retry is admitted.
+// paused. It is not resumable, and with no graded head a reconcile retry
+// could only observe, so it is refused.
 func TestUngradedLandingWithLostReconcileIsHeldUnreconciled(t *testing.T) {
 	for _, tt := range []struct {
 		name, class, outcome string
@@ -249,9 +250,9 @@ func TestUngradedLandingWithLostReconcileIsHeldUnreconciled(t *testing.T) {
 				if !errors.As(err, &refusal) || refusal.Code != "run_not_resumable" {
 					t.Fatalf("resume = %v", err)
 				}
-				entry, err := tx.AdmitReconcile(run.ID, got.Revision, WeftAdmission{TokenID: "token", RequestKey: "retry"})
-				if err != nil || entry.Kind != WeftEntryReconcile {
-					t.Fatalf("reconcile retry = %+v %v", entry, err)
+				_, err = tx.AdmitReconcile(run.ID, got.Revision, WeftAdmission{TokenID: "token", RequestKey: "retry"})
+				if !errors.As(err, &refusal) || refusal.Code != "not_reconcilable" {
+					t.Fatalf("reconcile retry = %v", err)
 				}
 				return nil
 			})

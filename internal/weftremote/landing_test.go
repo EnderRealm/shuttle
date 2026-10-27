@@ -2160,8 +2160,8 @@ func TestMaintenanceAtTheSegmentLimitIsInvalidated(t *testing.T) {
 // 22u): a landing segment lost before the host recorded its grade, whose
 // reconcile observed finished with the fast-forward done and was then lost
 // before reconciled, is held finished and unreconciled at the push with its
-// repository paused — never closed failed over a done step — and a retry is
-// admitted.
+// repository paused — never closed failed over a done step. With no graded
+// head a retry could only observe, so it is refused.
 func TestLostReconcileKeepsItsReading(t *testing.T) {
 	h := newLandingHost(t)
 	id := "weft/example-ready-a0b1"
@@ -2183,21 +2183,10 @@ func TestLostReconcileKeepsItsReading(t *testing.T) {
 		t.Fatalf("lost reconcile after reading finished = %+v", run)
 	}
 	h.refusesResume(runID, "resume-read")
-	retry := reconcileLines(t, [3]string{"done", "not_done", "not_done"}, fixtureHead, fixtureBase)
-	retry[1]["landing"] = map[string]any{"state": "not_landed", "step": "push", "reason": "unreconciled",
-		"detail": "no graded head to land", "branch": nil, "commit": nil}
-	h.script(id, 3, retry)
-	accepted := h.send(http.MethodPost, "/v2/runs/"+runID+"/reconcile", "retry", revisionBody(run.Revision))
-	accepted.expect(t, http.StatusAccepted, "reconcile-response.json")
-	if e := entryOf(accepted); e["kind"] != "reconcile" || e["run_id"] != runID {
-		t.Fatalf("retry = %v", e)
-	}
-	waitFor(t, func() bool {
-		run = h.run(runID)
-		return len(run.Segments) == 3 && run.Phase == ledger.WeftPhaseEnded && h.reaped(run)
-	})
-	if run = h.run(runID); run.Outcome.String != "finished" || run.SettlementStep.String != ledger.WeftStepPush {
-		t.Fatalf("retried run = %+v", run)
+	h.send(http.MethodPost, "/v2/runs/"+runID+"/reconcile", "retry", revisionBody(run.Revision)).
+		refused(t, http.StatusConflict, "not_reconcilable")
+	if run = h.run(runID); len(run.Segments) != 2 || run.Outcome.String != "finished" || run.SettlementStep.String != ledger.WeftStepPush {
+		t.Fatalf("run after a refused retry = %+v", run)
 	}
 }
 
@@ -2277,4 +2266,175 @@ func TestNotLandedOfAnotherCommitIsRefused(t *testing.T) {
 	if !strings.Contains(h.logs.String(), "ended reports a landing not landed of a commit other than the graded head") {
 		t.Fatalf("log lacks the refusal:\n%s", h.logs.String())
 	}
+}
+
+// gradedFirst is a landing transcript in the order of a worker that grades
+// before it summarizes: graded with a null summary, then summarized carrying
+// the summary graded carried.
+func gradedFirst(lines workerLines) workerLines {
+	at := indexOf(lines, "graded")
+	graded := maps.Clone(lines[at])
+	summarized := map[string]any{
+		"contract_version": graded["contract_version"], "worker_run_id": graded["worker_run_id"], "ts": graded["ts"],
+		"event": "summarized", "summary": graded["summary"],
+	}
+	graded["summary"] = nil
+	out := append(workerLines{}, lines[:at]...)
+	out = append(out, graded, summarized)
+	return append(out, lines[at+1:]...)
+}
+
+// A worker that grades before it summarizes leaves the host its graded head
+// at graded: the summary lands later on the run, and a segment lost in the
+// summary step is reconciled with the graded head's commit and base.
+func TestGradedBeforeSummaryRecordsHead(t *testing.T) {
+	t.Run("summarized then landed", func(t *testing.T) {
+		h := newLandingHost(t)
+		id := "weft/example-second-4c2d"
+		h.ticket(id, ticket.StatusReady, 2)
+		lines := gradedFirst(h.landingSegment(id, "worker-segment.ndjson"))
+		summary := lines[indexOf(lines, "summarized")]["summary"]
+		h.script(id, 1, splice(lines, indexOf(lines, "graded")+1, nil))
+		runID := h.waitDispatched(entryOf(h.launch(id, "graded-first"))["entry_id"].(string))
+
+		// Held after graded: the head is recorded, the summary not yet.
+		waitFor(t, func() bool { return h.run(runID).Phase == ledger.WeftPhaseSettling })
+		if run := h.run(runID); run.Head.String != fixtureHead || run.Outcome.String != "finished" || rawJSON(run.Summary) != nil {
+			t.Fatalf("graded run = %+v", run)
+		}
+		h.release(id)
+
+		run := h.waitReaped(runID)
+		if run.SettlementState != ledger.WeftSettlementLanded || run.SettlementCommit.String != fixtureHead ||
+			run.Segments[0].Failure.Valid || !reflect.DeepEqual(decode(t, run.Summary), summary) {
+			t.Fatalf("landed run = %+v", run)
+		}
+		if got, want := h.commands(id, 1), acks(t, fixtureHead, ledger.WeftLandSteps...); !reflect.DeepEqual(got, want) {
+			t.Fatalf("acknowledgements = %v, want %v", got, want)
+		}
+	})
+	t.Run("lost during the summary", func(t *testing.T) {
+		h := newLandingHost(t)
+		id := "weft/example-ready-a0b1"
+		h.ticket(id, ticket.StatusReady, 2)
+		lost := through(t, gradedFirst(h.landingSegment(id, "worker-segment.ndjson")), "graded", "")
+		h.script(id, 1, append(lost, dieLine))
+		h.script(id, 2, reconcileLines(t, [3]string{"not_done", "not_done", "not_done"}, fixtureHead, fixtureBase, ledger.WeftLandSteps...))
+		runID := h.waitDispatched(entryOf(h.launch(id, "lost-summary"))["entry_id"].(string))
+
+		var run *ledger.WeftRun
+		waitFor(t, func() bool {
+			run = h.run(runID)
+			return len(run.Segments) == 2 && run.SettlementState == ledger.WeftSettlementLanded && h.reaped(run)
+		})
+		run = h.run(runID)
+		if run.Head.String != fixtureHead || run.Segments[0].Failure.String != ledger.ClassDied ||
+			run.Segments[1].Kind != ledger.WeftSegmentReconcile || run.SettlementCommit.String != fixtureHead {
+			t.Fatalf("reconciled run = %+v", run)
+		}
+		if !strings.Contains(h.argv(), "reconcile --contract weft-worker/v2 --run "+runID+" --segment 2") ||
+			!strings.Contains(h.argv(), "--commit "+fixtureHead+" --base "+fixtureBase) {
+			t.Fatalf("argv = %s", h.argv())
+		}
+		if got, want := h.commands(id, 2), acks(t, fixtureHead, ledger.WeftLandSteps...); !reflect.DeepEqual(got, want) {
+			t.Fatalf("the reconcile was acknowledged %v, want %v", got, want)
+		}
+	})
+}
+
+// An older worker's graded carries its summary and is read as before; a
+// summarized after it reports the summary twice and fails the segment.
+func TestGradedAfterSummaryStillRead(t *testing.T) {
+	t.Run("landed", func(t *testing.T) {
+		h := newLandingHost(t)
+		id := "weft/example-second-4c2d"
+		h.ticket(id, ticket.StatusReady, 2)
+		lines := h.landingSegment(id, "worker-segment.ndjson")
+		summary := lines[indexOf(lines, "graded")]["summary"]
+		h.script(id, 1, lines)
+		runID := h.waitDispatched(entryOf(h.launch(id, "summary-first"))["entry_id"].(string))
+		run := h.waitReaped(runID)
+		if run.SettlementState != ledger.WeftSettlementLanded || run.Head.String != fixtureHead ||
+			run.Segments[0].Failure.Valid || !reflect.DeepEqual(decode(t, run.Summary), summary) {
+			t.Fatalf("landed run = %+v", run)
+		}
+		runShapeOf(t).check(t, "run", h.get("/v2/runs/"+runID))
+	})
+	t.Run("summarized again", func(t *testing.T) {
+		h := newLandingHost(t)
+		id := "weft/example-ready-a0b1"
+		h.ticket(id, ticket.StatusReady, 2)
+		lines := h.landingSegment(id, "worker-segment.ndjson")
+		graded := lines[indexOf(lines, "graded")]
+		again := map[string]any{
+			"contract_version": graded["contract_version"], "worker_run_id": graded["worker_run_id"], "ts": graded["ts"],
+			"event": "summarized", "summary": graded["summary"],
+		}
+		h.script(id, 1, splice(lines, indexOf(lines, "graded")+1, again))
+		h.script(id, 2, reconcileLines(t, [3]string{"not_done", "not_done", "not_done"}, fixtureHead, fixtureBase, ledger.WeftLandSteps...))
+		runID := h.waitDispatched(entryOf(h.launch(id, "summary-twice"))["entry_id"].(string))
+		var run *ledger.WeftRun
+		waitFor(t, func() bool {
+			run = h.run(runID)
+			return len(run.Segments) == 2 && run.Phase == ledger.WeftPhaseEnded && h.reaped(run)
+		})
+		run = h.run(runID)
+		if run.Segments[0].Failure.String != ledger.ClassProtocol || len(h.commands(id, 1)) != 0 {
+			t.Fatalf("summarized after a summary-carrying graded = %+v", run)
+		}
+		if !strings.Contains(h.logs.String(), "summarized after the segment's summary was already reported") {
+			t.Fatalf("log lacks the refusal:\n%s", h.logs.String())
+		}
+	})
+}
+
+// A reconcile retry of a run the host recorded no graded head for could only
+// observe, so it is refused and fresh work offered; one of a run with a
+// graded head is accepted.
+func TestReconcileRetryRefusedWithoutGradedHead(t *testing.T) {
+	t.Run("no graded head", func(t *testing.T) {
+		h := newLandingHost(t)
+		id := "weft/example-ready-a0b1"
+		h.ticket(id, ticket.StatusReady, 2)
+		h.script(id, 1, append(through(t, h.landingSegment(id, "worker-segment.ndjson"), "stage", ""), dieLine))
+		lines := reconcileLines(t, [3]string{"not_done", "not_done", "not_done"}, fixtureHead, fixtureBase, "fast_forward")[:3]
+		lines[1]["commit"], lines[1]["base"] = nil, nil
+		h.script(id, 2, lines)
+		runID := h.waitDispatched(entryOf(h.launch(id, "stranded"))["entry_id"].(string))
+		var run *ledger.WeftRun
+		waitFor(t, func() bool {
+			run = h.run(runID)
+			return len(run.Segments) == 2 && run.Phase == ledger.WeftPhaseEnded && h.reaped(run)
+		})
+		run = h.run(runID)
+		if run.Head.Valid || run.SettlementState != ledger.WeftSettlementNotLanded ||
+			run.SettlementReason.String != ledger.WeftLandUnreconciled {
+			t.Fatalf("stranded run = %+v", run)
+		}
+		message := h.send(http.MethodPost, "/v2/runs/"+runID+"/reconcile", "rc", revisionBody(run.Revision)).
+			refused(t, http.StatusConflict, "not_reconcilable")
+		if !strings.Contains(message, "no graded head") || !strings.Contains(message, "fresh work") {
+			t.Fatalf("refusal message = %q", message)
+		}
+		if after := h.run(runID); len(after.Segments) != 2 || after.Revision != run.Revision {
+			t.Fatalf("a refused retry changed the run: %+v", after)
+		}
+	})
+	t.Run("graded head", func(t *testing.T) {
+		h := newLandingHost(t)
+		id := "weft/example-lens-2b3c"
+		h.ticket(id, ticket.StatusReady, 2)
+		failed := h.landingSegment(id, "worker-land-failed.ndjson")
+		h.script(id, 1, failed)
+		head, base := failed[indexOf(failed, "graded")]["head"].(string), failed[0]["base"].(string)
+		runID := h.waitDispatched(entryOf(h.launch(id, "fails"))["entry_id"].(string))
+		run := h.waitReaped(runID)
+		h.script(id, 2, reconcileLines(t, [3]string{"done", "not_done", "not_done"}, head, base, "push", "mark_done"))
+		h.send(http.MethodPost, "/v2/runs/"+runID+"/reconcile", "rc", revisionBody(run.Revision)).
+			expect(t, http.StatusAccepted, "reconcile-response.json")
+		waitFor(t, func() bool {
+			run = h.run(runID)
+			return run.SettlementState == ledger.WeftSettlementLanded && h.reaped(run)
+		})
+	})
 }

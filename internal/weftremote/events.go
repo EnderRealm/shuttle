@@ -2,6 +2,7 @@ package weftremote
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,9 @@ type segmentStream struct {
 	workerID string
 	terminal bool
 	graded   *gradedEvent
+	// summarized is whether a summary followed a graded that carried none;
+	// intended is whether any land_intent was read.
+	summarized, intended bool
 	// stage is the last stage reported, for diagnostics.
 	stage  string
 	chunks map[ledger.WeftAttempt]int
@@ -134,7 +138,7 @@ func (r *segmentStream) v1Handlers() map[string]eventHandler {
 func (r *segmentStream) v2Handlers() map[string]eventHandler {
 	handlers := map[string]eventHandler{
 		"hello": r.helloV2, "stage": r.stageEvent, "output": r.output, "liveness": r.liveness,
-		"allowance": r.allowance, "parked": r.parked, "graded": r.gradedEvent, "ended": r.endedV2,
+		"allowance": r.allowance, "parked": r.parked, "graded": r.gradedEvent, "summarized": r.summarizedEvent, "ended": r.endedV2,
 		"land_intent": r.unlanded("land_intent"), "land_step_result": r.unlanded("land_step_result"),
 	}
 	if r.land {
@@ -519,6 +523,41 @@ func (r *segmentStream) gradedEvent(line []byte) error {
 	return nil
 }
 
+// summarizedEvent is the summary of a worker that grades before it
+// summarizes, so a segment lost in the summary step still leaves its graded
+// head: it follows a graded whose summary is null, once, before any
+// land_intent. A graded that carried its summary takes none after it.
+func (r *segmentStream) summarizedEvent(line []byte) error {
+	var event summarizedEvent
+	if err := decodeEvent(line, &event, "summarized"); err != nil {
+		return err
+	}
+	if err := r.envelope(event.envelope); err != nil {
+		return err
+	}
+	if err := r.afterHello("summarized"); err != nil {
+		return err
+	}
+	switch {
+	case r.graded == nil:
+		return fmt.Errorf("summarized before graded")
+	case r.summarized || rawJSON(r.graded.Summary) != nil:
+		return fmt.Errorf("summarized after the segment's summary was already reported")
+	case r.intended:
+		return fmt.Errorf("summarized after a land_intent")
+	case !bytes.HasPrefix(event.Summary, []byte("{")):
+		return fmt.Errorf("summarized field summary is not an object")
+	}
+	r.s.stateMu.Lock()
+	err := r.s.store.RecordWeftSummarized(r.run.ID, event.Summary)
+	r.s.stateMu.Unlock()
+	if err != nil {
+		return err
+	}
+	r.summarized = true
+	return nil
+}
+
 // endedV2 is the terminal event of a weft-worker/v2 segment: after graded it
 // repeats the outcome, and a landing segment's carries the landing (§7.3);
 // with no graded before it, it is a refusal that landed nothing.
@@ -751,6 +790,11 @@ type gradedEvent struct {
 	Halt    *halt           `json:"halt"`
 	Detail  *string         `json:"detail"`
 	Head    *string         `json:"head"`
+	Summary json.RawMessage `json:"summary"`
+}
+
+type summarizedEvent struct {
+	envelope
 	Summary json.RawMessage `json:"summary"`
 }
 

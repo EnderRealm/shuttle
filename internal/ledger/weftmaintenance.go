@@ -69,6 +69,12 @@ func (t *WeftTx) AdmitReconcile(runID string, revision int64, a WeftAdmission) (
 		return nil, refuse("not_reconcilable", "run %s's landing is %s%s; only one not_landed for failed, stopped or unreconciled is retried",
 			runID, run.SettlementState, reasonSuffix(run.SettlementReason))
 	}
+	// A run lost before the host recorded its graded head can only be
+	// observed: no reconcile of it is given a commit to land.
+	if run.Outcome.String != "finished" || run.Head.String == "" || run.Base.String == "" {
+		return nil, refuse("not_reconcilable",
+			"run %s has no graded head recorded, so a reconcile can only observe it; start fresh work instead", runID)
+	}
 	var queued string
 	err = t.tx.QueryRow(`SELECT id FROM weft_entries WHERE run_id=? AND kind=? AND state=?`,
 		runID, WeftEntryReconcile, WeftEntryWaiting).Scan(&queued)

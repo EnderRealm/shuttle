@@ -129,7 +129,7 @@ func (r *segmentStream) landIntent(line []byte) error {
 	if err != nil {
 		return err
 	}
-	r.intent, r.acked = event.Step, ack
+	r.intent, r.acked, r.intended = event.Step, ack, true
 	if !ack {
 		r.s.log.Printf("weft landing %s: %s intended and not acknowledged: the run is stopping", r.ids(), event.Step)
 		return nil
