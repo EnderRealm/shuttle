@@ -55,8 +55,9 @@ observed the step `done`. Another segment's record is history and never evidence
 4. **I-one:** at most one segment that can take a step (a landing segment past its grade, or
    a reconcile) is live per run. This is the reservation row (`run` → `settlement` /
    `maintenance`).
-5. **I-pause:** a repository is paused only at reap, by a run reaching T2. Only `continue`
-   lifts the pause, and continue is refused while any run there is in C.
+5. **I-pause:** a repository is paused only at reap, by a run reaching T2. The pause lifts
+   at reap when the run it names reaches T1 (row 20), and otherwise only by `continue`,
+   which is refused while any run there is in C. A pause naming another run stands.
 6. **I-release:** no terminal event releases a reservation. Only reap does.
 
 ## 3. The ack rule (one function: `RecordWeftLandIntent`)
@@ -123,7 +124,7 @@ after the transition.
 | 17 | C | operator stop | reconcile live | stop=1; stop on stdin | no | no |
 | 18 | C | reconciled, observed none | — | **T3**: outcome stopped if stop=1, else failed with class kept (unknown if none); not_applicable | — | **yes** (§7.4: v1 interrupted) |
 | 19 | C | reconciled, observed halted / failed / stopped | — | **T3** with that outcome; the lost pipeline segment is recorded as graded (the reading is its grade) | — | per §4 |
-| 20 | C | reconciled, observed finished, landed | E(s, every step) | **T1**; landing_unsettled cleared at reap, pause stands | — | no |
+| 20 | C | reconciled, observed finished, landed | E(s, every step) | **T1**; landing_unsettled cleared at reap, and a pause naming this run lifted with its repository event; a pause naming another run stands | — | no |
 | 21 | C | reconciled, observed finished, not landed | — | **T2** | — | no |
 | 21n | C, observed finished | reconciled not_applicable | — | protocol error → reconcile failed, then row 22: as row 11n, a finished grade ends only landed or not_landed | — | no |
 | 22 | C, outcome finished | reconcile lost (exit or restart) | no `reconciled` | **T2** unreconciled at the first step not done | — | no |

@@ -646,8 +646,9 @@ func settleLostMaintenanceTx(tx *sql.Tx, runID string, seg *segmentState, detail
 
 // settleUnresolvedTx is §7.5 at reap: a landing that did not land holds the
 // run for the operator and pauses its repository — that repository only; a
-// landing that a reconcile completed releases the run from that hold, and the
-// pause stands until continue.
+// landing that a reconcile completed releases the run from that hold and lifts
+// the pause it named, since nothing there is partial any more. A pause naming
+// another run stands until continue.
 func settleUnresolvedTx(tx *sql.Tx, runID, stamp string) error {
 	run, err := getWeftRunTx(tx, runID)
 	if err != nil {
@@ -670,7 +671,12 @@ func settleUnresolvedTx(tx *sql.Tx, runID, stamp string) error {
 			WHERE id=?`, stamp, runID); err != nil {
 			return err
 		}
-		return appendRunEventTx(tx, runID, stamp)
+		if err := appendRunEventTx(tx, runID, stamp); err != nil {
+			return err
+		}
+	}
+	if run.SettlementState == WeftSettlementLanded {
+		return liftLandedPauseTx(tx, run, stamp)
 	}
 	return nil
 }

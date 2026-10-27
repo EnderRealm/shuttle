@@ -245,11 +245,28 @@ func pauseRepositoryTx(tx *sql.Tx, run *WeftRun, stamp string) error {
 	})
 }
 
+// liftLandedPauseTx lifts the pause on the run's repository when it names
+// that run, now landed (§7.5), with the repository event; a pause naming
+// another run is left standing.
+func liftLandedPauseTx(tx *sql.Tx, run *WeftRun, stamp string) error {
+	res, err := tx.Exec(`UPDATE weft_repositories SET dispatch=?,paused_run=NULL,paused_reason=NULL,paused_detail=NULL,
+		paused_at=NULL WHERE repository_id=? AND dispatch=? AND paused_run=?`,
+		WeftDispatchOpen, run.RepositoryID, WeftDispatchPaused, run.ID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	return repositoryStepTx(tx, run.RepositoryID, run.Repo, stamp)
+}
+
 // Repository is one repository as this transaction sees it.
 func (t *WeftTx) Repository(id string) (*WeftRepository, error) { return weftRepository(t.tx, id) }
 
-// ContinueRepository lifts a landing pause (§7.5): only an operator's
-// continue does, and not while a settlement there is reconciling.
+// ContinueRepository lifts a landing pause (§7.5): an operator's continue
+// does, and not while a settlement there is reconciling; otherwise only the
+// paused run's own landing settling landed does.
 func (t *WeftTx) ContinueRepository(id string, revision int64) (*WeftRepository, error) {
 	r, err := weftRepository(t.tx, id)
 	if errors.Is(err, sql.ErrNoRows) {

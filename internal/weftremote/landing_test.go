@@ -476,8 +476,8 @@ func TestRestartReconcilesALandingSegmentItLost(t *testing.T) {
 // A failed push reads not_landed at push, holds the run for the operator
 // and pauses that repository only: once reaped the reservation is free for
 // repair, other repositories dispatch, a launch there waits paused, and a
-// retried reconcile ignores the pause. Only continue lifts it, and not while
-// the reconcile runs (§7.5).
+// retried reconcile ignores the pause. Continue is refused while the
+// reconcile runs, and the retry landing lifts the pause at reap (§7.5).
 func TestUnlandedSettlementPausesOnlyItsRepository(t *testing.T) {
 	h := newLandingHost(t)
 	id, waits, elsewhere := "weft/example-lens-2b3c", "weft/example-later-3d4e", "loom/example-cache-5e6f"
@@ -539,6 +539,10 @@ func TestUnlandedSettlementPausesOnlyItsRepository(t *testing.T) {
 	}
 	h.send(http.MethodPost, "/v2/repositories/"+h.repositoryID("weft")+"/continue", "c-early", revisionBody(h.repositoryOf("weft")["revision"])).
 		refused(t, http.StatusConflict, "settlement_unsettled")
+	if reason, _ := waiting(h.entry(held["entry_id"].(string))); reason != "repository_paused" {
+		t.Fatalf("the paused repository dispatched while its landing reconciled: %v", h.entry(held["entry_id"].(string)))
+	}
+	h.script(waits, 1, h.landingSegment(waits, "worker-segment.ndjson"))
 	h.release(id)
 	waitFor(t, func() bool {
 		run = h.run(runID)
@@ -548,13 +552,135 @@ func TestUnlandedSettlementPausesOnlyItsRepository(t *testing.T) {
 	if run.ActionRequired.Valid || run.Steps[1].Observed.String != "not_done" || run.Steps[1].Result.String != "done" {
 		t.Fatalf("retried landing = %+v", run)
 	}
-	// The pause stands until continue; nothing dispatched into it meanwhile.
+	h.send(http.MethodPost, "/v2/runs/"+runID+"/reconcile", "rc-again", revisionBody(run.Revision)).refused(t, http.StatusConflict, "not_reconcilable")
+	// The landing the pause named settled landed, so the pause lifted and the
+	// waiting launch dispatched with no continue.
+	h.waitDispatched(held["entry_id"].(string))
+	h.waitReaped(other)
+	h.settle()
+}
+
+// When the run a pause names settles landed, the pause lifts in that reap's
+// transaction, with the repository event clients read, and what waited on it
+// dispatches. A run landing under a pause that names another, still-unsettled
+// run leaves that pause standing (§7.5).
+func TestPauseLiftsWhenItsRunLands(t *testing.T) {
+	h := newLandingHost(t)
+	first, second, waits := "weft/example-lens-2b3c", "weft/example-later-3d4e", "weft/example-second-4c2d"
+	for _, ticketID := range []string{first, second, waits} {
+		h.ticket(ticketID, ticket.StatusReady, 2)
+	}
+	firstRun, _ := h.unlandedRun(first)
+	h.continueWeft("c-first")
+	secondRun, _ := h.unlandedRun(second)
+	if paused := h.repositoryOf("weft")["paused"].(map[string]any); paused["run_id"] != secondRun.ID {
+		t.Fatalf("pause after the second run = %v", paused)
+	}
+	held := entryOf(h.launch(waits, "waits"))
+	if reason, _ := waiting(held); reason != "repository_paused" {
+		t.Fatalf("launch into the paused repository = %v", held)
+	}
+	h.script(waits, 1, h.landingSegment(waits, "worker-segment.ndjson"))
+
+	// The first run's retry lands under the second run's pause: that pause stays.
+	before := asOf(t, h.store)
+	h.script(first, 2, reconcileLines(t, [3]string{"done", "not_done", "not_done"}, firstRun.Head.String, firstRun.Base.String, "push", "mark_done"))
+	h.send(http.MethodPost, "/v2/runs/"+firstRun.ID+"/reconcile", "rc-first", revisionBody(h.run(firstRun.ID).Revision)).
+		expect(t, http.StatusAccepted, "reconcile-response.json")
+	waitFor(t, func() bool {
+		run := h.run(firstRun.ID)
+		return run.SettlementState == ledger.WeftSettlementLanded && h.reaped(run)
+	})
+	if run := h.run(firstRun.ID); run.ActionRequired.Valid {
+		t.Fatalf("first run after its retry landed = %+v", run)
+	}
+	repo := h.repositoryOf("weft")
+	if paused, _ := repo["paused"].(map[string]any); repo["dispatch"] != "paused" || paused["run_id"] != secondRun.ID ||
+		paused["reason"] != "not_landed" {
+		t.Fatalf("repository after another run landed = %v", repo)
+	}
+	for _, ev := range h.eventsSince(before) {
+		if ev.Type != "repository" {
+			continue
+		}
+		if r := decode(t, ev.Payload).(map[string]any)["repository"].(map[string]any); r["repository_id"] == h.repositoryID("weft") &&
+			r["dispatch"] != "paused" {
+			t.Fatalf("another run's landing lifted the pause: %v", r)
+		}
+	}
+	if reason, _ := waiting(h.entry(held["entry_id"].(string))); reason != "repository_paused" {
+		t.Fatalf("the launch dispatched under the second run's pause: %v", h.entry(held["entry_id"].(string)))
+	}
+
+	// The second run's retry lands: the pause naming it lifts at reap.
+	before = asOf(t, h.store)
+	h.script(second, 2, reconcileLines(t, [3]string{"done", "not_done", "not_done"}, secondRun.Head.String, secondRun.Base.String, "push", "mark_done"))
+	h.send(http.MethodPost, "/v2/runs/"+secondRun.ID+"/reconcile", "rc-second", revisionBody(h.run(secondRun.ID).Revision)).
+		expect(t, http.StatusAccepted, "reconcile-response.json")
+	waitFor(t, func() bool {
+		run := h.run(secondRun.ID)
+		return run.SettlementState == ledger.WeftSettlementLanded && h.reaped(run)
+	})
+	if run := h.run(secondRun.ID); run.ActionRequired.Valid {
+		t.Fatalf("second run after its retry landed = %+v", run)
+	}
+	lifted := false
+	for _, ev := range h.eventsSince(before) {
+		if ev.Type != "repository" {
+			continue
+		}
+		if r := decode(t, ev.Payload).(map[string]any)["repository"].(map[string]any); r["repository_id"] == h.repositoryID("weft") &&
+			r["dispatch"] == "open" && r["paused"] == nil {
+			lifted = true
+		}
+	}
+	if !lifted {
+		t.Fatalf("no repository event shows the pause lifted")
+	}
+	h.waitDispatched(held["entry_id"].(string))
+	h.settle()
+	if repo := h.repositoryOf("weft"); repo["dispatch"] != "open" || repo["paused"] != nil {
+		t.Fatalf("repository after its paused run landed = %v", repo)
+	}
+}
+
+// A pause whose run is still not_landed — failed, then unreconciled by a
+// retry that broke the step order — stands through the retry, and only
+// continue lifts it (§7.5).
+func TestPauseStaysWhileNotLanded(t *testing.T) {
+	h := newLandingHost(t)
+	id, waits := "weft/example-lens-2b3c", "weft/example-later-3d4e"
+	for _, ticketID := range []string{id, waits} {
+		h.ticket(ticketID, ticket.StatusReady, 2)
+	}
+	run, _ := h.unlandedRun(id)
+	if run.SettlementReason.String != ledger.WeftLandFailed {
+		t.Fatalf("unlanded run = %+v", run)
+	}
+	held := entryOf(h.launch(waits, "waits"))
+	if reason, _ := waiting(held); reason != "repository_paused" {
+		t.Fatalf("launch into the paused repository = %v", held)
+	}
+	h.script(id, 2, fixtureLines(t, "negative/worker-mark-done-before-push.ndjson"))
+	h.send(http.MethodPost, "/v2/runs/"+run.ID+"/reconcile", "rc", revisionBody(h.run(run.ID).Revision)).
+		expect(t, http.StatusAccepted, "reconcile-response.json")
+	waitFor(t, func() bool {
+		run = h.run(run.ID)
+		return len(run.Segments) == 2 && h.reaped(run) && run.Phase == ledger.WeftPhaseEnded
+	})
+	if run.SettlementState != ledger.WeftSettlementNotLanded || run.SettlementReason.String != ledger.WeftLandUnreconciled {
+		t.Fatalf("retried landing = %+v", run)
+	}
+	repo := h.repositoryOf("weft")
+	if paused, _ := repo["paused"].(map[string]any); repo["dispatch"] != "paused" || paused["run_id"] != run.ID {
+		t.Fatalf("repository after an unreconciled retry = %v", repo)
+	}
 	if reason, _ := waiting(h.entry(held["entry_id"].(string))); reason != "repository_paused" {
 		t.Fatalf("the paused repository dispatched before continue: %v", h.entry(held["entry_id"].(string)))
 	}
-	h.send(http.MethodPost, "/v2/runs/"+runID+"/reconcile", "rc-again", revisionBody(run.Revision)).refused(t, http.StatusConflict, "not_reconcilable")
+
 	h.script(waits, 1, h.landingSegment(waits, "worker-segment.ndjson"))
-	continued := h.send(http.MethodPost, "/v2/repositories/"+h.repositoryID("weft")+"/continue", "c-ok", revisionBody(h.repositoryOf("weft")["revision"]))
+	continued := h.send(http.MethodPost, "/v2/repositories/"+h.repositoryID("weft")+"/continue", "c-ok", revisionBody(repo["revision"]))
 	// The continue dispatched the waiting launch in its transaction, so the
 	// repository it answers is held, as repositories.json shows a held one.
 	occupied := decode(t, fixtureBytes(t, "repository-continued.json")).(map[string]any)
@@ -565,7 +691,6 @@ func TestUnlandedSettlementPausesOnlyItsRepository(t *testing.T) {
 		t.Fatalf("continued = %v", repo)
 	}
 	h.waitDispatched(held["entry_id"].(string))
-	h.waitReaped(other)
 	h.settle()
 }
 
