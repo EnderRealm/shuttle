@@ -480,6 +480,162 @@ func TestRestartSettlesArchivingEntriesByTheirArchiveRef(t *testing.T) {
 	}
 }
 
+// reportedStages records a segment's work stage done and its review stage
+// running, as a worker reports them before it is gone mid-review.
+func reportedStages(t *testing.T, s *Store, runID string) []WeftStage {
+	t.Helper()
+	stages := []WeftStage{
+		{RunID: runID, Segment: 1, Stage: "work", Occurrence: 1, Attempt: 1, State: "done",
+			Detail: sql.NullString{String: "work done", Valid: true}, At: "2026-09-02T04:00:00.000Z",
+			Turns: sql.NullInt64{Int64: 2, Valid: true}, Tokens: json.RawMessage(`{"input":3,"output":4}`)},
+		{RunID: runID, Segment: 1, Stage: "review", Occurrence: 1, Attempt: 1, State: "running",
+			Backend: sql.NullString{String: "claude", Valid: true}, At: "2026-09-02T04:10:00.000Z"},
+	}
+	for _, stage := range stages {
+		if err := s.RecordWeftStage(stage); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return stages
+}
+
+func stageEvents(t *testing.T, s *Store, runID string) []string {
+	t.Helper()
+	events, err := s.WeftEventsAfter(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payloads []string
+	for _, event := range events {
+		if event.Type == "stage" && event.RunID == runID {
+			payloads = append(payloads, string(event.Payload))
+		}
+	}
+	return payloads
+}
+
+// A segment settled without its terminal event — died, or closed by the
+// restart pass — fails the stage its worker left running, with the segment's
+// failure detail and a stage event, in the settling transaction; a stage the
+// worker finished keeps its report.
+func TestDeadSegmentClosesRunningStages(t *testing.T) {
+	s := newStore(t)
+	const died = "worker exited -1 with no terminal event"
+	for _, tt := range []struct {
+		name, detail  string
+		land, restart bool
+	}{
+		{"pipeline died", died, false, false},
+		{"landing died", died, true, false},
+		{"daemon restart", "daemon restarted before the segment settled", false, true},
+	} {
+		ticket := "demo/" + strings.ReplaceAll(tt.name, " ", "-")
+		var run *WeftRun
+		if tt.land {
+			run = landingRun(t, s, ticket)
+		} else {
+			var err error
+			if run, err = s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: "/tmp/" + ticket,
+				Branch: ticket, Worktree: "/tmp/weft/" + ticket, RunDirRoot: filepath.Join(t.TempDir(), "runs")}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.MarkWeftRunning(run.ID, 1, 12345, "weft-worker/v2"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RecordWeftHello(run.ID, 1, "20260902T043012Z-abcd1234", "base", "criteria"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reported := reportedStages(t, s, run.ID)
+		if tt.restart {
+			if err := s.MarkUnknown(run.Segments[0].LedgerRunID); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ReconcileWeftUnknown(run.Segments[0].LedgerRunID); err != nil {
+				t.Fatal(err)
+			}
+		} else if _, err := s.FailWeftSegment(run.ID, 1, ClassDied, tt.detail); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetWeftRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Phase == WeftPhaseRunning || len(got.Stages) != 2 {
+			t.Fatalf("%s: settled run = %+v", tt.name, got)
+		}
+		if !reflect.DeepEqual(got.Stages[0], reported[0]) {
+			t.Fatalf("%s: finished stage = %+v, want %+v", tt.name, got.Stages[0], reported[0])
+		}
+		closed := reported[1]
+		closed.State, closed.Detail, closed.At = "failed", sql.NullString{String: tt.detail, Valid: true}, weftTimestamp(testClock)
+		if !reflect.DeepEqual(got.Stages[1], closed) {
+			t.Fatalf("%s: running stage settled as %+v, want %+v", tt.name, got.Stages[1], closed)
+		}
+		events := stageEvents(t, s, run.ID)
+		if len(events) != 3 || !strings.Contains(events[2], `"stage":"review"`) ||
+			!strings.Contains(events[2], `"state":"failed"`) || !strings.Contains(events[2], `"detail":"`+tt.detail+`"`) {
+			t.Fatalf("%s: stage events = %v", tt.name, events)
+		}
+	}
+}
+
+// A segment whose terminal event was recorded keeps its stages exactly as its
+// worker reported them, however its process then settles.
+func TestTerminalSegmentStagesUnchanged(t *testing.T) {
+	s := newStore(t)
+	for _, tt := range []struct {
+		name     string
+		terminal func(runID string) error
+		failed   bool
+	}{
+		{"ended", func(runID string) error {
+			return s.RecordWeftEnded(runID, 1, "failed", false, "review", "error", "", "", "review failed", "head", json.RawMessage(`{"state":"rendered"}`))
+		}, false},
+		{"ended then died", func(runID string) error {
+			return s.RecordWeftEnded(runID, 1, "failed", false, "review", "error", "", "", "review failed", "head", json.RawMessage(`{"state":"rendered"}`))
+		}, true},
+		{"parked", func(runID string) error {
+			_, err := s.RecordWeftParked(runID, 1, "review", 1, 1, "Which shape?", "head", json.RawMessage(`{"state":"rendered"}`))
+			return err
+		}, false},
+	} {
+		ticket := "demo/" + strings.ReplaceAll(tt.name, " ", "-")
+		run, err := s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: "/tmp/" + ticket,
+			Branch: ticket, Worktree: "/tmp/weft/" + ticket, RunDirRoot: filepath.Join(t.TempDir(), "runs")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.MarkWeftRunning(run.ID, 1, 12345, "weft-worker/v2"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordWeftHello(run.ID, 1, "20260902T043012Z-abcd1234", "base", "criteria"); err != nil {
+			t.Fatal(err)
+		}
+		reported := reportedStages(t, s, run.ID)
+		if err := tt.terminal(run.ID); err != nil {
+			t.Fatal(err)
+		}
+		if tt.failed {
+			if _, err := s.FailWeftSegment(run.ID, 1, ClassDied, "worker exited 1 after a terminal event"); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := s.CompleteWeftSegment(run.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetWeftRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got.Stages, reported) {
+			t.Fatalf("%s: stages = %+v, want %+v", tt.name, got.Stages, reported)
+		}
+		if events := stageEvents(t, s, run.ID); len(events) != 2 {
+			t.Fatalf("%s: stage events = %v", tt.name, events)
+		}
+	}
+}
+
 func mkdir(path string) error { return os.MkdirAll(path, 0o755) }
 
 func sandboxID(path string) string { return sandbox.RepositoryID(path) }

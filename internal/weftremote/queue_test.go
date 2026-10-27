@@ -25,7 +25,8 @@ import (
 // queueHost is a host whose dispatch spawns a fake worker binary through the
 // real supervisor and sandbox preflight. Each ticket's segments behave as the
 // control file named for it says: park (the default), hold until released and
-// then park, finish, or stale (refuse stale_base before hello).
+// then park, finish, stale (refuse stale_base before hello), or die (killed
+// mid-stage, with no terminal event).
 type queueHost struct {
 	*serviceFixture
 	t        *testing.T
@@ -95,6 +96,10 @@ printf '{%s,"worker_run_id":"%s","seq":1,"ts":"2026-10-11T12:00:00.000Z","event"
 if [ "$mode" = hold ]; then
   while [ ! -f "$control/$slug.release" ]; do sleep 0.02; done
   rm -f "$control/$slug.release"
+fi
+if [ "$mode" = die ]; then
+  printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"stage","stage":"summary","backend":"claude","occurrence":1,"attempt":1,"state":"running","session":null,"detail":null,"exit_code":null,"turns":null,"spend":null,"processing_ms":null,"tokens":null}\n' "$env" "$worker"
+  kill -KILL $$
 fi
 if [ "$mode" = finish ]; then
   printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"ended","outcome":"finished","stopped":false,"halt":null,"failure":null,"detail":null,"head":"head","summary":{"state":"unavailable","reason":"fixture worker"}}\n' "$env" "$worker"
@@ -857,6 +862,29 @@ func TestStaleBaseHoldsTheRunAndItsAnswer(t *testing.T) {
 	}
 	if c := h.queue()["capacity"].(map[string]any); c["running"] != float64(0) {
 		t.Fatalf("the held run holds a slot: %v", c)
+	}
+}
+
+// A worker killed mid-stage leaves no stage running on the run it ended: the
+// stage it last reported running reads failed with the segment's failure.
+func TestDeadRunReportsNoRunningStage(t *testing.T) {
+	h := newQueueHost(t)
+	h.ticket("weft/dies-7a1c", ticket.StatusReady, 2)
+	h.mode("weft/dies-7a1c", "die")
+	runID := entryOf(h.launch("weft/dies-7a1c", "l1"))["run_id"].(string)
+	h.waitReaped(runID)
+	run := h.get("/v2/runs/" + runID)["run"].(map[string]any)
+	if run["phase"] == "running" || run["outcome"] != "failed" {
+		t.Fatalf("dead run = %v", run)
+	}
+	stages := run["stages"].([]any)
+	if len(stages) != 1 {
+		t.Fatalf("stages = %v", stages)
+	}
+	stage := stages[0].(map[string]any)
+	if stage["stage"] != "summary" || stage["state"] != "failed" ||
+		stage["detail"] != "worker exited -1 with no terminal event" {
+		t.Fatalf("stage the worker died in = %v", stage)
 	}
 }
 

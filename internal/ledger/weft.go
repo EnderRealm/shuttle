@@ -813,7 +813,8 @@ func (s *Store) FailWeftSegment(runID string, segment int, class, detail string)
 }
 
 // failSegmentRowTx records a segment's host-side failure on its phase-1 row —
-// its class, the failure streak and the incident — and on the segment.
+// its class, the failure streak and the incident — and on the segment and the
+// stages it left running.
 func failSegmentRowTx(tx *sql.Tx, runID string, seg *segmentState, class, detail, stamp string) (Event, error) {
 	agent, err := requireStatus(tx, seg.ledgerID, StatusFailed, StatusClaimed, StatusRunning)
 	if err != nil {
@@ -848,8 +849,49 @@ func failSegmentRowTx(tx *sql.Tx, runID string, seg *segmentState, class, detail
 		}
 		event.PausedReason = reason.String
 	}
-	_, err = tx.Exec(`UPDATE weft_segments SET failure=? WHERE run_id=? AND segment=?`, class, runID, seg.segment)
-	return event, err
+	if _, err := tx.Exec(`UPDATE weft_segments SET failure=? WHERE run_id=? AND segment=?`, class, runID, seg.segment); err != nil {
+		return event, err
+	}
+	return event, closeRunningStagesTx(tx, runID, seg, detail, stamp)
+}
+
+// closeRunningStagesTx fails each stage a segment settled without its
+// terminal event left running, with the segment's failure detail: its worker
+// is gone, so nothing will report that stage again. A segment whose terminal
+// event was recorded keeps its stages as the worker reported them.
+func closeRunningStagesTx(tx *sql.Tx, runID string, seg *segmentState, detail, stamp string) error {
+	if seg.terminal.Valid {
+		return nil
+	}
+	rows, err := tx.Query(`SELECT `+weftStageColumns+` FROM weft_stages
+		WHERE run_id=? AND segment=? AND state='running' ORDER BY rowid`, runID, seg.segment)
+	if err != nil {
+		return err
+	}
+	var running []WeftStage
+	for rows.Next() {
+		st, err := scanWeftStage(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		running = append(running, st)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, st := range running {
+		st.State, st.Detail, st.At = "failed", nullString(detail), stamp
+		if _, err := tx.Exec(`UPDATE weft_stages SET state=?,detail=?,at=?
+			WHERE run_id=? AND segment=? AND stage=? AND occurrence=? AND attempt=?`,
+			st.State, st.Detail, st.At, st.RunID, st.Segment, st.Stage, st.Occurrence, st.Attempt); err != nil {
+			return err
+		}
+		if err := appendStageEventTx(tx, st); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // MarkWeftStopped makes an operator stop durable before the process is asked
@@ -1025,9 +1067,13 @@ func (s *Store) ReconcileWeftUnknown(ledgerRunID string) error {
 			return err
 		}
 		const restarted = "daemon restarted before the segment settled"
-		switch {
-		case seg.kind == WeftSegmentArchive:
+		if seg.kind == WeftSegmentArchive {
 			return nil
+		}
+		if err := closeRunningStagesTx(tx, runID, seg, restarted, stamp); err != nil {
+			return err
+		}
+		switch {
 		case seg.kind == WeftSegmentReconcile || seg.kind == WeftSegmentCleanup:
 			if !seg.terminal.Valid {
 				if _, err := tx.Exec(`UPDATE weft_segments SET failure=? WHERE run_id=? AND segment=?`,
@@ -1167,26 +1213,15 @@ func loadWeftChildren(q querier, run *WeftRun) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	rows, err = q.Query(`SELECT run_id,segment,stage,occurrence,attempt,backend,state,session,
-		detail,exit_code,turns,spend,processing_ms,tokens,at FROM weft_stages
-		WHERE run_id=? ORDER BY rowid`, run.ID)
+	rows, err = q.Query(`SELECT `+weftStageColumns+` FROM weft_stages WHERE run_id=? ORDER BY rowid`, run.ID)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
-		var st WeftStage
-		var spend, tokens sql.NullString
-		if err := rows.Scan(&st.RunID, &st.Segment, &st.Stage, &st.Occurrence, &st.Attempt,
-			&st.Backend, &st.State, &st.Session, &st.Detail, &st.ExitCode, &st.Turns,
-			&spend, &st.Processing, &tokens, &st.At); err != nil {
+		st, err := scanWeftStage(rows)
+		if err != nil {
 			rows.Close()
 			return err
-		}
-		if spend.Valid {
-			st.Spend = json.RawMessage(spend.String)
-		}
-		if tokens.Valid {
-			st.Tokens = json.RawMessage(tokens.String)
 		}
 		run.Stages = append(run.Stages, st)
 	}
@@ -1203,6 +1238,27 @@ func loadWeftChildren(q querier, run *WeftRun) error {
 	run.Question = question
 	run.Steps, err = loadLandSteps(q, run.ID)
 	return err
+}
+
+// weftStageColumns is the column list scanWeftStage reads.
+const weftStageColumns = `run_id,segment,stage,occurrence,attempt,backend,state,session,
+	detail,exit_code,turns,spend,processing_ms,tokens,at`
+
+func scanWeftStage(sc scanner) (WeftStage, error) {
+	var st WeftStage
+	var spend, tokens sql.NullString
+	if err := sc.Scan(&st.RunID, &st.Segment, &st.Stage, &st.Occurrence, &st.Attempt,
+		&st.Backend, &st.State, &st.Session, &st.Detail, &st.ExitCode, &st.Turns,
+		&spend, &st.Processing, &tokens, &st.At); err != nil {
+		return st, err
+	}
+	if spend.Valid {
+		st.Spend = json.RawMessage(spend.String)
+	}
+	if tokens.Valid {
+		st.Tokens = json.RawMessage(tokens.String)
+	}
+	return st, nil
 }
 
 func (s *Store) PendingWeftQuestion(runID string) (*WeftQuestion, error) {
