@@ -281,7 +281,7 @@ func (s *studio) writeConfig() {
 
 func (s *studio) ticket(namespace, slug, title string, status ticket.Status) *ticket.Ticket {
 	tk := &ticket.Ticket{
-		ID: slug, Status: status, Type: ticket.TypeFeature, Priority: 2, Title: title,
+		ID: slug, Status: status, Type: ticket.TypeFeature, Priority: 2, Title: title, Body: criterionBody,
 		Created: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), Updated: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC),
 	}
 	writeTicketIn(s.t, s.central, namespace, tk)
@@ -352,7 +352,12 @@ func (s *studio) seedFixtureCatalog() []fixtureTicket {
 		}
 		tk := &ticket.Ticket{
 			ID: bare(ft.ID), Title: ft.Title, Status: ticket.Status(ft.Status), Type: ticket.TicketType(ft.Type),
-			Created: updated.Add(-time.Hour), Updated: updated,
+			Created: updated.Add(-time.Hour), Updated: updated, Body: criterionBody,
+		}
+		for _, r := range ft.Eligibility.Reasons {
+			if r.Code == "no_acceptance_criteria" {
+				tk.Body = ""
+			}
 		}
 		if ft.Priority != nil {
 			tk.Priority = *ft.Priority
@@ -867,6 +872,88 @@ func optional(v *string) any {
 		return nil
 	}
 	return *v
+}
+
+// catalogRow is the project's catalog row for one ticket.
+func (h *queueHost) catalogRow(id string) map[string]any {
+	h.t.Helper()
+	project, _, _ := strings.Cut(id, "/")
+	for _, row := range h.send(http.MethodGet, "/v2/tickets?project="+project, "", "").body["tickets"].([]any) {
+		if row.(map[string]any)["id"] == id {
+			return row.(map[string]any)
+		}
+	}
+	h.t.Fatalf("%s is not in the catalog", id)
+	return nil
+}
+
+func TestCatalogZeroCriteriaIneligible(t *testing.T) {
+	h := newQueueHost(t)
+	created := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	writeTicketIn(t, h.central, "weft", &ticket.Ticket{
+		ID: "uncriteria-0001", Status: ticket.StatusReady, Type: ticket.TypeFeature, Priority: 1, Title: "Prose only",
+		Body: "Why.\n\n## Acceptance Criteria\n\nIt should work.\n", Created: created, Updated: created,
+	})
+	writeTicketIn(t, h.central, "weft", &ticket.Ticket{
+		ID: "epic-0002", Status: ticket.StatusOpen, Type: ticket.TypeEpic, Priority: 1, Title: "Container",
+		Created: created, Updated: created,
+	})
+	h.ticket("weft/ready-0003", ticket.StatusReady, 2)
+	want := []any{map[string]any{"code": "no_acceptance_criteria", "detail": "the ticket declares no acceptance criteria; add them before it can run"}}
+
+	if e := h.catalogRow("weft/uncriteria-0001")["eligibility"].(map[string]any); e["state"] != "ineligible" || !reflect.DeepEqual(e["reasons"], want) {
+		t.Fatalf("catalog eligibility = %v, want ineligible %v", e, want)
+	}
+	// An epic is refused for being an epic, not also for the contract it has
+	// no use for.
+	for _, r := range h.catalogRow("weft/epic-0002")["eligibility"].(map[string]any)["reasons"].([]any) {
+		if r.(map[string]any)["code"] == "no_acceptance_criteria" {
+			t.Fatalf("epic reasons name no_acceptance_criteria: %v", r)
+		}
+	}
+
+	if message := h.launch("weft/uncriteria-0001", "k1").refused(t, http.StatusConflict, "ticket_not_eligible"); !strings.Contains(message, "no_acceptance_criteria") {
+		t.Fatalf("launch refusal = %s", message)
+	}
+
+	frontier := h.send(http.MethodGet, "/v2/frontier?project=weft", "", "").body["frontier"].(map[string]any)
+	if !reflect.DeepEqual(frontier["admissible"], []any{"weft/ready-0003"}) {
+		t.Fatalf("frontier admissible = %v", frontier["admissible"])
+	}
+	listed := false
+	for _, row := range frontier["tickets"].([]any) {
+		if row := row.(map[string]any); row["id"] == "weft/uncriteria-0001" {
+			listed = reflect.DeepEqual(row["eligibility"].(map[string]any)["reasons"], want)
+		}
+	}
+	if !listed {
+		t.Fatalf("frontier tickets = %v, want weft/uncriteria-0001 with %v", frontier["tickets"], want)
+	}
+	h.send(http.MethodPost, "/v2/frontier", "f1", fmt.Sprintf(
+		`{"contract_version":"weft-service/v2","project":"weft","catalog_revision":%v,"tickets":["weft/uncriteria-0001","weft/ready-0003"]}`,
+		frontier["catalog_revision"])).refused(t, http.StatusConflict, "revision_conflict")
+}
+
+func TestCatalogUnverifiableOnlyEligible(t *testing.T) {
+	h := newQueueHost(t)
+	body := "Why.\n\n## Acceptance Criteria\n\n- Reviewed by hand.\n  unverifiable: a human read-through.\n"
+	if c := ticket.ParseCriteria(ticket.AcceptanceCriteria(body)); len(c) != 1 || !c[0].Unverifiable {
+		t.Fatalf("criteria = %+v, want one unverifiable criterion", c)
+	}
+	created := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	writeTicketIn(t, h.central, "weft", &ticket.Ticket{
+		ID: "by-hand-0001", Status: ticket.StatusReady, Type: ticket.TypeFeature, Priority: 1, Title: "By hand",
+		Body: body, Created: created, Updated: created,
+	})
+
+	if e := h.catalogRow("weft/by-hand-0001")["eligibility"].(map[string]any); e["state"] != "eligible" || len(e["reasons"].([]any)) != 0 {
+		t.Fatalf("catalog eligibility = %v, want eligible", e)
+	}
+	frontier := h.send(http.MethodGet, "/v2/frontier?project=weft", "", "").body["frontier"].(map[string]any)
+	if !reflect.DeepEqual(frontier["admissible"], []any{"weft/by-hand-0001"}) {
+		t.Fatalf("frontier admissible = %v", frontier["admissible"])
+	}
+	h.launch("weft/by-hand-0001", "k1").expect(t, http.StatusAccepted, "launch-response.json")
 }
 
 func TestCatalogBindingsNeverDefaultARepository(t *testing.T) {

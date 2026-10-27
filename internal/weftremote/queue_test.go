@@ -200,7 +200,7 @@ func (h *queueHost) ticket(id string, status ticket.Status, priority int) {
 	h.t.Helper()
 	project, slug, _ := strings.Cut(id, "/")
 	writeTicketIn(h.t, h.central, project, &ticket.Ticket{
-		ID: slug, Status: status, Type: ticket.TypeFeature, Priority: priority, Title: "Work " + slug,
+		ID: slug, Status: status, Type: ticket.TypeFeature, Priority: priority, Title: "Work " + slug, Body: criterionBody,
 		Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Updated: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
 	})
 }

@@ -412,11 +412,12 @@ func (v *catalogView) ticketRow(p *catalogProject, t *ticket.Ticket) map[string]
 }
 
 // ineligibility lists why the host would not launch the ticket. What tk says
-// about the ticket — its status, its kind, its graph — comes first, read
-// through pkg/ticket's own rules; what the host holds for it — a run, an
-// entry, a retained branch — is only named once tk would let it launch, so
-// a done ticket reads done rather than as the run that finished it. A
-// project with no usable checkout makes every one of its tickets ineligible.
+// about the ticket — its status, its kind, its criteria, its graph — comes
+// first, read through pkg/ticket's own rules; what the host holds for it — a
+// run, an entry, a retained branch — is only named once tk would let it
+// launch, so a done ticket reads done rather than as the run that finished
+// it. A project with no usable checkout makes every one of its tickets
+// ineligible.
 func (v *catalogView) ineligibility(p *catalogProject, t *ticket.Ticket, runs []*ledger.WeftRun, entry ledger.WeftEntryRef, hasEntry bool) []map[string]any {
 	reasons := tkIneligibility(v.snap, t)
 	add := func(code, detail string) {
@@ -456,7 +457,8 @@ func (v *catalogView) ineligibility(p *catalogProject, t *ticket.Ticket, runs []
 }
 
 // tkIneligibility is what tk itself says against launching the ticket — its
-// status, its kind, its graph — read through pkg/ticket's own rules.
+// status, its kind, its acceptance criteria, its graph — read through
+// pkg/ticket's own rules.
 func tkIneligibility(snap *ticket.Snapshot, t *ticket.Ticket) []map[string]any {
 	reasons := []map[string]any{}
 	add := func(code, detail string) {
@@ -467,6 +469,12 @@ func tkIneligibility(snap *ticket.Snapshot, t *ticket.Ticket) []map[string]any {
 	}
 	if t.Type == ticket.TypeEpic {
 		add("epic", "an epic is a container; launch its tickets")
+	}
+	// A ticket with no criteria has no contract for a run to be held to. Its
+	// status or kind, where either already refuses it, is the reason to show;
+	// criteria that are all unverifiable are still a contract.
+	if len(reasons) == 0 && len(ticket.ParseCriteria(ticket.AcceptanceCriteria(t.Body))) == 0 {
+		add("no_acceptance_criteria", "the ticket declares no acceptance criteria; add them before it can run")
 	}
 	if snap.IsBlocked(t.ID) {
 		named := false

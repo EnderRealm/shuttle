@@ -77,6 +77,10 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	return &serviceFixture{root: root, store: store, service: service}
 }
 
+// criterionBody is a ticket body declaring one acceptance criterion, the
+// least a ticket needs to be eligible.
+const criterionBody = "## Acceptance Criteria\n\n- It works.\n"
+
 func writeTicket(t *testing.T, central string, tk *ticket.Ticket) {
 	t.Helper()
 	writeTicketIn(t, central, "demo", tk)
