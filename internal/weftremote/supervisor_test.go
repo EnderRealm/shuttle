@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/EnderRealm/ticket/v8/pkg/ticket"
+
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
 	"shuttle/internal/sandbox"
@@ -51,6 +53,53 @@ func TestSupervisorRunsFixtureWorkerToParkedState(t *testing.T) {
 	if !strings.Contains(string(events), `"event":"parked"`) {
 		t.Fatalf("events = %s", events)
 	}
+}
+
+// result.json names the contract its segment was launched under, the one
+// run.json records, for a weft-remote/v1 worker and a weft-worker/v2 one.
+func TestResultJSONCarriesLaunchContract(t *testing.T) {
+	check := func(t *testing.T, runDir, want string) {
+		t.Helper()
+		for _, name := range []string{"run.json", "result.json"} {
+			data, err := os.ReadFile(filepath.Join(runDir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc struct {
+				ContractVersion string `json:"contract_version"`
+			}
+			if err := json.Unmarshal(data, &doc); err != nil {
+				t.Fatal(err)
+			}
+			if doc.ContractVersion != want {
+				t.Errorf("%s contract_version = %q, want %q", name, doc.ContractVersion, want)
+			}
+		}
+	}
+	t.Run("v1", func(t *testing.T) {
+		f := newSupervisorFixture(t, false)
+		run := f.claim(t, "demo/worker")
+		if err := f.supervisor.run(run.ID); err != nil {
+			t.Fatal(err)
+		}
+		check(t, run.Segments[0].RunDir.String, ContractVersion)
+	})
+	t.Run("v2", func(t *testing.T) {
+		h := newV2Host(t)
+		id := "weft/example-second-4c2d"
+		h.ticket(id, ticket.StatusReady, 2)
+		h.script(id, 1, h.fixtureSegment(id))
+		runID := h.waitDispatched(entryOf(h.launch(id, "launch-contract"))["entry_id"].(string))
+		run := h.waitReaped(runID)
+		dir := run.Segments[0].RunDir.String
+		// result.json is written after the settlement waitReaped observes.
+		waitFor(t, func() bool {
+			data, err := os.ReadFile(filepath.Join(dir, "result.json"))
+			var doc map[string]any
+			return err == nil && json.Unmarshal(data, &doc) == nil
+		})
+		check(t, dir, WorkerContractV2)
+	})
 }
 
 func TestSupervisorHandsSegmentTheOAuthTokenByEnvironmentOnly(t *testing.T) {

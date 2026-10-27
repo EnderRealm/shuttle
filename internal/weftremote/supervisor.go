@@ -455,7 +455,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		return nil, err
 	}
 	result := map[string]any{
-		"contract_version": ContractVersion, "terminal": read.terminal,
+		"contract_version": contract, "terminal": read.terminal,
 		"failure_class": nullableText(failClass), "detail": nullableText(failDetail),
 		"exit_code": exitCode,
 	}
