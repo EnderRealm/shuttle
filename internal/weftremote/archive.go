@@ -169,7 +169,7 @@ func decodeArchive(body []byte) (*ledger.WeftArchive, error) {
 		}
 		for j, st := range r.Stages {
 			if st.Stage == "" || st.Occurrence < 1 || st.Attempt < 1 || !timestampPattern.MatchString(st.At) ||
-				!oneOf(st.State, "running", "done", "failed", "needs_input") {
+				!oneOf(st.State, "running", "done", "failed", "needs_input", "stopped") {
 				return nil, malformed("%s.stages[%d] is not a stage row", at, j)
 			}
 			run.Stages = append(run.Stages, ledger.WeftStage{

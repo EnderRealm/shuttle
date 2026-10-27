@@ -279,7 +279,7 @@ func (r *segmentStream) stageEvent(line []byte) error {
 		return err
 	}
 	if event.Stage == "" || event.Occurrence < 1 || event.Attempt < 1 ||
-		!oneOf(event.State, "running", "done", "failed", "needs_input") {
+		!oneOf(event.State, "running", "done", "failed", "needs_input", "stopped") {
 		return fmt.Errorf("invalid stage transition")
 	}
 	r.stage = event.Stage

@@ -101,6 +101,11 @@ if [ "$mode" = die ]; then
   printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"stage","stage":"summary","backend":"claude","occurrence":1,"attempt":1,"state":"running","session":null,"detail":null,"exit_code":null,"turns":null,"spend":null,"processing_ms":null,"tokens":null}\n' "$env" "$worker"
   kill -KILL $$
 fi
+if [ "$mode" = stopstage ]; then
+  printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"stage","stage":"work","backend":"claude","occurrence":1,"attempt":1,"state":"stopped","session":null,"detail":null,"exit_code":null,"turns":1,"spend":null,"processing_ms":100,"tokens":null}\n' "$env" "$worker"
+  printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:01.000Z","event":"ended","outcome":"stopped","stopped":true,"halt":null,"failure":null,"detail":null,"head":"head","summary":{"state":"unavailable","reason":"fixture worker"}}\n' "$env" "$worker"
+  exit 0
+fi
 if [ "$mode" = finish ]; then
   printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"ended","outcome":"finished","stopped":false,"halt":null,"failure":null,"detail":null,"head":"head","summary":{"state":"unavailable","reason":"fixture worker"}}\n' "$env" "$worker"
   exit 0
@@ -885,6 +890,27 @@ func TestDeadRunReportsNoRunningStage(t *testing.T) {
 	if stage["stage"] != "summary" || stage["state"] != "failed" ||
 		stage["detail"] != "worker exited -1 with no terminal event" {
 		t.Fatalf("stage the worker died in = %v", stage)
+	}
+}
+
+// The stage an operator stop cancelled is reported stopped, not failed, and
+// is stored and served as the worker reported it.
+func TestStoppedStageStateStoredAndServed(t *testing.T) {
+	h := newQueueHost(t)
+	h.ticket("weft/stops-4c2e", ticket.StatusReady, 2)
+	h.mode("weft/stops-4c2e", "stopstage")
+	runID := entryOf(h.launch("weft/stops-4c2e", "l1"))["run_id"].(string)
+	h.waitReaped(runID)
+	run := h.get("/v2/runs/" + runID)["run"].(map[string]any)
+	if run["outcome"] != "stopped" || run["stopped"] != true {
+		t.Fatalf("stopped run = %v", run)
+	}
+	stages := run["stages"].([]any)
+	if len(stages) != 1 {
+		t.Fatalf("stages = %v", stages)
+	}
+	if stage := stages[0].(map[string]any); stage["stage"] != "work" || stage["state"] != "stopped" || stage["detail"] != nil {
+		t.Fatalf("stage the stop cancelled = %v", stage)
 	}
 }
 
