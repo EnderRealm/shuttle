@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"shuttle/internal/config"
 	"shuttle/internal/ledger"
 	"shuttle/internal/schedule"
+	"shuttle/internal/weftremote"
 )
 
 var statusCmd = &cobra.Command{
@@ -61,6 +64,23 @@ var statusCmd = &cobra.Command{
 				escapeControl(def.Name), next.Format("2006-01-02 15:04:05 MST"),
 				fires.Format("15:04:05"), last, agent.FailureStreak, paused)
 		}
+		// weft-worker is the ledger's hosted agent, not a definition, so it has
+		// no slot of its own. Its row is printed wherever the daemon would host
+		// the service: the same empty-Listen rule.
+		cfg, err := config.Load()
+		switch {
+		case err != nil && !os.IsNotExist(err):
+			fmt.Fprintln(os.Stderr, err)
+			failed = true
+		case cfg != nil && cfg.Weft.Listen != "":
+			row, err := weftRow(store, cfg.Weft.WorkerBin)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				failed = true
+				break
+			}
+			fmt.Println(row)
+		}
 		// The window the daily limits use: midnight in the configured zone.
 		spent, err := store.SpendSince(sched.DayStart())
 		if err != nil {
@@ -104,4 +124,34 @@ func lastOutcome(store *ledger.Store, agent string) (string, bool) {
 		status += "/" + escapeControl(r.SkipReason.String)
 	}
 	return fmt.Sprintf("%s %s %s", status, escapeControl(r.ScheduledFor), formatCost(r.CostUSD)), true
+}
+
+// weftRow renders the hosted worker: its pause from the ledger's agents row,
+// the queue's running and waiting against the cap (the figures /v2/dashboard
+// reports), and worker_bin's answer to the daemon's version probe. The probe
+// is run by this command, now, and labelled so: status answers with the
+// daemon down and never claims the daemon's view.
+func weftRow(store *ledger.Store, bin string) (string, error) {
+	agent, err := store.Agent(ledger.WeftAgent)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", ledger.WeftAgent, err)
+	}
+	counts, err := store.WeftDashboardCounts()
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", ledger.WeftAgent, err)
+	}
+	paused := "active"
+	if agent.Paused {
+		paused = "paused (" + nullOr(agent.PausedReason) + ") since " + nullOr(agent.PausedAt)
+	}
+	version, contracts, capabilities, failure := weftremote.ProbeWorker(bin)
+	worker := "worker (probed now) "
+	if failure != "" {
+		worker += escapeControl(bin) + ": " + escapeControl(failure)
+	} else {
+		worker += fmt.Sprintf("%s contracts [%s] capabilities [%s]", escapeControl(version),
+			escapeControl(strings.Join(contracts, " ")), escapeControl(strings.Join(capabilities, " ")))
+	}
+	return fmt.Sprintf("%s\trunning %d waiting %d cap %d\t%s\t%s",
+		ledger.WeftAgent, counts.Running, counts.Waiting, counts.Capacity, paused, worker), nil
 }

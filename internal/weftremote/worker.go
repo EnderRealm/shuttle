@@ -126,6 +126,15 @@ func stampWorker(bin string, prior *workerInfo) (workerStamp, error) {
 	return workerStamp{size: info.Size(), mtime: info.ModTime(), sha: hex.EncodeToString(sum.Sum(nil))}, nil
 }
 
+// ProbeWorker runs the supervisor's version probe of bin, under the same
+// bounds, for a caller outside the daemon: `shuttle status` reads what the
+// worker speaks now, whether or not a daemon is up. failure is set when the
+// probe said nothing usable.
+func ProbeWorker(bin string) (version string, contracts, capabilities []string, failure string) {
+	info := probeWorker(bin)
+	return info.Version, info.Contracts, info.Capabilities, info.Failure
+}
+
 // probeWorker runs `weft-worker version --json` and reads worker-version.json
 // strictly. A v1-only worker exits 64 on the unknown subcommand.
 func probeWorker(bin string) *workerInfo {
