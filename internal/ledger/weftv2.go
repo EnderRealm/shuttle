@@ -2,9 +2,11 @@ package ledger
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"os"
 	"slices"
 	"strconv"
@@ -271,6 +273,94 @@ func appendCatalogEventTx(tx *sql.Tx, project string, revision int64, stamp stri
 			Project: project, CatalogRevision: revision,
 		}
 	})
+}
+
+// syncWeftHostCatalogTx raises catalog_revision, with its catalog event, for
+// every recorded project whose host-held eligibility inputs tx moved: what a
+// catalog read judges a ticket by beside tk — each run in flight and its
+// phase, each hosted run ended and not archived and the branch it retains,
+// and each entry waiting or archiving. Nothing else a run or entry carries is
+// digested, so a write that changes no ticket's eligibility leaves the
+// revision where it was. A row with no host digest yet — one SyncWeftCatalog
+// has just recorded in this transaction, or the migration to schema 7 is
+// digesting — has it recorded without a raise. A project with host rows but
+// no catalog row is skipped: the first tk read records it.
+func syncWeftHostCatalogTx(tx *sql.Tx, now time.Time) error {
+	rows, err := tx.Query(`
+		SELECT project,ticket,'in_flight',id,phase FROM weft_runs WHERE phase IN (?,?,?,?)
+		UNION ALL
+		SELECT project,ticket,'prior_run',id,branch FROM weft_runs
+			WHERE origin=? AND phase=? AND COALESCE(disposition,'')<>?
+		UNION ALL
+		SELECT project,ticket,'entry',id,kind||'/'||state FROM weft_entries WHERE state IN (?,?)
+		ORDER BY 1,2,3,4,5`,
+		WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked, WeftPhaseSettling,
+		WeftOriginHosted, WeftPhaseEnded, WeftDispositionArchived,
+		WeftEntryWaiting, WeftEntryArchiving)
+	if err != nil {
+		return err
+	}
+	hashes := map[string]hash.Hash{}
+	for rows.Next() {
+		var project, ticket, input, id, value string
+		if err := rows.Scan(&project, &ticket, &input, &id, &value); err != nil {
+			rows.Close()
+			return err
+		}
+		h := hashes[project]
+		if h == nil {
+			h = sha256.New()
+			hashes[project] = h
+		}
+		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\n", ticket, input, id, value)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	type row struct {
+		project  string
+		revision int64
+		digest   sql.NullString
+	}
+	var recorded []row
+	rows, err = tx.Query(`SELECT project,revision,host_digest FROM weft_catalog ORDER BY project`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.project, &r.revision, &r.digest); err != nil {
+			rows.Close()
+			return err
+		}
+		recorded = append(recorded, r)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	empty := hex.EncodeToString(sha256.New().Sum(nil))
+	stamp := weftTimestamp(now)
+	for _, r := range recorded {
+		digest := empty
+		if h := hashes[r.project]; h != nil {
+			digest = hex.EncodeToString(h.Sum(nil))
+		}
+		switch {
+		case !r.digest.Valid:
+			if _, err := tx.Exec(`UPDATE weft_catalog SET host_digest=? WHERE project=?`, digest, r.project); err != nil {
+				return err
+			}
+		case r.digest.String != digest:
+			r.revision++
+			if _, err := tx.Exec(`UPDATE weft_catalog SET revision=?,host_digest=? WHERE project=?`, r.revision, digest, r.project); err != nil {
+				return err
+			}
+			if err := appendCatalogEventTx(tx, r.project, r.revision, stamp); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 type catalogEventPayload struct {

@@ -13,7 +13,9 @@ package ledger
 // segment was launched to land (weft-service/v2 §6.2, §7).
 // schemaVersion 6: terminal sessions — what a session resource carries beyond
 // §6.9's columns, and the process identity the restart pass checks (§9).
-const schemaVersion = 6
+// schemaVersion 7: the catalog's host digest — what a ticket's eligibility
+// reads from the host, so catalog_revision moves when it does (§5.2).
+const schemaVersion = 7
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -319,4 +321,14 @@ ALTER TABLE weft_terminals ADD COLUMN output_offset INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE weft_terminals ADD COLUMN retained_from INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE weft_terminals ADD COLUMN process_start TEXT;
 ALTER TABLE weft_terminals ADD COLUMN group_unresolved TEXT;
+`
+
+// weftCatalogHostSQL is schema 7: weft_catalog.host_digest is the digest of
+// the host-held inputs to each project's ticket eligibility — the runs in
+// flight, the retained hosted runs and the pending entries — as the
+// project's catalog_revision was last raised over (§5.2). The migration
+// digests every recorded project in its own transaction; NULL is only ever a
+// row SyncWeftCatalog has just inserted, digested before that commits.
+const weftCatalogHostSQL = `
+ALTER TABLE weft_catalog ADD COLUMN host_digest TEXT;
 `

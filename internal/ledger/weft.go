@@ -207,7 +207,7 @@ func (s *Store) ClaimWeft(p WeftLaunch) (*WeftRun, error) {
 	if err := appendRunEventTx(tx, runID, weftTimestamp(now)); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commit(tx); err != nil {
 		return nil, err
 	}
 	return s.GetWeftRun(runID)
@@ -331,7 +331,7 @@ func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot string) (*We
 	if err := appendRunEventTx(tx, runID, stamp); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commit(tx); err != nil {
 		return nil, err
 	}
 	return s.GetWeftRun(runID)
@@ -507,7 +507,7 @@ func (s *Store) ClaimWeftResume(runID, runDirRoot string) (*WeftRun, error) {
 	if err := appendRunEventTx(tx, runID, weftTimestamp(s.now())); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commit(tx); err != nil {
 		return nil, err
 	}
 	return s.GetWeftRun(runID)

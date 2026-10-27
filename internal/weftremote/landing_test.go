@@ -382,6 +382,80 @@ func TestLostLandingReconcilesAtEveryStep(t *testing.T) {
 	}
 }
 
+// eligibilityCodes is the ticket's eligibility reason codes as the catalog
+// lists it, with the project's catalog_revision.
+func (h *queueHost) eligibilityCodes(id string) (int64, []string) {
+	h.t.Helper()
+	project, _, _ := strings.Cut(id, "/")
+	doc := h.get("/v2/tickets?project=" + project)
+	for _, row := range doc["tickets"].([]any) {
+		row := row.(map[string]any)
+		if row["id"] != id {
+			continue
+		}
+		var codes []string
+		for _, reason := range row["eligibility"].(map[string]any)["reasons"].([]any) {
+			codes = append(codes, reason.(map[string]any)["code"].(string))
+		}
+		return int64(doc["catalog_revision"].(float64)), codes
+	}
+	h.t.Fatalf("%s is not listed", id)
+	return 0, nil
+}
+
+// A landing segment that dies writing nothing, and the reconcile that
+// settles its run, change no ticket in tk; the run's phase alone moves the
+// ticket from run_in_flight to prior_run, and that raises the project's
+// catalog_revision with a catalog event, so a client re-reading on it sees
+// the new eligibility.
+func TestCatalogEligibilityAfterDeadSegment(t *testing.T) {
+	h := newLandingHost(t)
+	id := "weft/example-ready-a0b1"
+	h.ticket(id, ticket.StatusReady, 2)
+	h.script(id, 1, append(through(t, h.landingSegment(id, "worker-segment.ndjson"), "graded", ""), dieLine))
+	h.script(id, 2, append(workerLines{nil}, reconcileLines(t, [3]string{"not_done", "not_done", "not_done"},
+		fixtureHead, fixtureBase, ledger.WeftLandSteps...)...))
+	runID := h.waitDispatched(entryOf(h.launch(id, "dead"))["entry_id"].(string))
+	waitFor(t, func() bool { return h.run(runID).SettlementState == ledger.WeftSettlementReconciling })
+
+	read, codes := h.eligibilityCodes(id)
+	if !slices.Contains(codes, "run_in_flight") || slices.Contains(codes, "prior_run") {
+		t.Fatalf("reconciling ticket at revision %d = %v", read, codes)
+	}
+	tkDigest := func() string {
+		var digest string
+		if err := h.db().QueryRow(`SELECT digest FROM weft_catalog WHERE project='weft'`).Scan(&digest); err != nil {
+			t.Fatal(err)
+		}
+		return digest
+	}
+	digest, seq := tkDigest(), asOf(t, h.store)
+	h.release(id)
+	h.waitReaped(runID)
+
+	// The stream names the raise before any catalog read records anything.
+	var raised int64
+	for _, ev := range h.eventsSince(seq) {
+		if ev.Type != "catalog" {
+			continue
+		}
+		doc := decode(t, ev.Payload).(map[string]any)
+		if doc["project"] == "weft" {
+			raised = int64(doc["catalog_revision"].(float64))
+		}
+	}
+	if raised <= read {
+		t.Fatalf("no catalog event raised weft past revision %d after the reconcile settled", read)
+	}
+	revision, codes := h.eligibilityCodes(id)
+	if revision != raised || !slices.Contains(codes, "prior_run") || slices.Contains(codes, "run_in_flight") {
+		t.Fatalf("re-read at revision %d (raised to %d) = %v", revision, raised, codes)
+	}
+	if tkDigest() != digest {
+		t.Fatalf("tk changed under the dead segment and its reconcile")
+	}
+}
+
 // §12 step 2: a daemon killed mid-landing comes back with the landing
 // segment closed, its run reconciling under a settlement holder and the
 // reconcile claimed under that row; Restart starts it before dispatch, and

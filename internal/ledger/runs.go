@@ -509,6 +509,17 @@ func (s *Store) withTx(fn func(*sql.Tx) error) error {
 	if err := fn(tx); err != nil {
 		return err
 	}
+	return s.commit(tx)
+}
+
+// commit raises the catalog_revision of every project whose ticket
+// eligibility tx moved, then commits, so the revision and its catalog event
+// commit with the change. Every transaction this package writes weft state
+// in ends here.
+func (s *Store) commit(tx *sql.Tx) error {
+	if err := syncWeftHostCatalogTx(tx, s.now()); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
