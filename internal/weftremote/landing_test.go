@@ -58,7 +58,7 @@ func (h *queueHost) landingSegment(ticketID, fixture string) workerLines {
 		case "hello":
 			ev["worktree"], ev["ticket"], ev["branch"], ev["capabilities"] = h.worktree(ticketID), ticketID, ticketID, h.capabilities
 			ev["project"], _, _ = strings.Cut(ticketID, "/")
-		case "graded":
+		case "summarized":
 			ev["summary"].(map[string]any)["report"].(map[string]any)["ticket"] = ticketID
 		}
 		out = append(out, ev)
@@ -2467,20 +2467,23 @@ func TestNotLandedOfAnotherCommitIsRefused(t *testing.T) {
 	}
 }
 
-// gradedFirst is a landing transcript in the order of a worker that grades
-// before it summarizes: graded with a null summary, then summarized carrying
-// the summary graded carried.
-func gradedFirst(lines workerLines) workerLines {
-	at := indexOf(lines, "graded")
-	graded := maps.Clone(lines[at])
-	summarized := map[string]any{
-		"contract_version": graded["contract_version"], "worker_run_id": graded["worker_run_id"], "ts": graded["ts"],
-		"event": "summarized", "summary": graded["summary"],
+// summaryFirst is a landing transcript in the order of an older worker that
+// summarizes before it grades: no summarized, and graded after the summary
+// step carrying the summary summarized carried.
+func summaryFirst(lines workerLines) workerLines {
+	graded := maps.Clone(lines[indexOf(lines, "graded")])
+	var out workerLines
+	for _, ev := range lines {
+		switch {
+		case ev != nil && ev["event"] == "graded":
+		case ev != nil && ev["event"] == "summarized":
+			graded["summary"], graded["ts"] = ev["summary"], ev["ts"]
+			out = append(out, graded)
+		default:
+			out = append(out, ev)
+		}
 	}
-	graded["summary"] = nil
-	out := append(workerLines{}, lines[:at]...)
-	out = append(out, graded, summarized)
-	return append(out, lines[at+1:]...)
+	return out
 }
 
 // A worker that grades before it summarizes leaves the host its graded head
@@ -2491,7 +2494,7 @@ func TestGradedBeforeSummaryRecordsHead(t *testing.T) {
 		h := newLandingHost(t)
 		id := "weft/example-second-4c2d"
 		h.ticket(id, ticket.StatusReady, 2)
-		lines := gradedFirst(h.landingSegment(id, "worker-segment.ndjson"))
+		lines := h.landingSegment(id, "worker-segment.ndjson")
 		summary := lines[indexOf(lines, "summarized")]["summary"]
 		h.script(id, 1, splice(lines, indexOf(lines, "graded")+1, nil))
 		runID := h.waitDispatched(entryOf(h.launch(id, "graded-first"))["entry_id"].(string))
@@ -2516,7 +2519,7 @@ func TestGradedBeforeSummaryRecordsHead(t *testing.T) {
 		h := newLandingHost(t)
 		id := "weft/example-ready-a0b1"
 		h.ticket(id, ticket.StatusReady, 2)
-		lost := through(t, gradedFirst(h.landingSegment(id, "worker-segment.ndjson")), "graded", "")
+		lost := through(t, h.landingSegment(id, "worker-segment.ndjson"), "graded", "")
 		h.script(id, 1, append(lost, dieLine))
 		h.script(id, 2, reconcileLines(t, [3]string{"not_done", "not_done", "not_done"}, fixtureHead, fixtureBase, ledger.WeftLandSteps...))
 		runID := h.waitDispatched(entryOf(h.launch(id, "lost-summary"))["entry_id"].(string))
@@ -2548,7 +2551,7 @@ func TestGradedAfterSummaryStillRead(t *testing.T) {
 		h := newLandingHost(t)
 		id := "weft/example-second-4c2d"
 		h.ticket(id, ticket.StatusReady, 2)
-		lines := h.landingSegment(id, "worker-segment.ndjson")
+		lines := summaryFirst(h.landingSegment(id, "worker-segment.ndjson"))
 		summary := lines[indexOf(lines, "graded")]["summary"]
 		h.script(id, 1, lines)
 		runID := h.waitDispatched(entryOf(h.launch(id, "summary-first"))["entry_id"].(string))
@@ -2563,7 +2566,7 @@ func TestGradedAfterSummaryStillRead(t *testing.T) {
 		h := newLandingHost(t)
 		id := "weft/example-ready-a0b1"
 		h.ticket(id, ticket.StatusReady, 2)
-		lines := h.landingSegment(id, "worker-segment.ndjson")
+		lines := summaryFirst(h.landingSegment(id, "worker-segment.ndjson"))
 		graded := lines[indexOf(lines, "graded")]
 		again := map[string]any{
 			"contract_version": graded["contract_version"], "worker_run_id": graded["worker_run_id"], "ts": graded["ts"],

@@ -484,7 +484,9 @@ func (r *segmentStream) allowance(line []byte) error {
 }
 
 // gradedEvent is the grading half of v1's ended (§11.3): recorded as the
-// run's outcome, after which the segment's ended must repeat it.
+// run's outcome, after which the segment's ended must repeat it. A segment
+// launched without --land ends its run here only when graded carries the
+// summary; otherwise the run is over once summarized or ended arrives.
 func (r *segmentStream) gradedEvent(line []byte) error {
 	var event gradedEvent
 	if err := decodeEvent(line, &event, "graded"); err != nil {
@@ -502,25 +504,33 @@ func (r *segmentStream) gradedEvent(line []byte) error {
 	if !oneOf(event.Outcome, "finished", "halted", "failed", "stopped") {
 		return fmt.Errorf("graded outcome is not finished, halted, failed or stopped")
 	}
-	haltStage, haltReason, haltDetail := "", "", ""
-	if event.Halt != nil {
-		haltStage, haltReason, haltDetail = event.Halt.Stage, event.Halt.Reason, event.Halt.Detail
+	r.graded, r.landCommit = &event, text(event.Head)
+	if !r.land && rawJSON(event.Summary) != nil {
+		return r.endGraded(event.Summary)
 	}
+	haltStage, haltReason, haltDetail := event.halt()
 	r.s.stateMu.Lock()
 	var err error
 	if r.land {
 		err = r.s.store.RecordWeftGraded(r.run.ID, r.segment.Segment, event.Outcome, event.Stopped,
 			haltStage, haltReason, haltDetail, text(event.Detail), text(event.Head), event.Summary)
 	} else {
-		err = r.s.store.RecordWeftEnded(r.run.ID, r.segment.Segment, event.Outcome, event.Stopped,
-			haltStage, haltReason, haltDetail, "", text(event.Detail), text(event.Head), event.Summary)
+		err = r.s.store.RecordWeftGradedBeforeSummary(r.run.ID, event.Outcome, event.Stopped,
+			haltStage, haltReason, haltDetail, text(event.Detail), text(event.Head))
 	}
 	r.s.stateMu.Unlock()
-	if err != nil {
-		return err
-	}
-	r.graded, r.landCommit = &event, text(event.Head)
-	return nil
+	return err
+}
+
+// endGraded records the end of a segment launched without --land under its
+// grade, with the summary it reported, or none.
+func (r *segmentStream) endGraded(summary json.RawMessage) error {
+	haltStage, haltReason, haltDetail := r.graded.halt()
+	r.s.stateMu.Lock()
+	err := r.s.store.RecordWeftEnded(r.run.ID, r.segment.Segment, r.graded.Outcome, r.graded.Stopped,
+		haltStage, haltReason, haltDetail, "", text(r.graded.Detail), text(r.graded.Head), summary)
+	r.s.stateMu.Unlock()
+	return err
 }
 
 // summarizedEvent is the summary of a worker that grades before it
@@ -548,14 +558,14 @@ func (r *segmentStream) summarizedEvent(line []byte) error {
 	case !bytes.HasPrefix(event.Summary, []byte("{")):
 		return fmt.Errorf("summarized field summary is not an object")
 	}
+	r.summarized = true
+	if !r.land {
+		return r.endGraded(event.Summary)
+	}
 	r.s.stateMu.Lock()
 	err := r.s.store.RecordWeftSummarized(r.run.ID, event.Summary)
 	r.s.stateMu.Unlock()
-	if err != nil {
-		return err
-	}
-	r.summarized = true
-	return nil
+	return err
 }
 
 // endedV2 is the terminal event of a weft-worker/v2 segment: after graded it
@@ -590,6 +600,12 @@ func (r *segmentStream) endedV2(line []byte) error {
 		}
 		if r.land {
 			if err := r.recordLanding(landing); err != nil {
+				return err
+			}
+		} else if !r.summarized && rawJSON(r.graded.Summary) == nil {
+			// Graded before its summary, which never came: the run ends
+			// here, with none.
+			if err := r.endGraded(nil); err != nil {
 				return err
 			}
 		}
@@ -791,6 +807,13 @@ type gradedEvent struct {
 	Detail  *string         `json:"detail"`
 	Head    *string         `json:"head"`
 	Summary json.RawMessage `json:"summary"`
+}
+
+func (e *gradedEvent) halt() (stage, reason, detail string) {
+	if e.Halt == nil {
+		return "", "", ""
+	}
+	return e.Halt.Stage, e.Halt.Reason, e.Halt.Detail
 }
 
 type summarizedEvent struct {

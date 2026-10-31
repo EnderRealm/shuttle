@@ -157,7 +157,7 @@ func (h *queueHost) fixtureSegment(ticketID string) workerLines {
 		case "hello":
 			ev["worktree"], ev["land"], ev["ticket"], ev["branch"] = h.worktree(ticketID), false, ticketID, ticketID
 			ev["capabilities"] = h.capabilities
-		case "graded":
+		case "summarized":
 			ev["summary"].(map[string]any)["report"].(map[string]any)["ticket"] = ticketID
 		case "ended":
 			ev["landing"] = map[string]any{"state": "not_applicable", "step": nil, "reason": nil,
@@ -462,6 +462,56 @@ func (w *stuckWriter) Write(p []byte) (int, error) {
 	return 0, io.ErrClosedPipe
 }
 
+// A segment launched without --land that grades before it summarizes keeps
+// its run live through the summary step with the graded head and outcome,
+// and ends it with summarized, or with ended when no summary comes; an older
+// worker's summary-carrying graded still ends it.
+func TestUnlandedRunEndsAfterItsSummary(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		lines func(workerLines) workerLines
+	}{
+		{"summarized", func(l workerLines) workerLines { return splice(l, indexOf(l, "graded")+1, nil) }},
+		{"no summary", func(l workerLines) workerLines {
+			at := indexOf(l, "summarized")
+			l = append(append(workerLines{}, l[:at]...), l[at+1:]...)
+			return splice(l, indexOf(l, "graded")+1, nil)
+		}},
+		{"summary first", summaryFirst},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newV2Host(t)
+			id := "weft/example-second-4c2d"
+			h.ticket(id, ticket.StatusReady, 2)
+			lines := tt.lines(h.fixtureSegment(id))
+			h.script(id, 1, lines)
+			runID := h.waitDispatched(entryOf(h.launch(id, "unlanded-"+strings.ReplaceAll(tt.name, " ", "-")))["entry_id"].(string))
+			var summary any
+			if at := indexOf(lines, "summarized"); at >= 0 {
+				summary = lines[at]["summary"]
+			}
+			if at := indexOf(lines, "graded"); lines[at]["summary"] != nil {
+				summary = lines[at]["summary"]
+			} else {
+				waitFor(t, func() bool { return h.run(runID).Head.String == fixtureHead })
+				if run := h.run(runID); run.Phase != ledger.WeftPhaseRunning || run.Outcome.String != "finished" {
+					t.Fatalf("graded before its summary = phase %s outcome %s", run.Phase, run.Outcome.String)
+				}
+				h.release(id)
+			}
+			run := h.waitReaped(runID)
+			var got any
+			if rawJSON(run.Summary) != nil {
+				got = decode(t, run.Summary)
+			}
+			if run.Outcome.String != "finished" || run.Head.String != fixtureHead || run.Segments[0].Failure.Valid ||
+				!reflect.DeepEqual(got, summary) {
+				t.Fatalf("ended run = %+v", run)
+			}
+		})
+	}
+}
+
 // An attempt past 256 KiB reads truncated; a reconnect inside retention
 // resumes exactly, one past it gets an explicit gap; and a client that never
 // reads blocks neither the worker reader nor control.
@@ -475,8 +525,8 @@ func TestOutputRetentionGapsAndSlowClients(t *testing.T) {
 		bulk = append(bulk, outputLine("work", chunk, strings.Repeat(strconv.Itoa(chunk%10), 8<<10)))
 	}
 	lines = splice(lines, indexOf(lines, "liveness"), bulk...)
-	graded := indexOf(lines, "graded")
-	lines = splice(lines, graded, nil, outputLine("summary", 1, "Summarizing.\n"), outputLine("summary", 2, "Done.\n"))
+	summarized := indexOf(lines, "summarized")
+	lines = splice(lines, summarized, nil, outputLine("summary", 1, "Summarizing.\n"), outputLine("summary", 2, "Done.\n"))
 	h.script(id, 1, lines)
 	server := httptest.NewServer(h.service)
 	t.Cleanup(server.Close)

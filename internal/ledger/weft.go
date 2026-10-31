@@ -675,6 +675,23 @@ func (s *Store) RecordWeftEnded(runID string, segment int, outcome string, stopp
 	})
 }
 
+// RecordWeftGradedBeforeSummary records the grade of a segment launched
+// without --land whose summary follows it: the outcome and head stand, and
+// the run stays live through its summary step until RecordWeftEnded closes
+// it. A weft-service/v2 operator stop lasts the attempt, so no grade clears it.
+func (s *Store) RecordWeftGradedBeforeSummary(runID string, outcome string, stopped bool, haltStage, haltReason, haltDetail, detail, head string) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		stamp := weftTimestamp(s.now())
+		if _, err := tx.Exec(`UPDATE weft_runs SET outcome=?,halt_stage=?,halt_reason=?,halt_detail=?,
+			head=?,stopped=MAX(stopped,?),updated_at=?,revision=revision+1 WHERE id=?`,
+			outcome, nullString(haltStage), nullString(haltReason), nullString(firstNonempty(haltDetail, detail)),
+			nullString(head), stopped, stamp, runID); err != nil {
+			return err
+		}
+		return appendRunEventTx(tx, runID, stamp)
+	})
+}
+
 // RecordWeftStaleBase records an answer or resume segment the worker refused
 // before hello because the repository's default branch moved past the run's
 // base (weft-service/v2 §6.7). The run is held blocked with stale_base for the
