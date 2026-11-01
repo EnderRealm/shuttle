@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"shuttle/internal/weftfixtures"
 )
 
 func TestWorktreePathMatchesWeftContract(t *testing.T) {
@@ -30,26 +32,10 @@ func TestWorktreePathMatchesWeftContract(t *testing.T) {
 	}
 }
 
-// contractDir is weft's docs/service-v2: $WEFT_CONTRACT_DIR, else the sibling
-// checkout, either resolved against this repository's root. Absent is a
-// failure rather than a skip: these fixtures are the contract under test.
+// contractDir is weft's docs/service-v2, resolved from this package's checkout.
 func contractDir(t *testing.T) string {
 	t.Helper()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := os.Getenv("WEFT_CONTRACT_DIR")
-	if dir == "" {
-		dir = filepath.Join("..", "weft", "docs", "service-v2")
-	}
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(root, dir)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "manifest.json")); err != nil {
-		t.Fatalf("weft-service/v2 fixtures are required (set WEFT_CONTRACT_DIR): %v", err)
-	}
-	return dir
+	return weftfixtures.Dir(t, ".")
 }
 
 func TestRepositoryIDMatchesServiceFixtures(t *testing.T) {
