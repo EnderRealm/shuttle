@@ -767,7 +767,7 @@ func (s *Supervisor) environ(homeDir, runDir, oauthToken string) []string {
 	user := filepath.Base(homeDir)
 	return []string{
 		"PATH=" + workerPath, "HOME=" + homeDir, "USER=" + user, "LOGNAME=" + user,
-		"TMPDIR=" + filepath.Join(runDir, "tmp"), "CLAUDE_CODE_TMPDIR=" + filepath.Join(runDir, "tmp"),
+		"TMPDIR=" + sandbox.SegmentTmpDir(runDir), "CLAUDE_CODE_TMPDIR=" + sandbox.SegmentTmpDir(runDir),
 		"LOOM_HOME=" + s.cfg.Paths.LoomHome, "TZ=" + s.cfg.Timezone, "LANG=en_US.UTF-8",
 		"DISABLE_TELEMETRY=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 		"CLAUDE_CODE_OAUTH_TOKEN=" + oauthToken,

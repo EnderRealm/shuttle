@@ -431,9 +431,11 @@ func TestCheckCodingRefusesASandboxThatGrantsTheRunDir(t *testing.T) {
 	}
 }
 
-// An allow_write entry spelled through /private/tmp covers a run directory
-// spelled through /tmp: the strings differ, but seatbelt judges the real
-// path, so real srt grants the run directory and the preflight refuses it.
+// An allow_write entry spelled through /private/var/tmp covers a run
+// directory spelled through /var/tmp: the strings differ, but seatbelt judges
+// the real path, so real srt grants the run directory and the preflight
+// refuses it. /tmp is granted to every coding profile, so it cannot host the
+// run directory a profile must deny.
 func TestLiveCodingSRTRefusesAnAliasedRunDirGrant(t *testing.T) {
 	if os.Getenv("SHUTTLE_LIVE_SRT") != "1" {
 		t.Skip("set SHUTTLE_LIVE_SRT=1 to run the coding profile against real srt")
@@ -442,19 +444,86 @@ func TestLiveCodingSRTRefusesAnAliasedRunDirGrant(t *testing.T) {
 	if bin == "" {
 		bin = defaultSRTBin
 	}
-	root := shortCodingRoot(t)
-	if !strings.HasPrefix(root, "/private/tmp/") {
-		t.Skipf("temp root %s is not under /private/tmp", root)
+	root := liveCodingRoot(t)
+	if !strings.HasPrefix(root, "/private/var/tmp/") {
+		t.Skipf("temp root %s is not under /private/var/tmp", root)
 	}
 	aliased := strings.TrimPrefix(root, "/private")
 	denied := checkableCoding(t, root, filepath.Join(aliased, "run-denied"), bin)
 	if err := CheckCoding(context.Background(), denied); err != nil {
 		t.Fatalf("a profile denying the run dir was refused: %v", err)
 	}
-	o := checkableCoding(t, root, filepath.Join(aliased, "run"), bin, root)
+	// The entry covers the run directory and not the worktree beside it, which
+	// the static worktree check would refuse before srt is reached.
+	o := checkableCoding(t, root, filepath.Join(aliased, "runs", "run"), bin, filepath.Join(root, "runs"))
 	if err := CheckCoding(context.Background(), o); err == nil || !strings.Contains(err.Error(), "run dir") {
 		t.Fatalf("check = %v, want the run dir refusal", err)
 	}
+}
+
+// /tmp is granted for tools and test suites that hardcode it, while the
+// /tmp/claude carve-out in both spellings still wins over that grant.
+func TestCodingProfileAllowsTmpButNotClaudeTmp(t *testing.T) {
+	root := shortCodingRoot(t)
+	doc, err := CodingProfileJSON(CodingOptions{
+		SRTBin: "/usr/local/bin/srt", RunDir: filepath.Join(root, "run"),
+		HomeDir: root, PATH: testPATH, Repo: filepath.Join(root, "repo"),
+		TicketsRoot: filepath.Join(root, "tickets"), Worktree: filepath.Join(root, "worktree"),
+		UserTempDir: filepath.Join(root, "user-temp"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got profile
+	if err := json.Unmarshal(doc, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got.Filesystem.AllowWrite, "/private/tmp") {
+		t.Errorf("allowWrite = %v, want /private/tmp", got.Filesystem.AllowWrite)
+	}
+	hostClaudeTmp := "/private/tmp/claude-" + strconv.Itoa(os.Getuid())
+	for _, want := range []string{"/tmp/claude", "/private/tmp/claude", strings.TrimPrefix(hostClaudeTmp, "/private"), hostClaudeTmp} {
+		if !slices.Contains(got.Filesystem.DenyWrite, want) {
+			t.Errorf("denyWrite does not contain %s", want)
+		}
+	}
+	t.Run("live srt", func(t *testing.T) {
+		if os.Getenv("SHUTTLE_LIVE_SRT") != "1" {
+			t.Skip("set SHUTTLE_LIVE_SRT=1 to run the coding profile against real srt")
+		}
+		bin := os.Getenv("SHUTTLE_SRT_BIN")
+		if bin == "" {
+			bin = defaultSRTBin
+		}
+		liveRoot := liveCodingRoot(t)
+		o := checkableCoding(t, liveRoot, filepath.Join(liveRoot, "run"), bin)
+		if err := CheckCoding(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+		name := "shuttle-live-" + filepath.Base(liveRoot)
+		allowed := filepath.Join("/private/tmp", name)
+		t.Cleanup(func() { os.Remove(allowed) })
+		if code, stderr := codingExec(o, "touch "+allowed); code != 0 {
+			t.Fatalf("/private/tmp write failed: %s", stderr)
+		}
+		// The deny must be what refuses the write, not a missing parent. A
+		// directory that already exists is a live session's: nothing in it is
+		// touched beyond the probe's own name.
+		for _, claude := range []string{"/private/tmp/claude", hostClaudeTmp} {
+			if err := os.Mkdir(claude, 0o755); err == nil {
+				t.Cleanup(func() { os.Remove(claude) })
+			} else if !os.IsExist(err) {
+				t.Fatal(err)
+			}
+		}
+		for _, dir := range []string{"/private/tmp/claude", "/tmp/claude", hostClaudeTmp, strings.TrimPrefix(hostClaudeTmp, "/private")} {
+			denied := filepath.Join(dir, name)
+			t.Cleanup(func() { os.Remove(denied) })
+			if code, stderr := codingExec(o, "touch "+denied); code == 0 || !strings.Contains(stderr, "Operation not permitted") {
+				t.Fatalf("%s write returned %d: %s", denied, code, stderr)
+			}
+		}
+	})
 }
 
 func TestCodingProfileRefusesOccupiedExpectedAdminName(t *testing.T) {
@@ -480,7 +549,20 @@ func TestCodingProfileRefusesOccupiedExpectedAdminName(t *testing.T) {
 
 func shortCodingRoot(t *testing.T) string {
 	t.Helper()
-	root, err := os.MkdirTemp("/tmp", "cw-")
+	return codingRootIn(t, "/tmp")
+}
+
+// liveCodingRoot is a short root outside /tmp for tests that run real srt:
+// every coding profile grants /tmp, so a run directory there is writable and
+// CheckCoding refuses it.
+func liveCodingRoot(t *testing.T) string {
+	t.Helper()
+	return codingRootIn(t, "/var/tmp")
+}
+
+func codingRootIn(t *testing.T, dir string) string {
+	t.Helper()
+	root, err := os.MkdirTemp(dir, "cw-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +582,7 @@ func TestLiveCodingSRT(t *testing.T) {
 	if bin == "" {
 		bin = defaultSRTBin
 	}
-	root := shortRunDir(t)
+	root := liveCodingRoot(t)
 	repo := filepath.Join(root, "repo")
 	worktree := filepath.Join(root, "worktree")
 	otherWorktree := filepath.Join(root, "other-worktree")

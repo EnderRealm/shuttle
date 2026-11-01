@@ -111,9 +111,14 @@ func CodingProfileJSON(o CodingOptions) ([]byte, error) {
 	if err := requireExpectedWorktreeAdmin(o.Worktree, ownAdmin); err != nil {
 		return nil, err
 	}
+	// A host Claude Code session's temp tree, scratchpads and task output
+	// included, is /tmp/claude-<uid>; the /tmp grant would otherwise reach it.
+	hostClaudeTmp := fmt.Sprintf("/tmp/claude-%d", os.Getuid())
 	denyWrite := []string{
 		"/tmp/claude",
 		"/private/tmp/claude",
+		hostClaudeTmp,
+		"/private" + hostClaudeTmp,
 		filepath.Join(o.HomeDir, ".npm", "_logs"),
 		filepath.Join(o.Worktree, ".git"),
 		filepath.Join(o.Repo, ".git", "config"),
@@ -162,6 +167,11 @@ func CodingProfileJSON(o CodingOptions) ([]byte, error) {
 		// SwiftPM's build service stages atomic writes and swift test's
 		// build temp under confstr's per-user temp dir, ignoring TMPDIR.
 		o.UserTempDir,
+		// Agents' tools and project test suites hardcode /tmp. A deliberate
+		// widening: /tmp is shared with every host process, and only the
+		// /tmp/claude and /tmp/claude-<uid> denyWrite entries above take
+		// part of it back.
+		sharedTmp,
 	}
 	for _, path := range o.AllowWrite {
 		if !slices.Contains(allowWrite, path) {
@@ -283,6 +293,9 @@ func CheckCoding(ctx context.Context, o CodingOptions) error {
 	}
 	return nil
 }
+
+// sharedTmp is /tmp by the real path Seatbelt judges it by.
+const sharedTmp = "/private/tmp"
 
 // controlProbe is the file CheckCoding has the sandbox try to write.
 const controlProbe = ".shuttle-control-probe"

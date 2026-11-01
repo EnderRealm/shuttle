@@ -367,7 +367,7 @@ func TestLiveSRTSettlementContainsADetachedHolder(t *testing.T) {
 	if srt == "" {
 		srt = "/opt/homebrew/bin/srt"
 	}
-	f := newSupervisorFixture(t, false)
+	f := newSupervisorFixtureIn(t, "/var/tmp", false)
 	f.cfg.Paths.SRTBin = srt
 	logs := &syncBuffer{}
 	f.supervisor.log = log.New(logs, "", 0)

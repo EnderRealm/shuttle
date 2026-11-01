@@ -308,7 +308,31 @@ per-user temp directory is `confstr(_CS_DARWIN_USER_TEMP_DIR)` (what `getconf
 DARWIN_USER_TEMP_DIR` prints), resolved to its `/private/var/folders/.../T`
 path: SwiftPM's build service stages its build-manifest writes there and `swift
 test` creates its build temp there, both ignoring `TMPDIR`, so without it
-`swift build --disable-sandbox` fails with `EPERM`. `denyWrite` takes back
+`swift build --disable-sandbox` fails with `EPERM`.
+
+`/private/tmp` (what `/tmp` resolves to) is writable too, and that is a
+deliberate widening of the write surface, not a free fix. Agents' tools and
+project test suites hardcode `/tmp` and fail with `Operation not permitted`
+without it; shuttle's own suite did. The worker environment still sets
+`TMPDIR` and `CLAUDE_CODE_TMPDIR` to the segment temp directory, so tools that
+honour them stay inside the segment. The residual risk: `/tmp` is shared by
+every process of every user, so a segment can create or replace files at
+predictable `/tmp` paths that unsandboxed processes on the host later read or
+execute (other agent sessions, shuttle's own tooling, git hooks staged there).
+`denyWrite` takes back only the paths known to matter: srt's default Claude
+temp dir `/tmp/claude`, and a host Claude Code session's temp tree
+`/tmp/claude-<uid>` (its scratchpads and task output; a host session runs
+outside srt with `TMPDIR=/tmp`), named for the host uid. Each is denied in
+both spellings, under `/tmp` and `/private/tmp`, and srt's deny rules take
+precedence over `allowWrite`. A segment's own Claude temp is not under either:
+`CLAUDE_CODE_TMPDIR` puts it in `<run_dir>/tmp`. The grant is shared by every segment's profile, so a
+`weft.root` under `/tmp` would put every worktree in reach of every
+concurrent segment. A run directory under `/tmp` is caught: the preflight has
+the sandbox itself try the run directory, and refuses a profile that lets the
+segment write it. Tests that run real srt therefore keep their fixtures under
+`/var/tmp`, not `/tmp`.
+
+`denyWrite` takes back
 both repositories' Git configuration, hooks and indirection files, the linked
 worktree's gitfile, Claude's global `.claude.json`, commands/plugins/rules,
 every project's auto-memory directory and installed work-policy files, and
@@ -339,6 +363,10 @@ is never reached.
 generated shape. `SHUTTLE_LIVE_SRT=1 go test ./internal/sandbox -run
 TestLiveCodingSRT` is the host-level proof: a declared worktree write succeeds
 while an attempted Git-hook write returns `Operation not permitted`.
+`TestCodingProfileAllowsTmpButNotClaudeTmp` asserts the `/tmp` grant and the
+`/tmp/claude` and `/tmp/claude-<uid>` carve-outs, and under
+`SHUTTLE_LIVE_SRT=1` has real srt take a `/private/tmp` write and refuse one
+under each carve-out in both spellings.
 
 ## Running unsandboxed
 

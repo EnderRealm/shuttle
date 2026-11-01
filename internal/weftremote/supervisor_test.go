@@ -154,6 +154,50 @@ func TestSupervisorHandsSegmentTheOAuthTokenByEnvironmentOnly(t *testing.T) {
 	}
 }
 
+// Tools that honour TMPDIR stay inside the segment's own temp dir, the one
+// its profile grants, rather than the shared /tmp.
+func TestSegmentEnvironmentSetsTmpdir(t *testing.T) {
+	f := newSupervisorFixture(t, false)
+	run := f.claim(t, "demo/worker")
+	seen := filepath.Join(f.root, "tmpdir-seen")
+	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, "demo/worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" + v1WorkerGuard + "printf '%s\\n%s\\n' \"$TMPDIR\" \"$CLAUDE_CODE_TMPDIR\" > " + seen + "\n" +
+		strings.TrimPrefix(fixtureWorkerScript(worktree), "#!/bin/sh\n")
+	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.supervisor.run(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	runDir := run.Segments[0].RunDir.String
+	want := filepath.Join(runDir, "tmp")
+	data, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != want+"\n"+want+"\n" {
+		t.Fatalf("worker TMPDIR and CLAUDE_CODE_TMPDIR = %q, want both %s", got, want)
+	}
+	record, err := os.ReadFile(filepath.Join(runDir, "run.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded struct {
+		Environment []string `json:"environment"`
+	}
+	if err := json.Unmarshal(record, &recorded); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"TMPDIR", "CLAUDE_CODE_TMPDIR"} {
+		if !oneOf(name, recorded.Environment...) {
+			t.Errorf("run.json environment = %v, missing %s", recorded.Environment, name)
+		}
+	}
+}
+
 func TestSupervisorRefusesLaunchWhenOAuthItemIsMissing(t *testing.T) {
 	f := newSupervisorFixture(t, false)
 	f.cfg.Weft.OAuthKeychainItem = "missing-oauth-item"
@@ -386,7 +430,15 @@ type supervisorFixture struct {
 
 func newSupervisorFixture(t *testing.T, refuseSandbox bool) *supervisorFixture {
 	t.Helper()
-	root, err := os.MkdirTemp("/tmp", "sw-")
+	return newSupervisorFixtureIn(t, "/tmp", refuseSandbox)
+}
+
+// newSupervisorFixtureIn roots the fixture under dir. A test that runs real
+// srt needs a dir outside /tmp: every coding profile grants /tmp, so a run
+// directory there is writable and the preflight refuses it.
+func newSupervisorFixtureIn(t *testing.T, dir string, refuseSandbox bool) *supervisorFixture {
+	t.Helper()
+	root, err := os.MkdirTemp(dir, "sw-")
 	if err != nil {
 		t.Fatal(err)
 	}
