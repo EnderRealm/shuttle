@@ -1,8 +1,10 @@
 package reap
 
 import (
+	"errors"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -104,4 +106,46 @@ func TestRestartSessionTakesAnotherUsersPidAsHandedOn(t *testing.T) {
 	if action != ActionForeign || !strings.HasPrefix(detail, "kill 0: ") {
 		t.Fatalf("pid 1: %s %s", action, detail)
 	}
+}
+
+// A worker's children lead process groups of their own but stay in its
+// session, and outlive it there. With the leader exited and not yet reaped,
+// the sweep kills them — one that ignores SIGTERM included — and leaves a
+// process in any other session alone.
+func TestContainSessionKillsADeadLeadersOrphans(t *testing.T) {
+	cmd, pid, _ := startSession(t, `set -m; sh -c 'trap "" TERM; exec sleep 60' & exit 0`)
+	otherCmd, other, otherStart := startSession(t, `trap "" TERM; exec sleep 60`)
+	var members []sessionMember
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, _, err := processState(pid)
+		members, _ = sessionMembers(pid)
+		if errors.Is(err, errProcessGone) && len(members) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("leader %d: %v, session members %+v; want the leader exited and one orphan", pid, err, members)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	orphan := members[0]
+	if orphan.PGID == pid {
+		t.Fatalf("orphan %+v is in the leader's process group", orphan)
+	}
+	c, err := ContainSession(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.Killed, []int{orphan.PID}) || c.Names[orphan.PID] != "sleep" {
+		t.Fatalf("containment %s, want only orphan %d killed", c, orphan.PID)
+	}
+	waitGone(t, "orphan", orphan.PID)
+	if now, stopped, err := processState(other); err != nil || !now.Start.Equal(otherStart) || stopped {
+		t.Fatalf("process %d of another session was signalled: %+v stopped=%v %v", other, now, stopped, err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	_ = syscall.Kill(other, syscall.SIGKILL)
+	_ = otherCmd.Wait()
 }

@@ -36,7 +36,9 @@ import (
 // written for its ticket and segment, holding at each @HOLD@ line until
 // released, reading one command from stdin at each @ACK@ line into
 // <slug>-<segment>.commands, and exiting with no terminal event at @DIE@; it
-// keeps the answer file it was handed.
+// keeps the answer file it was handed. At @SPAWN@ it starts deadTreeScript,
+// its pids in <slug>.tree; at @PROBE@ it writes <slug>-<segment>.probe, alive
+// while any of that tree lives and gone once none does.
 const v2WorkerScript = `#!/bin/sh
 control=CONTROL
 case "$1" in
@@ -78,10 +80,35 @@ while IFS= read -r line; do
       printf '%s\n' "$command" >> "$control/$slug-$segment.commands"
       continue ;;
     @DIE@) exit 9 ;;
+    @SPAWN@)
+      ` + deadTreeScript + ` > "$control/$slug.tree"
+      continue ;;
+    @PROBE@)
+      state=gone
+      for pid in $(cat "$control/$slug.tree"); do
+        case "$(ps -o stat= -p "$pid")" in ""|Z*) ;; *) state=alive ;; esac
+      done
+      printf '%s\n' "$state" > "$control/$slug-$segment.probe"
+      continue ;;
   esac
   printf '%s\n' "$line"
 done
 `
+
+// deadTreeScript is the unsandboxed children a worker leaves running when it
+// dies, as a landing step's git push and the remote helper under it: a child
+// that leads a process group of its own, as Foundation's Process starts each
+// git and tk weft runs, and forks a grandchild leading another. Neither calls
+// setsid, so both stay in the worker's session; both ignore SIGTERM and sleep.
+// Their pids are printed once both have left the worker's process group.
+const deadTreeScript = `/usr/bin/perl -e '
+pipe(my $r, my $w) or die; my $p = fork(); die unless defined $p;
+if ($p) { close $w; print <$r>; exit 0 }
+close $r; close STDIN; close STDOUT; close STDERR; require POSIX; POSIX::setpgid(0, 0); $SIG{TERM} = "IGNORE";
+my $g = fork(); die unless defined $g;
+if (!$g) { POSIX::setpgid(0, 0); close $w; exec "/bin/sleep", "300" }
+print $w "$$\n$g\n"; close $w; exec "/bin/sleep", "300"
+' </dev/null 2>/dev/null`
 
 const fixtureWorkerRun = "20261002T091500Z-2c3d4e5f"
 

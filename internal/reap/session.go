@@ -9,8 +9,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// sessionMember is one live process of a session and the group it is in.
-type sessionMember struct{ PID, PGID int }
+// sessionMember is one live process of a session and the group it is in,
+// with its kernel start time and, for a log line, its command name.
+type sessionMember struct {
+	PID, PGID int
+	Start     time.Time
+	Comm      string
+}
 
 // listSession is the kernel's answer for who is in a session. A var so a
 // test can substitute a listing.
@@ -151,4 +156,100 @@ func sessionEmpties(sid int) (bool, error) {
 		}
 		time.Sleep(killPoll)
 	}
+}
+
+// ContainSession establishes that session sid holds no live process, killing
+// every one it does: what is left of a hosted segment's worker, which the
+// host started as a session leader, once the worker's own process group is
+// gone. The git and tk the worker runs lead process groups of their own but
+// stay in its session, and outlive it there — a landing step's push still
+// moving the remote a reconcile would observe.
+//
+// sid must be the pid of a leader that is not reaped yet. Its zombie holds
+// the pid, so no process can start a session with that id while the sweep
+// runs, and every process the listing answers is the leader's descendant.
+//
+// Each member is stopped, re-verified once the kernel has it stopped as the
+// process the listing named, by its start time, and killed; a pid handed on
+// between the listing and the stop is continued and recorded as released.
+// The sweep relists until a listing holds nothing, so a child forked before
+// its parent was stopped is found by the next one. A listing that errors
+// establishes nothing and fails the sweep, as does a member still live after
+// the grace period: the caller keeps the segment unsettled while it lives.
+func ContainSession(sid int) (Containment, error) {
+	var c Containment
+	killed := map[int]time.Time{}
+	deadline := time.Now().Add(killGrace)
+	for {
+		members, err := listSession(sid)
+		if err != nil {
+			return c, err
+		}
+		if len(members) == 0 {
+			return c, nil
+		}
+		if c.Names == nil {
+			c.Names = map[int]string{}
+		}
+		left := make([]int, len(members))
+		for i, m := range members {
+			left[i] = m.PID
+			c.Names[m.PID] = m.Comm
+		}
+		if time.Now().After(deadline) {
+			return c, fmt.Errorf("%d process(es) of session %d still live after %s: %s", len(members), sid, killGrace, c.pids(left))
+		}
+		for _, m := range members {
+			if start, ok := killed[m.PID]; ok && start.Equal(m.Start) {
+				continue
+			}
+			ok, err := killMember(m, deadline, &c)
+			if err != nil {
+				return c, err
+			}
+			if ok {
+				killed[m.PID] = m.Start
+			}
+		}
+		time.Sleep(killPoll)
+	}
+}
+
+// killMember stops m and, once the kernel has it stopped and still says the
+// pid is the process the listing named, kills it. A stopped process cannot
+// exit and hand its pid on before the kill lands. It reports whether it sent
+// the kill; a member that has not stopped by the deadline is left for the
+// sweep's next listing to report.
+func killMember(m sessionMember, deadline time.Time, c *Containment) (bool, error) {
+	if err := sendSignal(m.PID, syscall.SIGSTOP); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stop %d: %w", m.PID, err)
+	}
+	for {
+		now, isStopped, err := readState(m.PID)
+		if errors.Is(err, errProcessGone) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !now.Start.Equal(m.Start) {
+			return false, release(m.PID, c)
+		}
+		if isStopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(killPoll)
+	}
+	c.Stopped = append(c.Stopped, m.PID)
+	if err := sendSignal(m.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return false, fmt.Errorf("kill %d: %w", m.PID, err)
+	}
+	c.Killed = append(c.Killed, m.PID)
+	return true, nil
 }

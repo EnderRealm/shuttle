@@ -124,7 +124,8 @@ func parseProcArgs(buf []byte) ([]string, error) {
 }
 
 // sessionMembers is every live process whose session id is sid, with its
-// process group: what is left of a session whose leader the pass recorded.
+// process group and the start time that tells it from the same pid reused:
+// what is left of a session whose leader the pass recorded.
 // Processes that went between the listing and the getsid are skipped.
 func sessionMembers(sid int) ([]sessionMember, error) {
 	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
@@ -145,7 +146,10 @@ func sessionMembers(sid int) ([]sessionMember, error) {
 			return nil, fmt.Errorf("getsid %d: %w", pid, err)
 		}
 		if s == sid {
-			members = append(members, sessionMember{PID: pid, PGID: int(kp.Eproc.Pgid)})
+			sec, nsec := kp.Proc.P_starttime.Unix()
+			members = append(members, sessionMember{
+				PID: pid, PGID: int(kp.Eproc.Pgid), Start: time.Unix(sec, nsec), Comm: unix.ByteSliceToString(kp.Proc.P_comm[:]),
+			})
 		}
 	}
 	return members, nil

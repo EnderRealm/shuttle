@@ -4,6 +4,7 @@ package weftremote
 
 import (
 	"fmt"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -38,4 +39,27 @@ func ttyGroups(dev int) ([]int, error) {
 		}
 	}
 	return groups, nil
+}
+
+// pidIDType is P_PID in sys/wait.h, which x/sys does not export.
+const pidIDType = 1
+
+// waitExited blocks until the child pid has exited and leaves it unreaped:
+// its zombie holds the pid, so the session the worker led cannot be handed
+// on while the host sweeps it. darwin's wait4 ignores WNOWAIT and reaps, and
+// x/sys exports no waitid here, so the system call is made directly. Nothing
+// of the siginfo_t it fills (104 bytes on darwin) is read.
+func waitExited(pid int) error {
+	var info [104]byte
+	for {
+		_, _, errno := unix.Syscall6(unix.SYS_WAITID, pidIDType, uintptr(pid),
+			uintptr(unsafe.Pointer(&info)), unix.WEXITED|unix.WNOWAIT, 0, 0)
+		switch errno {
+		case 0:
+			return nil
+		case unix.EINTR:
+			continue
+		}
+		return fmt.Errorf("waitid %d: %w", pid, errno)
+	}
 }

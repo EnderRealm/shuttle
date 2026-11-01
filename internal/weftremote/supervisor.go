@@ -36,6 +36,10 @@ var afterWorkerSpawn = func() {}
 // so a test can drive a boundary that will not empty.
 var containSegment = reap.Contain
 
+// containSession is the sweep of what is left of a segment's worker session.
+// A var so a test can watch it, or drive a session that will not empty.
+var containSession = reap.ContainSession
+
 type activeSegment struct {
 	stdin    io.WriteCloser
 	contract string
@@ -260,7 +264,9 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	cmd := exec.Command("/bin/sh", gatedArgv...)
 	cmd.Dir = run.Repo
 	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A session leader leads its own process group too. Its session is what
+	// holds the git and tk it starts once they lead groups of their own.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.ExtraFiles = []*os.File{gateReader}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -360,8 +366,10 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	}()
 	eventCh := make(chan workerRead, 1)
 	go func() { eventCh <- s.readEvents(run, segment, contract, worker, l.land, active, stdout, eventsFile) }()
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
+	// The worker is not reaped until its session is swept: its zombie holds
+	// the pid that names the session.
+	exitCh := make(chan error, 1)
+	go func() { exitCh <- waitExited(cmd.Process.Pid) }()
 
 	timeoutSeconds := s.cfg.Weft.SegmentTimeoutSeconds
 	if timeoutSeconds <= 0 {
@@ -371,7 +379,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	defer timer.Stop()
 	timeoutC := timer.C
 	var (
-		waitErr    error
+		exitErr    error
 		read       workerRead
 		gotWait    bool
 		gotRead    bool
@@ -381,7 +389,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	)
 	for !gotWait || !gotRead {
 		select {
-		case waitErr = <-waitCh:
+		case exitErr = <-exitCh:
 			gotWait = true
 		case read = <-eventCh:
 			gotRead = true
@@ -421,6 +429,13 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 			return nil, err
 		}
 	}
+	if exitErr != nil {
+		return nil, fmt.Errorf("weft segment %s: %w; reservation retained", segmentIDs(s.hostID, run.ID, segment, ""), exitErr)
+	}
+	if err := s.containSession(run, segment, cmd.Process.Pid); err != nil {
+		return nil, err
+	}
+	waitErr := cmd.Wait()
 	select {
 	case <-stderrDone:
 	case <-time.After(segmentKillGrace):
@@ -671,6 +686,25 @@ func (s *Supervisor) contain(run *ledger.WeftRun, segment ledger.WeftSegment, ru
 	}
 	if err != nil {
 		return fmt.Errorf("weft segment %s: containment: %w; reservation retained", ids, err)
+	}
+	return nil
+}
+
+// containSession is the rest of that boundary for every segment kind: the
+// git and tk a worker runs unsandboxed lead process groups of their own in
+// the session the worker leads, so a worker that dies leaves them running — a
+// landing step's push still moving the remote a reconcile would observe. sid
+// is the worker's pid, not reaped yet. Until the session holds nothing the
+// segment is not settled, so no reconcile is dispatched and its reservation
+// is retained; the worker's zombie is kept with it, holding the session id.
+func (s *Supervisor) containSession(run *ledger.WeftRun, segment ledger.WeftSegment, sid int) error {
+	ids := segmentIDs(s.hostID, run.ID, segment, "")
+	c, err := containSession(sid)
+	if c.Found() {
+		s.log.Printf("weft segment %s: session containment %s", ids, c)
+	}
+	if err != nil {
+		return fmt.Errorf("weft segment %s: session containment: %w; reservation retained", ids, err)
 	}
 	return nil
 }
