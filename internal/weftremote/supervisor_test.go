@@ -428,6 +428,11 @@ type supervisorFixture struct {
 	repo       string
 }
 
+// newSupervisorFixture roots under /tmp rather than t.TempDir() or
+// os.TempDir(): the supervisor's coding preflight checks that srt's mux socket
+// under each segment's run directory fits the 103-byte unix socket path limit
+// even against a stand-in srt, and macOS's os.TempDir() (49–57 bytes) leaves
+// no room for it.
 func newSupervisorFixture(t *testing.T, refuseSandbox bool) *supervisorFixture {
 	t.Helper()
 	return newSupervisorFixtureIn(t, "/tmp", refuseSandbox)

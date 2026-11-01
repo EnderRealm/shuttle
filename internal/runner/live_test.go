@@ -30,6 +30,10 @@ type liveFixture struct {
 	slot     time.Time
 }
 
+// newLiveFixture roots under /tmp rather than t.TempDir() or os.TempDir(): the
+// runner checks that srt's mux socket under the run directory fits the 103-byte
+// unix socket path limit even against a stand-in srt, and macOS's os.TempDir()
+// (49–57 bytes) leaves no room for it.
 func newLiveFixture(t *testing.T, mode string) *liveFixture {
 	t.Helper()
 	root, err := os.MkdirTemp("/tmp", "shuttle-live-")

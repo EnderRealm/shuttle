@@ -117,7 +117,9 @@ printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:01.000Z","event"
 func newQueueHost(t *testing.T) *queueHost {
 	t.Helper()
 	// Short: the sandbox preflight's socket path under each run directory
-	// must fit the platform's limit.
+	// must fit the platform's limit. That is /tmp, not os.TempDir(): srt's mux
+	// socket has to fit 103 bytes, which the preflight enforces even against a
+	// stand-in srt, and on macOS os.TempDir() alone is 49–57.
 	root, err := os.MkdirTemp("/tmp", "wq-")
 	if err != nil {
 		t.Fatal(err)

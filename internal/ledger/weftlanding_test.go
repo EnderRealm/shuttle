@@ -105,7 +105,7 @@ func TestSchemaFourMigratesToFiveKeepingV1RunsHistorical(t *testing.T) {
 // landingRun is a run whose first segment, launched with --land, said hello.
 func landingRun(t *testing.T, s *Store, ticket string) *WeftRun {
 	t.Helper()
-	run, err := s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: "/tmp/" + ticket,
+	run, err := s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: "/repos/" + ticket,
 		Branch: ticket, Worktree: "/tmp/weft/" + ticket, RunDirRoot: filepath.Join(t.TempDir(), "runs")})
 	if err != nil {
 		t.Fatal(err)

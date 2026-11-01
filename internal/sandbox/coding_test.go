@@ -65,7 +65,7 @@ func TestRepositoryIDMatchesServiceFixtures(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("projects.json binds no repository")
 	}
-	long := "/tmp/" + strings.Repeat("a", 60) + ".git checkout"
+	long := "/repos/" + strings.Repeat("a", 60) + ".git checkout"
 	got := RepositoryID(long)
 	if len(got) != 64 || !strings.HasPrefix(got, strings.Repeat("a", 55)+"-") {
 		t.Fatalf("RepositoryID(%q) = %q, want the basename cut to 55 bytes", long, got)
@@ -547,6 +547,10 @@ func TestCodingProfileRefusesOccupiedExpectedAdminName(t *testing.T) {
 	}
 }
 
+// shortCodingRoot is under /tmp rather than t.TempDir() or os.TempDir():
+// CodingProfileJSON and CheckCoding refuse a run directory whose srt mux
+// socket would not fit the 103-byte unix socket path limit, even against a
+// stand-in srt, and macOS's os.TempDir() (49–57 bytes) leaves no room for it.
 func shortCodingRoot(t *testing.T) string {
 	t.Helper()
 	return codingRootIn(t, "/tmp")

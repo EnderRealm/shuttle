@@ -911,7 +911,7 @@ func tuiStream(cols, rows int) []byte {
 func TestTerminalSnapshotRestoresATUIBeyondTheRetention(t *testing.T) {
 	const cols, rows = 120, 36
 	stream := tuiStream(cols, rows)
-	root, err := os.MkdirTemp("/tmp", "wt-")
+	root, err := os.MkdirTemp(os.TempDir(), "wt-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,7 +922,8 @@ func TestTerminalSnapshotRestoresATUIBeyondTheRetention(t *testing.T) {
 	}
 	th := newTerminalHost(t, `trap 'printf "\033[?25l\033[H\033[2J\033[1m✳ Claude Code\033[0m repaint %s\033[?25h" "$(stty size)"' WINCH
 stty -opost
-cat `+file+`
+tui='`+strings.ReplaceAll(file, "'", `'\''`)+`'
+cat "$tui"
 while :; do sleep 1 & wait $!; done
 `)
 	id := th.opened(th.open("shell", "project", "ticket"))["session_id"].(string)
@@ -1328,14 +1329,18 @@ func TestAttachmentClosesWithABoundedReason(t *testing.T) {
 // exits leaves that job for the next listing of its session and PTY: it is
 // dead before the reservation is released.
 func TestCloseCatchesAJobStartedOnTermination(t *testing.T) {
-	root, err := os.MkdirTemp("/tmp", "wj-")
+	root, err := os.MkdirTemp(os.TempDir(), "wj-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Removed by hand, not by t.TempDir, whose cleanup fails the test on a
+	// removal error: the termination handler runs asynchronously to the test
+	// and may still be writing the job file.
 	t.Cleanup(func() { os.RemoveAll(root) })
 	jobFile := filepath.Join(root, "job")
-	th := newTerminalHost(t, `trap '' HUP
-trap 'set -m; sleep 60 & echo "$! $(ps -o pgid= -p $!)" > `+jobFile+`; exit 0' TERM
+	th := newTerminalHost(t, `job='`+strings.ReplaceAll(jobFile, "'", `'\''`)+`'
+trap '' HUP
+trap 'set -m; sleep 60 & echo "$! $(ps -o pgid= -p $!)" > "$job"; exit 0' TERM
 printf 'ready\n'
 while :; do sleep 1 & wait $!; done
 `)

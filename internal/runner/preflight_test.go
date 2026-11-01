@@ -17,6 +17,10 @@ import (
 	"shuttle/internal/observer"
 )
 
+// preflightFixture roots under /tmp rather than t.TempDir() or os.TempDir():
+// the sandbox preflight checks that srt's mux socket under the run directory
+// fits the 103-byte unix socket path limit even against a stand-in srt, and
+// macOS's os.TempDir() (49–57 bytes) leaves no room for it.
 func preflightFixture(t *testing.T) (Preflight, *agentdef.Definition, string, string) {
 	t.Helper()
 	root, err := os.MkdirTemp("/tmp", "pf-")

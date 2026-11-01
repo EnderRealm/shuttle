@@ -53,6 +53,8 @@ func newObserverEnv(t *testing.T) *observerEnv {
 	writeAgentDir(t, agents, "watch", observerManifest)
 	// /tmp rather than t.TempDir(): the run directory has to fit srt's unix
 	// socket path limit, which the runner checks even against a stand-in srt.
+	// os.TempDir() is no better: on macOS it is 49–57 bytes before the run
+	// directory starts, which leaves the 103-byte limit no room.
 	root, err := os.MkdirTemp("/tmp", "shuttle-observer-")
 	if err != nil {
 		t.Fatal(err)

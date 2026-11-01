@@ -134,7 +134,10 @@ func TestRefusesUnusableOptions(t *testing.T) {
 
 // shortRunDir is a run directory under /tmp rather than t.TempDir's
 // /var/folders/… path: srt's mux socket is <run>/tmp/srt-mux-<pid>-<n>.sock and
-// the temp root alone would put it over the 104-byte sun_path limit.
+// the temp root alone would put it over the 103-byte unix socket path limit
+// (104-byte sun_path less its NUL), which the sandbox checks enforce even
+// against a stand-in srt. That rules out os.TempDir() as much as t.TempDir():
+// on macOS it is the same 49–57-byte /var/folders/… root.
 // EvalSymlinks resolves /tmp to /private/tmp, which is what the seatbelt profile
 // matches the sandboxed process's writes against.
 func shortRunDir(t *testing.T) string {

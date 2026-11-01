@@ -368,6 +368,65 @@ while an attempted Git-hook write returns `Operation not permitted`.
 `SHUTTLE_LIVE_SRT=1` has real srt take a `/private/tmp` write and refuse one
 under each carve-out in both spellings.
 
+## Shuttle's own suite inside the coding profile
+
+A hosted segment's work and review agents run `go test ./...` on shuttle inside
+this profile. Its fixtures land where the profile lets them write: every temp
+root comes from `t.TempDir()` or `os.TempDir()`, which follow the segment's
+`TMPDIR`, except in two named sets of fixtures. The socket-bound fixture
+helpers (`newObserverEnv`, `preflightFixture`, `newLiveFixture`,
+`newQueueHost`, `newSupervisorFixture`, `shortRunDir`, `shortCodingRoot`) are
+the first. They keep a `/tmp` root, which the `/private/tmp` grant covers:
+srt's mux socket under their run directory must fit the 103-byte limit above,
+which the sandbox, runner and supervisor checks enforce even against a
+stand-in srt, and macOS's `os.TempDir()` is 49–57 bytes before the run
+directory starts. The opt-in `SHUTTLE_LIVE_SRT` fixtures that run the real srt
+are the second: `liveCodingRoot`
+(`internal/sandbox/coding_test.go`) and the `newSupervisorFixtureIn(t,
+"/var/tmp", …)` call in `internal/weftremote/contain_darwin_test.go` keep a
+literal `/var/tmp` root, because their run directory must sit outside every
+coding-profile grant — `/tmp` and the per-user `TMPDIR` — or the coding check
+refuses it as writable. `TestNoTestHardcodesTmp` (`internal/repocheck`) fails
+on a literal `/tmp` fixture root outside the socket-bound helpers.
+
+Some tests still cannot pass inside srt, and run only in the anchors, outside
+it. A failure among them in a segment is the sandbox, not the change. Measured
+2026-10-31 by running every package's test binary, one top-level test per srt
+invocation, under a profile with the coding profile's network keys and its
+`/private/tmp`, per-user temp and tk-state write grants:
+
+- **A nested sandbox.** A process already under a seatbelt profile cannot apply
+  another: `/usr/bin/sandbox-exec` exits 71. The containment tests that stand in
+  for a model process with a holder under its own profile start one — the eight
+  `internal/reap`'s package doc names, failing with `start detached child: exit
+  status 71`, and `internal/weftremote`'s
+  `TestSupervisorContainsDetachedHoldersBeforeReleasingRepository` and
+  `TestSupervisorSettlementLeavesAConcurrentSegmentAlone`, failing with `holder
+  pid: … no such file or directory` or `condition did not become true` while
+  they wait for a holder that never started. `internal/sandbox`'s
+  `TestCheckRefusesAMalformedProfile` runs the real srt, which inside srt fails
+  one step earlier: with `allowUnixSockets` empty it cannot bind its own mux
+  socket (`Error: listen EPERM: operation not permitted …/srt-mux-<pid>-0.sock`).
+- **Local TCP binding.** The profile sets `allowLocalBinding: false`, so an
+  `httptest` server panics with `httptest: failed to listen on a port: listen
+  tcp6 [::1]:0: bind: operation not permitted`. The panic ends the package's test
+  binary, hiding every test after it. The packages whose tests bind one are
+  `cmd/shuttle/cmd`, `internal/deliver`, `internal/runner`,
+  `internal/runtime/claude` and `internal/weftremote`.
+- **Listing a user's processes.** srt's base policy lets a sandboxed process
+  read `kern.proc.all`, `kern.proc.pgrp` and `kern.proc.pid` and inspect
+  processes in its own sandbox, so process listing is not in itself denied:
+  every `internal/reap` test but the eight above passes inside it.
+  `kern.proc.uid` is outside that policy and refused, and it is the listing
+  `reap.Contain`'s sweep starts from. Every `internal/weftremote` test whose
+  fixture segment settles through the supervisor's real containment — most of
+  the supervisor, queue, landing and visibility tests — keeps its repository
+  reservation, logs `containment: kern.proc.uid 501: operation not permitted;
+  reservation retained`, and fails on a timed-out wait (`condition did not
+  become true`) or on that log line. `kern.proc.tty`, which the terminal host
+  lists a PTY's jobs by, is outside the policy too; the terminal tests fail on
+  the local bind before reaching it.
+
 ## Running unsandboxed
 
 `shuttle run <agent> --unsafe-no-sandbox` is the only way to run a model outside

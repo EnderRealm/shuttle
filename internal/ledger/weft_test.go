@@ -535,7 +535,7 @@ func TestDeadSegmentClosesRunningStages(t *testing.T) {
 			run = landingRun(t, s, ticket)
 		} else {
 			var err error
-			if run, err = s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: "/tmp/" + ticket,
+			if run, err = s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: "/repos/" + ticket,
 				Branch: ticket, Worktree: "/tmp/weft/" + ticket, RunDirRoot: filepath.Join(t.TempDir(), "runs")}); err != nil {
 				t.Fatal(err)
 			}
@@ -601,7 +601,7 @@ func TestTerminalSegmentStagesUnchanged(t *testing.T) {
 		}, false},
 	} {
 		ticket := "demo/" + strings.ReplaceAll(tt.name, " ", "-")
-		run, err := s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: "/tmp/" + ticket,
+		run, err := s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: "/repos/" + ticket,
 			Branch: ticket, Worktree: "/tmp/weft/" + ticket, RunDirRoot: filepath.Join(t.TempDir(), "runs")})
 		if err != nil {
 			t.Fatal(err)

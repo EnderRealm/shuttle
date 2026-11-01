@@ -13,7 +13,7 @@ import (
 func claimVisible(t *testing.T, s *Store, ticket string) *WeftRun {
 	t.Helper()
 	run, err := s.ClaimWeft(WeftLaunch{
-		Ticket: ticket, Project: "demo", Repo: "/tmp/" + strings.ReplaceAll(ticket, "/", "-"),
+		Ticket: ticket, Project: "demo", Repo: "/repos/" + strings.ReplaceAll(ticket, "/", "-"),
 		Branch: ticket, Worktree: "/tmp/weft/" + ticket, RunDirRoot: filepath.Join(t.TempDir(), "runs"),
 	})
 	if err != nil {
