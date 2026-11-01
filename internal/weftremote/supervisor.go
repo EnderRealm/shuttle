@@ -680,7 +680,7 @@ func ensureProcessGroupGone(pgid int) error {
 // it, the segment is not settled and its reservation is retained.
 func (s *Supervisor) contain(run *ledger.WeftRun, segment ledger.WeftSegment, runDir string) error {
 	ids := segmentIDs(s.hostID, run.ID, segment, "")
-	c, err := containSegment(reap.SegmentBoundary(runDir, run.Worktree))
+	c, err := containSegment(reap.SegmentBoundary(runDir))
 	if c.Found() {
 		s.log.Printf("weft segment %s: containment %s", ids, c)
 	}

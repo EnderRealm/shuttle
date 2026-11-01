@@ -25,6 +25,7 @@
 // another, so it exits 71 and the test fails with "start detached child: exit
 // status 71". They are TestContainKillsDetachedSandboxedHolders,
 // TestContainLeavesProcessesWithoutTheGrantAlone,
+// TestContainLeavesAWorktreeOnlyWriterAlone,
 // TestContainFailsClosedOnAMissingControl,
 // TestContainRecreatesACanaryTheHolderTookAway,
 // TestContainNeverReportsEmptyWhileAHolderChurnsItsCanary,

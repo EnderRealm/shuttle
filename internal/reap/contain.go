@@ -16,20 +16,22 @@ import (
 // Boundary is what a hosted coding segment's sandbox grant is recognised by
 // on a process that outlived the segment's process group (a descendant that
 // called setsid). Canary is a path only this segment's profile lets a process
-// write; Worktree is the run's worktree; Control is a path its profile
-// denies. Seatbelt profiles only narrow when nested, so every descendant of
-// the segment is denied Control, while a process sandboxed more broadly than
-// the segment — the system daemons granted the whole home directory — is
-// allowed it and is no holder.
+// write; Control is a path its profile denies. Seatbelt profiles only narrow
+// when nested, so every descendant of the segment is denied Control, while a
+// process sandboxed more broadly than the segment — the system daemons granted
+// the whole home directory — is allowed it and is no holder. The worktree is
+// no part of it: host daemons and app-sandboxed helpers granted the per-user
+// temp dir or the home tree can write a worktree there and be denied the run
+// directory, and only the canary grant is specific to this segment.
 type Boundary struct {
-	Canary, Control, Worktree string
+	Canary, Control string
 }
 
 // SegmentBoundary is the boundary of the segment whose run directory is
 // runDir, from what the ledger records: the canary is the segment's TMPDIR and
 // the control the run directory around it.
-func SegmentBoundary(runDir, worktree string) Boundary {
-	return Boundary{Canary: sandbox.SegmentTmpDir(runDir), Control: runDir, Worktree: worktree}
+func SegmentBoundary(runDir string) Boundary {
+	return Boundary{Canary: sandbox.SegmentTmpDir(runDir), Control: runDir}
 }
 
 // Containment is what one sweep did: the holders it stopped and verified,
@@ -75,7 +77,7 @@ var (
 
 // Contain establishes that no process of this user holds the boundary's
 // grant, killing the ones that do. A holder is a sandboxed process its
-// profile lets write the canary or the worktree and denies the control.
+// profile lets write the canary and denies the control.
 //
 // Holders are stopped first, scan after scan, until a scan finds none it has
 // not already stopped: a stopped process cannot fork, so from then on the set
@@ -95,7 +97,7 @@ var (
 // write, and the caller keeps the repository reservation.
 func Contain(b Boundary) (Containment, error) {
 	var c Containment
-	for _, path := range []string{b.Canary, b.Control, b.Worktree} {
+	for _, path := range []string{b.Canary, b.Control} {
 		if !filepath.IsAbs(path) || path != filepath.Clean(path) {
 			return c, fmt.Errorf("boundary path %q is not a clean absolute path", path)
 		}
@@ -366,8 +368,6 @@ func errScanUnstable(b Boundary) error {
 // symlink in its place, and refusing would let any segment wedge its
 // repository's reservation for good. A holder that does so again while a scan
 // runs is caught by the identity check scanHolders makes around each process.
-// A missing worktree needs nothing: it answers denied for every process, and
-// the canary clause alone stands for it.
 //
 // It answers the canary's identity once it is a directory.
 func prepareBoundary(b Boundary) (os.FileInfo, error) {
@@ -418,9 +418,8 @@ func readyCanary(b Boundary) (os.FileInfo, error) {
 	return info, nil
 }
 
-// holdsGrant reports whether pid is sandboxed, allowed to write the canary or
-// the worktree, and denied the control. A process gone since it was listed
-// holds nothing.
+// holdsGrant reports whether pid is sandboxed, allowed to write the canary,
+// and denied the control. A process gone since it was listed holds nothing.
 func holdsGrant(pid int, b Boundary) (bool, error) {
 	held, err := grantHeld(pid, b)
 	if errors.Is(err, errProcessGone) {
@@ -435,16 +434,8 @@ func grantHeld(pid int, b Boundary) (bool, error) {
 		return false, err
 	}
 	denied, err := checkWriteDenied(pid, b.Canary)
-	if err != nil {
+	if err != nil || denied {
 		return false, err
-	}
-	if denied {
-		if denied, err = checkWriteDenied(pid, b.Worktree); err != nil {
-			return false, err
-		}
-	}
-	if denied {
-		return false, nil
 	}
 	return checkWriteDenied(pid, b.Control)
 }

@@ -39,16 +39,13 @@ func resolved(t *testing.T, dir string) string {
 	return real
 }
 
-// boundaryFixture is a segment's run directory with its canary, and a
-// worktree beside it, every path resolved.
+// boundaryFixture is a segment's run directory with its canary, every path
+// resolved.
 func boundaryFixture(t *testing.T) Boundary {
 	t.Helper()
-	root := resolved(t, t.TempDir())
-	b := SegmentBoundary(filepath.Join(root, "run"), filepath.Join(root, "worktree"))
-	for _, dir := range []string{b.Canary, b.Worktree} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	b := SegmentBoundary(filepath.Join(resolved(t, t.TempDir()), "run"))
+	if err := os.MkdirAll(b.Canary, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	return b
 }
@@ -112,22 +109,18 @@ func assertRunning(t *testing.T, pid int) {
 }
 
 // A sandboxed child that called setsid still carries its profile, and with it
-// the segment's grant: the sweep finds it by the canary or by the worktree,
-// stops it and kills it.
+// the segment's grant: the sweep finds it by the canary, stops it and kills it.
 func TestContainKillsDetachedSandboxedHolders(t *testing.T) {
 	b := boundaryFixture(t)
-	byCanary := startDetached(t, true, b.Canary)
-	byWorktree := startDetached(t, true, b.Worktree)
+	holder := startDetached(t, true, b.Canary)
 	c, err := Contain(b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, pid := range []int{byCanary, byWorktree} {
-		if !slices.Contains(c.Stopped, pid) || !slices.Contains(c.Killed, pid) {
-			t.Errorf("containment %s does not stop and kill %d", c, pid)
-		}
-		waitGone(t, "detached holder", pid)
+	if !slices.Contains(c.Stopped, holder) || !slices.Contains(c.Killed, holder) {
+		t.Errorf("containment %s does not stop and kill %d", c, holder)
 	}
+	waitGone(t, "detached holder", holder)
 	again, err := Contain(b)
 	if err != nil || again.Found() {
 		t.Fatalf("second sweep = %s, %v; want an empty boundary", again, err)
@@ -153,6 +146,48 @@ func TestContainLeavesProcessesWithoutTheGrantAlone(t *testing.T) {
 	for _, pid := range []int{unsandboxed, ungranted, broader} {
 		assertRunning(t, pid)
 	}
+}
+
+// hostTmpRoot is a fresh directory under /tmp, resolved, removed when the test
+// ends: a run directory outside the per-user temp dir that t.TempDir() roots a
+// worktree in, as weft's run dirs sat when a sweep stopped the host processes
+// granted that temp dir. It is the literal /tmp root TestNoTestHardcodesTmp
+// allows here.
+func hostTmpRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "shuttle-contain-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return resolved(t, dir)
+}
+
+// A process sandboxed to write the per-user temp dir, as host daemons and
+// app-sandboxed helpers are, can write a worktree under it and is denied a run
+// directory under /tmp. Its profile does not grant the canary, so it is not
+// the segment's, and the sweep leaves it running.
+func TestContainLeavesAWorktreeOnlyWriterAlone(t *testing.T) {
+	userTemp := resolved(t, os.TempDir())
+	worktree := filepath.Join(resolved(t, t.TempDir()), "worktree")
+	b := SegmentBoundary(filepath.Join(hostTmpRoot(t), "run"))
+	for _, dir := range []string{b.Canary, worktree} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.HasPrefix(b.Control, userTemp+"/") {
+		t.Fatalf("run dir %s is under the per-user temp dir %s; the decoy would be granted it", b.Control, userTemp)
+	}
+	decoy := startDetached(t, true, userTemp)
+	c, err := Contain(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Found() {
+		t.Fatalf("containment = %s, want nothing signalled", c)
+	}
+	assertRunning(t, decoy)
 }
 
 // A control that does not exist answers denied for every process, so a sweep
@@ -190,9 +225,6 @@ func TestContainRecreatesACanaryTheHolderTookAway(t *testing.T) {
 	for _, how := range []string{"rmdir", "symlink", "file"} {
 		t.Run(how, func(t *testing.T) {
 			b := boundaryFixture(t)
-			if err := os.RemoveAll(b.Worktree); err != nil {
-				t.Fatal(err)
-			}
 			holder := startScript(t, []string{"/usr/bin/perl", "-e", vandalScript, b.Canary, how}, true, b.Canary)
 			if info, err := os.Lstat(b.Canary); how == "rmdir" && !errors.Is(err, os.ErrNotExist) ||
 				how != "rmdir" && (err != nil || info.IsDir()) {
@@ -214,17 +246,14 @@ func TestContainRecreatesACanaryTheHolderTookAway(t *testing.T) {
 	}
 }
 
-// A holder that keeps removing and recreating its canary, with no worktree to
-// find it by instead, makes every grant check race the canary's identity.
+// A holder that keeps removing and recreating its canary makes every grant
+// check race the canary's identity.
 // The sweep may catch it in a window where the canary held still and kill
 // it, or fail closed once the grace period runs out; it never reports the
 // boundary empty while the holder lives.
 func TestContainNeverReportsEmptyWhileAHolderChurnsItsCanary(t *testing.T) {
 	shortGrace(t)
 	b := boundaryFixture(t)
-	if err := os.RemoveAll(b.Worktree); err != nil {
-		t.Fatal(err)
-	}
 	holder := startScript(t, []string{"/usr/bin/perl", "-e", vandalScript, b.Canary, "loop"}, true, b.Canary)
 	c, err := Contain(b)
 	if err != nil {
@@ -376,11 +405,9 @@ func weftRow(t *testing.T, s *ledger.Store, ticket, repo string) (*ledger.WeftRu
 	if err := s.MarkWeftRunning(run.ID, 1, gone.Process.Pid, "weft-worker/v2"); err != nil {
 		t.Fatal(err)
 	}
-	b := SegmentBoundary(run.Segments[0].RunDir.String, run.Worktree)
-	for _, dir := range []string{b.Canary, b.Worktree} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	b := SegmentBoundary(run.Segments[0].RunDir.String)
+	if err := os.MkdirAll(b.Canary, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	return run, b
 }

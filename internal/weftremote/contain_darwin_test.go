@@ -313,7 +313,7 @@ func TestSupervisorRetainsReservationWhileTheBoundaryIsNotEmpty(t *testing.T) {
 		t.Fatalf("run error = %v, want the reservation retained", err)
 	}
 	runDir := run.Segments[0].RunDir.String
-	if want := reap.SegmentBoundary(runDir, run.Worktree); swept != want {
+	if want := reap.SegmentBoundary(runDir); swept != want {
 		t.Fatalf("swept %+v, want %+v", swept, want)
 	}
 	if !strings.Contains(logs.String(), "containment stopped 1 [4242]") {

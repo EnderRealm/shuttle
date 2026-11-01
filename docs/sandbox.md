@@ -373,7 +373,7 @@ under each carve-out in both spellings.
 A hosted segment's work and review agents run `go test ./...` on shuttle inside
 this profile. Its fixtures land where the profile lets them write: every temp
 root comes from `t.TempDir()` or `os.TempDir()`, which follow the segment's
-`TMPDIR`, except in two named sets of fixtures. The socket-bound fixture
+`TMPDIR`, except in three named sets of fixtures. The socket-bound fixture
 helpers (`newObserverEnv`, `preflightFixture`, `newLiveFixture`,
 `newQueueHost`, `newSupervisorFixture`, `shortRunDir`, `shortCodingRoot`) are
 the first. They keep a `/tmp` root, which the `/private/tmp` grant covers:
@@ -386,8 +386,11 @@ are the second: `liveCodingRoot`
 "/var/tmp", …)` call in `internal/weftremote/contain_darwin_test.go` keep a
 literal `/var/tmp` root, because their run directory must sit outside every
 coding-profile grant — `/tmp` and the per-user `TMPDIR` — or the coding check
-refuses it as writable. `TestNoTestHardcodesTmp` (`internal/repocheck`) fails
-on a literal `/tmp` fixture root outside the socket-bound helpers.
+refuses it as writable. `internal/reap`'s `hostTmpRoot` is the third: it keeps
+a `/tmp` root for a run directory that must sit outside the per-user `TMPDIR` a
+containment decoy is granted. `TestNoTestHardcodesTmp` (`internal/repocheck`) fails
+on a literal `/tmp` fixture root outside the socket-bound helpers and
+`hostTmpRoot`.
 
 Some tests still cannot pass inside srt, and run only in the anchors, outside
 it. A failure among them in a segment is the sandbox, not the change. Measured
@@ -397,7 +400,7 @@ invocation, under a profile with the coding profile's network keys and its
 
 - **A nested sandbox.** A process already under a seatbelt profile cannot apply
   another: `/usr/bin/sandbox-exec` exits 71. The containment tests that stand in
-  for a model process with a holder under its own profile start one — the eight
+  for a model process with a holder under its own profile start one — the nine
   `internal/reap`'s package doc names, failing with `start detached child: exit
   status 71`, and `internal/weftremote`'s
   `TestSupervisorContainsDetachedHoldersBeforeReleasingRepository` and
@@ -416,7 +419,7 @@ invocation, under a profile with the coding profile's network keys and its
 - **Listing a user's processes.** srt's base policy lets a sandboxed process
   read `kern.proc.all`, `kern.proc.pgrp` and `kern.proc.pid` and inspect
   processes in its own sandbox, so process listing is not in itself denied:
-  every `internal/reap` test but the eight above passes inside it.
+  every `internal/reap` test but the nine above passes inside it.
   `kern.proc.uid` is outside that policy and refused, and it is the listing
   `reap.Contain`'s sweep starts from. Every `internal/weftremote` test whose
   fixture segment settles through the supervisor's real containment — most of

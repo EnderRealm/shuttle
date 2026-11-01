@@ -13,12 +13,14 @@ import (
 	"testing"
 )
 
-// socketBoundHelpers are the only functions allowed a literal /tmp fixture
-// root, keyed by file relative to the module root. Each roots a run directory
-// whose srt mux socket must fit the 103-byte unix socket path limit, which
-// macOS's os.TempDir() (49–57 bytes) leaves no room for; each says so where
-// it does it.
-var socketBoundHelpers = map[string]string{
+// tmpRootHelpers are the only functions allowed a literal /tmp fixture root,
+// keyed by file relative to the module root; each says why where it does it.
+// All but one root a run directory whose srt mux socket must fit the 103-byte
+// unix socket path limit, which macOS's os.TempDir() (49–57 bytes) leaves no
+// room for. internal/reap's hostTmpRoot roots a run directory that must sit
+// outside the per-user temp dir a containment decoy is granted.
+var tmpRootHelpers = map[string]string{
+	"internal/reap/contain_darwin_test.go":   "hostTmpRoot",
 	"cmd/shuttle/cmd/observer_test.go":       "newObserverEnv",
 	"internal/runner/preflight_test.go":      "preflightFixture",
 	"internal/runner/live_test.go":           "newLiveFixture",
@@ -31,7 +33,7 @@ var socketBoundHelpers = map[string]string{
 // A test that roots its fixtures at a literal /tmp ignores TMPDIR, and a
 // hosted run's sandbox grants the TMPDIR it sets rather than /tmp, so the
 // suite cannot run there. Fixture roots come from t.TempDir() or
-// os.TempDir(), outside the socket-bound helpers. The needles are
+// os.TempDir(), outside tmpRootHelpers. The needles are
 // concatenated so this file does not match itself.
 func TestNoTestHardcodesTmp(t *testing.T) {
 	const tmp = "/tmp"
@@ -80,7 +82,7 @@ func TestNoTestHardcodesTmp(t *testing.T) {
 					}
 				}
 				fn := enclosingFunc(fset, file, i+1)
-				if allowed, ok := socketBoundHelpers[rel]; ok && fn == allowed {
+				if allowed, ok := tmpRootHelpers[rel]; ok && fn == allowed {
 					continue
 				}
 				t.Errorf("%s:%d: %s in %s roots a fixture at a literal /tmp, which ignores TMPDIR; use t.TempDir() or os.TempDir()",

@@ -210,11 +210,11 @@ func Restart(l Ledger) ([]Outcome, error) {
 // holder, unresolved otherwise — so its repository stays reserved. A row with no pid never released its worker's start gate, so no
 // sandboxed process of it ever ran, and the caller skips it.
 func containRow(l Ledger, run *ledger.Run, action Action, detail string) (Action, string, error) {
-	worktree, coding, err := l.WeftCodingWorktree(run.ID)
+	_, coding, err := l.WeftCodingWorktree(run.ID)
 	if err != nil || !coding {
 		return action, detail, err
 	}
-	c, err := contain(SegmentBoundary(run.RunDir.String, worktree))
+	c, err := contain(SegmentBoundary(run.RunDir.String))
 	switch {
 	case err != nil && len(c.Stopped) > 0:
 		return ActionKillFailed, fmt.Sprintf("containment %s: %v", c, err), nil
