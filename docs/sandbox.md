@@ -325,12 +325,18 @@ temp dir `/tmp/claude`, and a host Claude Code session's temp tree
 outside srt with `TMPDIR=/tmp`), named for the host uid. Each is denied in
 both spellings, under `/tmp` and `/private/tmp`, and srt's deny rules take
 precedence over `allowWrite`. A segment's own Claude temp is not under either:
-`CLAUDE_CODE_TMPDIR` puts it in `<run_dir>/tmp`. The grant is shared by every segment's profile, so a
-`weft.root` under `/tmp` would put every worktree in reach of every
-concurrent segment. A run directory under `/tmp` is caught: the preflight has
-the sandbox itself try the run directory, and refuses a profile that lets the
-segment write it. Tests that run real srt therefore keep their fixtures under
-`/var/tmp`, not `/tmp`.
+`CLAUDE_CODE_TMPDIR` puts it in `<run_dir>/tmp`. The `/private/tmp` and
+per-user temp grants are shared by every segment's profile, so a worktree
+under either would be writable by every concurrent segment, and by every host
+process. The preflight refuses one before launch, whatever the run
+directory's placement: `requireCoding` tests each shared root against the
+worktree the way it tests an `allow_write` entry, literally and then by file
+identity, so a `weft.root` that reaches `/tmp` or the per-user temp dir through
+a symlink, the `/private` alias or a case alias is refused too, and the error
+names the shared root and the worktree. A run directory under `/tmp` is caught
+as well: the preflight has the sandbox itself try the run directory, and
+refuses a profile that lets the segment write it. Tests that run real srt
+therefore keep their fixtures under `/var/tmp`, not `/tmp`.
 
 `denyWrite` takes back
 both repositories' Git configuration, hooks and indirection files, the linked
@@ -373,20 +379,29 @@ under each carve-out in both spellings.
 A hosted segment's work and review agents run `go test ./...` on shuttle inside
 this profile. Its fixtures land where the profile lets them write: every temp
 root comes from `t.TempDir()` or `os.TempDir()`, which follow the segment's
-`TMPDIR`, except in three named sets of fixtures. The socket-bound fixture
+`TMPDIR`, except in four named sets of fixtures. The socket-bound fixture
 helpers (`newObserverEnv`, `preflightFixture`, `newLiveFixture`,
 `newQueueHost`, `newSupervisorFixture`, `shortRunDir`, `shortCodingRoot`) are
 the first. They keep a `/tmp` root, which the `/private/tmp` grant covers:
 srt's mux socket under their run directory must fit the 103-byte limit above,
 which the sandbox, runner and supervisor checks enforce even against a
 stand-in srt, and macOS's `os.TempDir()` is 49–57 bytes before the run
-directory starts. The opt-in `SHUTTLE_LIVE_SRT` fixtures that run the real srt
-are the second: `liveCodingRoot`
+directory starts. Their worktrees do not go there, since the preflight refuses
+a worktree under `/tmp` or the per-user temp dir. The worktree roots are the
+second set: `internal/sandbox`'s `worktreeRoot`, under its coding fixtures'
+worktrees, and `internal/weftremote`'s `fixtureWeftRoot`, the `weft.root` of
+`newSupervisorFixture` and `newQueueHost`, each make a dot-prefixed temp
+directory under the package directory rather than following `TMPDIR`, which a
+host session may set under `/tmp` and which on the host is the real per-user
+temp dir the supervisor grants. The checkout is writable both on the host and,
+as the segment's worktree, inside a hosted segment; `.gitignore` covers the
+roots a killed run leaves behind. The opt-in `SHUTTLE_LIVE_SRT` fixtures that run the real srt
+are the third: `liveCodingRoot`
 (`internal/sandbox/coding_test.go`) and the `newSupervisorFixtureIn(t,
 "/var/tmp", …)` call in `internal/weftremote/contain_darwin_test.go` keep a
 literal `/var/tmp` root, because their run directory must sit outside every
 coding-profile grant — `/tmp` and the per-user `TMPDIR` — or the coding check
-refuses it as writable. `internal/reap`'s `hostTmpRoot` is the third: it keeps
+refuses it as writable. `internal/reap`'s `hostTmpRoot` is the fourth: it keeps
 a `/tmp` root for a run directory that must sit outside the per-user `TMPDIR` a
 containment decoy is granted. `TestNoTestHardcodesTmp` (`internal/repocheck`) fails
 on a literal `/tmp` fixture root outside the socket-bound helpers and

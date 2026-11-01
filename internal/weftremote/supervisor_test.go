@@ -228,7 +228,7 @@ func TestSupervisorRefusesLaunchWhenOAuthItemIsMissing(t *testing.T) {
 	}
 	if _, err := f.store.ClaimWeft(ledger.WeftLaunch{
 		Ticket: "demo/after-oauth", Project: "demo", Repo: got.Repo,
-		Branch: "demo/after-oauth", Worktree: filepath.Join(f.root, "other"),
+		Branch: "demo/after-oauth", Worktree: filepath.Join(f.cfg.Weft.Root, "other"),
 		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
 	}); err != nil {
 		t.Fatalf("oauth refusal did not release repository: %v", err)
@@ -251,7 +251,7 @@ func TestSupervisorRefusesLaunchWhenSandboxCannotBeEstablished(t *testing.T) {
 	}
 	if _, err := f.store.ClaimWeft(ledger.WeftLaunch{
 		Ticket: "demo/after-failure", Project: "demo", Repo: got.Repo,
-		Branch: "demo/after-failure", Worktree: filepath.Join(f.root, "other"),
+		Branch: "demo/after-failure", Worktree: filepath.Join(f.cfg.Weft.Root, "other"),
 		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
 	}); err != nil {
 		t.Fatalf("sandbox failure did not release repository: %v", err)
@@ -313,7 +313,7 @@ func TestSupervisorHoldsRepositoryUntilTerminalWorkerExits(t *testing.T) {
 	})
 	_, err = f.store.ClaimWeft(ledger.WeftLaunch{
 		Ticket: "demo/second", Project: "demo", Repo: f.repo,
-		Branch: "demo/second", Worktree: filepath.Join(f.root, "second"),
+		Branch: "demo/second", Worktree: filepath.Join(f.cfg.Weft.Root, "second"),
 		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
 	})
 	var busy *ledger.RepositoryBusyError
@@ -325,7 +325,7 @@ func TestSupervisorHoldsRepositoryUntilTerminalWorkerExits(t *testing.T) {
 	}
 	if _, err := f.store.ClaimWeft(ledger.WeftLaunch{
 		Ticket: "demo/second", Project: "demo", Repo: f.repo,
-		Branch: "demo/second", Worktree: filepath.Join(f.root, "second"),
+		Branch: "demo/second", Worktree: filepath.Join(f.cfg.Weft.Root, "second"),
 		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
 	}); err != nil {
 		t.Fatalf("claim after exit: %v", err)
@@ -365,7 +365,7 @@ func TestSupervisorKillsDescendantsBeforeReleasingRepository(t *testing.T) {
 	}
 	if _, err := f.store.ClaimWeft(ledger.WeftLaunch{
 		Ticket: "demo/after-descendant", Project: "demo", Repo: f.repo,
-		Branch: "demo/after-descendant", Worktree: filepath.Join(f.root, "after-descendant"),
+		Branch: "demo/after-descendant", Worktree: filepath.Join(f.cfg.Weft.Root, "after-descendant"),
 		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
 	}); err != nil {
 		t.Fatalf("repository was not released after group exit: %v", err)
@@ -438,9 +438,10 @@ func newSupervisorFixture(t *testing.T, refuseSandbox bool) *supervisorFixture {
 	return newSupervisorFixtureIn(t, "/tmp", refuseSandbox)
 }
 
-// newSupervisorFixtureIn roots the fixture under dir. A test that runs real
-// srt needs a dir outside /tmp: every coding profile grants /tmp, so a run
-// directory there is writable and the preflight refuses it.
+// newSupervisorFixtureIn roots the fixture under dir, all but its weft.root.
+// A test that runs real srt needs a dir outside /tmp: every coding profile
+// grants /tmp, so a run directory there is writable and the preflight refuses
+// it.
 func newSupervisorFixtureIn(t *testing.T, dir string, refuseSandbox bool) *supervisorFixture {
 	t.Helper()
 	root, err := os.MkdirTemp(dir, "sw-")
@@ -481,7 +482,7 @@ func newSupervisorFixtureIn(t *testing.T, dir string, refuseSandbox bool) *super
 			TKConfig: tkConfig, SRTBin: srt, LoomHome: filepath.Join(root, "loom"),
 		},
 		Weft: config.Weft{
-			WorkerBin: worker, Root: filepath.Join(root, "weft"),
+			WorkerBin: worker, Root: fixtureWeftRoot(t),
 			OAuthKeychainItem:     fixtureOAuthItem,
 			SegmentTimeoutSeconds: 10,
 			Sandbox:               config.WeftSandbox{AllowedDomains: []string{"github.com"}},
@@ -508,6 +509,26 @@ func newSupervisorFixtureIn(t *testing.T, dir string, refuseSandbox bool) *super
 		return fixtureOAuthToken, nil
 	}
 	return &supervisorFixture{root: root, store: store, cfg: cfg, supervisor: supervisor, repo: repo}
+}
+
+// fixtureWeftRoot is a fixture's weft.root, where its worktrees go, under the
+// package directory. Every coding profile grants /tmp and the per-user temp
+// dir, which on the host is os.TempDir(), and the preflight refuses a worktree
+// under either. The package directory is in the checkout: writable on the
+// host and, as the segment's worktree, inside a hosted segment. The leading
+// dot keeps the go command from reading it as a package.
+func fixtureWeftRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(dir, ".weft-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	return root
 }
 
 func (f *supervisorFixture) claim(t *testing.T, id string) *ledger.WeftRun {

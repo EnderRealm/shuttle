@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"os"
@@ -157,7 +158,7 @@ func TestCanonicalRepositoryCollapsesCaseAliases(t *testing.T) {
 func TestCodingProfileProtectsGitIndirectionsAndSiblingWorktrees(t *testing.T) {
 	root := shortCodingRoot(t)
 	repo := filepath.Join(root, "repo")
-	worktree := filepath.Join(root, "weft", "worktrees", "repo-deadbeef", "demo-ticket")
+	worktree := filepath.Join(worktreeRoot(t), "weft", "worktrees", "repo-deadbeef", "demo-ticket")
 	runDir := filepath.Join(root, "run")
 	tickets := filepath.Join(root, "tickets")
 	admin := filepath.Join(repo, ".git", "worktrees")
@@ -258,7 +259,7 @@ func TestCodingProfileRefusesAllowWriteCoveringRunDir(t *testing.T) {
 		return CodingOptions{
 			SRTBin: "/usr/local/bin/srt", RunDir: runDir, HomeDir: root, PATH: testPATH,
 			Repo: filepath.Join(root, "repo"), TicketsRoot: filepath.Join(root, "tickets"),
-			Worktree: filepath.Join(root, "worktree"), UserTempDir: filepath.Join(root, "user-temp"),
+			Worktree: filepath.Join(worktreeRoot(t), "worktree"), UserTempDir: filepath.Join(root, "user-temp"),
 			AllowWrite: []string{allow},
 		}
 	}
@@ -273,13 +274,14 @@ func TestCodingProfileRefusesAllowWriteCoveringRunDir(t *testing.T) {
 }
 
 // allow_write is shared by every segment's profile, so an entry covering one
-// segment's worktree would let another segment's processes write it and be
-// swept as its holders. Seatbelt judges the real path, so an entry covering
-// the worktree through a symlink, /tmp alias, case alias or Unicode
+// segment's worktree would let every other segment write it. Seatbelt judges
+// the real path, so an entry covering the worktree through a symlink, the
+// Data-volume firmlink spelling of the checkout, case alias or Unicode
 // normalization alias is refused too, whether or not the aliased component
 // exists yet.
 func TestCodingProfileRefusesAllowWriteCoveringWorktree(t *testing.T) {
-	root := shortCodingRoot(t)
+	root := worktreeRoot(t)
+	runDir := filepath.Join(shortCodingRoot(t), "run")
 	weft := filepath.Join(root, "weft")
 	link := filepath.Join(root, "link")
 	if err := os.Mkdir(weft, 0o755); err != nil {
@@ -291,7 +293,7 @@ func TestCodingProfileRefusesAllowWriteCoveringWorktree(t *testing.T) {
 	worktree := filepath.Join(link, "worktrees", "repo-deadbeef", "demo-ticket")
 	options := func(worktree, allow string) CodingOptions {
 		return CodingOptions{
-			SRTBin: "/usr/local/bin/srt", RunDir: filepath.Join(root, "run"), HomeDir: root, PATH: testPATH,
+			SRTBin: "/usr/local/bin/srt", RunDir: runDir, HomeDir: root, PATH: testPATH,
 			Repo: filepath.Join(root, "repo"), TicketsRoot: filepath.Join(root, "tickets"),
 			Worktree: worktree, UserTempDir: filepath.Join(root, "user-temp"),
 			AllowWrite: []string{allow},
@@ -308,9 +310,18 @@ func TestCodingProfileRefusesAllowWriteCoveringWorktree(t *testing.T) {
 		worktree, filepath.Dir(worktree), filepath.Join(link, "worktrees"), filepath.Join(weft, "worktrees"),
 	}
 	if runtime.GOOS == "darwin" {
-		refused = append(refused,
-			filepath.Join(strings.TrimPrefix(root, "/private"), "weft", "worktrees"),
-			filepath.Join(root, "WEFT", "worktrees"))
+		refused = append(refused, filepath.Join(root, "WEFT", "worktrees"))
+		// The checkout is on the Data volume, reachable through its firmlink
+		// spelling; the entry is added only where that spelling is the same
+		// directory, so it never degenerates into the literal case.
+		data := filepath.Join("/System/Volumes/Data", weft)
+		a, err := os.Stat(weft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, err := os.Stat(data); err == nil && os.SameFile(a, b) {
+			refused = append(refused, filepath.Join(data, "worktrees"))
+		}
 	}
 	for _, allow := range refused {
 		refuses(worktree, allow)
@@ -358,9 +369,71 @@ func TestCodingProfileRefusesAllowWriteCoveringWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	if b, err := os.Stat(decomposed); err != nil || !os.SameFile(a, b) {
-		t.Skipf("temp volume is normalization-sensitive: %v", err)
+		t.Skipf("checkout volume is normalization-sensitive: %v", err)
 	}
 	refuses(filepath.Join(composed, "repo-deadbeef", "demo-ticket"), decomposed)
+}
+
+// sharedRootOptions is a coding profile whose worktree is placed by the
+// caller, with every other directory but the run directory under root. The
+// run directory is a fresh name outside /tmp that the refusal keeps the
+// preflight from creating, since inside a hosted segment no short root outside
+// /tmp is writable; the cleanup removes it should the refusal regress.
+func sharedRootOptions(t *testing.T, root, worktree string) CodingOptions {
+	t.Helper()
+	runDir := filepath.Join("/var/tmp", "shuttle-unused-"+rand.Text())
+	t.Cleanup(func() { os.RemoveAll(runDir) })
+	return CodingOptions{
+		SRTBin: filepath.Join(root, "missing-srt"), RunDir: runDir, HomeDir: root, PATH: testPATH,
+		Repo: filepath.Join(root, "repo"), TicketsRoot: filepath.Join(root, "tickets"),
+		Worktree: worktree, UserTempDir: filepath.Join(root, "user-temp"),
+	}
+}
+
+// refusesSharedWorktree asserts the preflight refuses o before reaching srt,
+// naming the shared root and the worktree.
+func refusesSharedWorktree(t *testing.T, o CodingOptions, shared string) {
+	t.Helper()
+	err := CheckCoding(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "shared write root "+strconv.Quote(shared)) || !strings.Contains(err.Error(), strconv.Quote(o.Worktree)) {
+		t.Fatalf("check = %v, want a refusal naming shared root %s and worktree %s", err, shared, o.Worktree)
+	}
+}
+
+// Every coding profile grants /tmp, so a worktree there is writable by every
+// concurrent segment, however far its run directory is from /tmp.
+func TestCheckCodingRefusesWorktreeUnderSharedTmp(t *testing.T) {
+	worktree := filepath.Join(shortCodingRoot(t), "weft", "worktrees", "repo-deadbeef", "demo-ticket")
+	refusesSharedWorktree(t, sharedRootOptions(t, worktreeRoot(t), worktree), sharedTmp)
+}
+
+// Seatbelt judges the real path, so a worktree spelled through an alias of
+// /tmp is under the shared grant all the same.
+func TestCheckCodingRefusesSharedTmpWorktreeAlias(t *testing.T) {
+	root := worktreeRoot(t)
+	tmpRoot := shortCodingRoot(t)
+	alias := filepath.Join(root, "tmp-alias")
+	if err := os.Symlink(filepath.Dir(tmpRoot), alias); err != nil {
+		t.Fatal(err)
+	}
+	worktrees := []string{filepath.Join(alias, filepath.Base(tmpRoot), "weft", "worktrees", "demo-ticket")}
+	if runtime.GOOS == "darwin" {
+		worktrees = append(worktrees, filepath.Join(strings.TrimPrefix(tmpRoot, "/private"), "weft", "worktrees", "demo-ticket"))
+	}
+	for _, worktree := range worktrees {
+		refusesSharedWorktree(t, sharedRootOptions(t, root, worktree), sharedTmp)
+	}
+}
+
+// The per-user temp dir is granted to every coding profile too, so a worktree
+// under it is refused the same way.
+func TestCheckCodingRefusesWorktreeUnderUserTempDir(t *testing.T) {
+	root := worktreeRoot(t)
+	o := sharedRootOptions(t, root, filepath.Join(root, "user-temp", "weft", "worktrees", "demo-ticket"))
+	if err := os.MkdirAll(o.UserTempDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	refusesSharedWorktree(t, o, o.UserTempDir)
 }
 
 func TestCheckCodingRefusesMissingSandbox(t *testing.T) {
@@ -368,7 +441,7 @@ func TestCheckCodingRefusesMissingSandbox(t *testing.T) {
 	o := CodingOptions{
 		SRTBin: filepath.Join(root, "missing-srt"), RunDir: filepath.Join(root, "run"),
 		HomeDir: root, PATH: testPATH, Repo: filepath.Join(root, "repo"),
-		TicketsRoot: filepath.Join(root, "tickets"), Worktree: filepath.Join(root, "worktree"),
+		TicketsRoot: filepath.Join(root, "tickets"), Worktree: filepath.Join(worktreeRoot(t), "worktree"),
 		UserTempDir: filepath.Join(root, "user-temp"),
 	}
 	admin := filepath.Join(o.Repo, ".git", "worktrees", filepath.Base(o.Worktree))
@@ -417,12 +490,12 @@ func checkableCoding(t *testing.T, root, runDir, srt string, allowWrite ...strin
 // lets the segment write it is refused, whatever the configured strings say.
 // The stand-in srt runs the probe unconfined, so the write lands.
 func TestCheckCodingRefusesASandboxThatGrantsTheRunDir(t *testing.T) {
-	root := shortCodingRoot(t)
+	root := worktreeRoot(t)
 	srt := filepath.Join(root, "srt")
 	if err := os.WriteFile(srt, []byte("#!/bin/sh\nexec /bin/sh -c \"$4\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	o := checkableCoding(t, root, filepath.Join(root, "run"), srt)
+	o := checkableCoding(t, root, filepath.Join(shortCodingRoot(t), "run"), srt)
 	if err := CheckCoding(context.Background(), o); err == nil || !strings.Contains(err.Error(), "run dir") {
 		t.Fatalf("check = %v, want the run dir refusal", err)
 	}
@@ -468,7 +541,7 @@ func TestCodingProfileAllowsTmpButNotClaudeTmp(t *testing.T) {
 	doc, err := CodingProfileJSON(CodingOptions{
 		SRTBin: "/usr/local/bin/srt", RunDir: filepath.Join(root, "run"),
 		HomeDir: root, PATH: testPATH, Repo: filepath.Join(root, "repo"),
-		TicketsRoot: filepath.Join(root, "tickets"), Worktree: filepath.Join(root, "worktree"),
+		TicketsRoot: filepath.Join(root, "tickets"), Worktree: filepath.Join(worktreeRoot(t), "worktree"),
 		UserTempDir: filepath.Join(root, "user-temp"),
 	})
 	if err != nil {
@@ -529,7 +602,7 @@ func TestCodingProfileAllowsTmpButNotClaudeTmp(t *testing.T) {
 func TestCodingProfileRefusesOccupiedExpectedAdminName(t *testing.T) {
 	root := shortCodingRoot(t)
 	repo := filepath.Join(root, "repo")
-	worktree := filepath.Join(root, "worktrees", "demo-ticket")
+	worktree := filepath.Join(worktreeRoot(t), "worktrees", "demo-ticket")
 	expected := filepath.Join(repo, ".git", "worktrees", "demo-ticket")
 	for _, dir := range []string{expected, filepath.Join(root, "run"), filepath.Join(root, "tickets")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -562,6 +635,31 @@ func shortCodingRoot(t *testing.T) string {
 func liveCodingRoot(t *testing.T) string {
 	t.Helper()
 	return codingRootIn(t, "/var/tmp")
+}
+
+// worktreeRoot is a root for a coding fixture's worktree, under the package
+// directory. Every coding profile grants /tmp and the per-user temp dir, and
+// the preflight refuses a worktree under either, so the root cannot follow
+// TMPDIR, which a host session may set under /tmp. The package directory is
+// in the checkout: writable on the host and, as the segment's worktree,
+// inside a hosted segment. The leading dot keeps the go command from reading
+// it as a package.
+func worktreeRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(dir, ".cw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func codingRootIn(t *testing.T, dir string) string {

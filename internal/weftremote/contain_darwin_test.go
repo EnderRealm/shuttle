@@ -84,7 +84,7 @@ func sweptHolder(t *testing.T, runDir string, during, after func(pid int)) *int 
 func (f *supervisorFixture) claimSecond(ticket string) error {
 	_, err := f.store.ClaimWeft(ledger.WeftLaunch{
 		Ticket: ticket, Project: "demo", Repo: f.repo, Branch: ticket,
-		Worktree:   filepath.Join(f.root, strings.ReplaceAll(ticket, "/", "-")),
+		Worktree:   filepath.Join(f.cfg.Weft.Root, strings.ReplaceAll(ticket, "/", "-")),
 		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
 	})
 	return err
@@ -328,7 +328,7 @@ func TestSupervisorRetainsReservationWhileTheBoundaryIsNotEmpty(t *testing.T) {
 	}
 	_, err = f.store.ClaimWeft(ledger.WeftLaunch{
 		Ticket: "demo/second", Project: "demo", Repo: f.repo,
-		Branch: "demo/second", Worktree: filepath.Join(f.root, "second"),
+		Branch: "demo/second", Worktree: filepath.Join(f.cfg.Weft.Root, "second"),
 		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
 	})
 	var busy *ledger.RepositoryBusyError

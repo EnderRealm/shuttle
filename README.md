@@ -136,8 +136,9 @@ sandboxed process still holding the segment's write grant, including one that
 left the worker's process group, by its being denied that directory, and kills
 it before the repository is released. An entry equal to or containing the
 segment's worktree is refused too: `allow_write` is shared by every segment, so
-such an entry would let a concurrent segment's processes write this worktree,
-and this segment's settlement would kill them as its own.
+such an entry would let every concurrent segment write this worktree. For the
+same reason a worktree under `/tmp` or the per-user temp dir, which every
+segment's profile grants, is refused, so `weft_root` must sit outside both.
 
 ```sh
 ./shuttle run daily --dry-run

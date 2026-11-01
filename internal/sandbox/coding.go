@@ -319,6 +319,17 @@ func requireCoding(o CodingOptions) error {
 	if sock := filepath.Join(o.tmpDir(), muxSocketProbe); len(sock) > maxUnixSocketPath {
 		return fmt.Errorf("run dir %q: srt mux socket path is %d bytes, over %d", o.RunDir, len(sock), maxUnixSocketPath)
 	}
+	// Every segment's profile grants /tmp and the per-user temp dir, so a
+	// worktree under either is writable by every concurrent segment.
+	for _, shared := range []string{sharedTmp, o.UserTempDir} {
+		covered, err := coversWorktree(shared, o.Worktree)
+		if err != nil {
+			return fmt.Errorf("shared write root %q: %w", shared, err)
+		}
+		if covered {
+			return fmt.Errorf("shared write root %q covers worktree %q; every segment's profile can write it", shared, o.Worktree)
+		}
+	}
 	for _, path := range o.AllowWrite {
 		if !filepath.IsAbs(path) || path != filepath.Clean(path) {
 			return fmt.Errorf("sandbox.allow_write: %q is not a clean absolute path", path)
@@ -330,15 +341,10 @@ func requireCoding(o CodingOptions) error {
 			return fmt.Errorf("sandbox.allow_write: %q covers run dir %q", path, o.RunDir)
 		}
 		// allow_write is shared by every segment's profile: an entry covering
-		// this worktree lets a concurrent segment's processes write it, and the
-		// sweep would read them as this segment's holders and kill them.
-		// Seatbelt judges the real path, so aliases are compared by identity.
-		covered := path == o.Worktree || strings.HasPrefix(o.Worktree, path+"/")
-		if !covered {
-			var err error
-			if covered, err = coversByIdentity(path, o.Worktree); err != nil {
-				return fmt.Errorf("sandbox.allow_write: %q: %w", path, err)
-			}
+		// this worktree lets every concurrent segment write it.
+		covered, err := coversWorktree(path, o.Worktree)
+		if err != nil {
+			return fmt.Errorf("sandbox.allow_write: %q: %w", path, err)
 		}
 		if covered {
 			return fmt.Errorf("sandbox.allow_write: %q covers worktree %q", path, o.Worktree)
@@ -350,6 +356,15 @@ func requireCoding(o CodingOptions) error {
 		}
 	}
 	return nil
+}
+
+// coversWorktree reports whether entry equals or contains worktree, by
+// spelling or, since Seatbelt judges the real path, by file identity.
+func coversWorktree(entry, worktree string) (bool, error) {
+	if entry == worktree || strings.HasPrefix(worktree, entry+"/") {
+		return true, nil
+	}
+	return coversByIdentity(entry, worktree)
 }
 
 // coversByIdentity reports whether entry equals or contains worktree by file

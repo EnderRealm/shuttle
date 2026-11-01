@@ -157,7 +157,7 @@ func newQueueHost(t *testing.T) *queueHost {
 		Timezone: "UTC",
 		Paths:    config.Paths{TKConfig: h.tkConfig, SRTBin: srt, LoomHome: filepath.Join(root, "loom")},
 		Weft: config.Weft{
-			Listen: "127.0.0.1:0", WorkerBin: worker, Root: filepath.Join(root, "weft"),
+			Listen: "127.0.0.1:0", WorkerBin: worker, Root: fixtureWeftRoot(t),
 			OAuthKeychainItem: fixtureOAuthItem, SegmentTimeoutSeconds: 30,
 		},
 	}

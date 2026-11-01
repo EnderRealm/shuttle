@@ -15,3 +15,7 @@ Thumbs.db
 
 # Dev binary
 /shuttle
+
+# Test fixture worktree roots under package directories
+.cw-*/
+.weft-*/
