@@ -8,7 +8,9 @@ measured against the spike's `weftagent1` in a test root laid out as `setup.sh` 
 git's default files ref backend; every denial below was shown to refuse the agent with the agent
 still working in the worktree.
 `setup.sh` and `teardown.sh` need sudo and were not run here, so the idempotence and rebuild
-behaviour below is what they are written to do, not yet measured.
+behaviour below is what they are written to do, not yet measured. `provision-checkout.sh` was run
+on 2026-11-03 against the Studio's own `/Users/Shared/weft` by `internal/agentusers`' test, which
+reads back the ACEs below from the published checkout.
 
 Each hosted slot runs its agent as its own unprivileged macOS user. The uid is the
 containment domain: a step down in privilege from the operator, not a sandbox. The operator
@@ -137,15 +139,33 @@ refuses `extensions.worktreeConfig`, under which git reads a `config.worktree` f
 directory, where agents must be able to add files. It leaves an ACE that is already present
 alone, so re-running it adds nothing.
 
-Three orderings bind whatever creates and operates production checkouts and worktrees, which
-this ticket does not build:
+**Hosted checkouts: `provision-checkout.sh <origin-url>`.** Run as the operator, without sudo.
+It clones the origin to `/Users/Shared/weft/repos/<name>`, where `<name>` is the project tk
+derives from a `remote.origin.url` (the text after the last `/`, else the last `:`, with one
+trailing `.git` and then one `/` dropped), so tk resolves the checkout, and `tk verify --dir` in
+any worktree of it, to the project the directory is named for, without consulting its path map.
+It refuses a name tk could not resolve (empty, `.`, `..`), a missing `repos/`, and a destination
+that already exists, including as a dangling symlink; re-protecting an existing checkout is
+`protect-checkout.sh`'s job. The clone is made with `--no-hardlinks`: from a local origin git
+would otherwise hard-link the object files, whose inodes keep the origin's ACL rather than
+inheriting the shared one. It builds and protects the checkout in the order **Protect before
+exposure** describes, removes the stage on any exit, and prints the `weft.repositories` line
+shuttle's `config.json` needs. Shuttle binds a hosted project only through that key, and refuses
+at load a binding not spelled as a path directly under `repos/`; it never reads `repos/` at load,
+which agents can write, and leaves a missing, symlinked or foreign checkout to the catalog, which
+reports that project unavailable. Nothing fetches into a hosted
+checkout yet; the operator pulls by hand.
+
+Three orderings bind whatever creates and operates production checkouts and worktrees.
+`provision-checkout.sh` builds checkouts by the first; nothing here builds production worktrees:
 
 - **Protect before exposure.** Anything created in `repos/` or `worktrees/` inherits the agent
   allow at once, so an agent watching the tree could plant a hook or config in a new checkout
   before it is protected, and the operator's first commit would run it. Build and protect the
-  checkout where no agent can reach it, then move it in: `check.sh` does this with a 0700 stage
-  in the shared root whose trees carry the shared ACL, `git worktree add --relative-paths` so
-  the worktree's paths survive the move, and a `rename(2)` onto a name reserved with `mkdir`.
+  checkout where no agent can reach it, then move it in: `check.sh` and `provision-checkout.sh`
+  do this with a 0700 stage in the shared root whose trees carry the shared ACL, and a
+  `rename(2)` onto a name reserved with `mkdir`; `check.sh` adds its worktree with
+  `git worktree add --relative-paths` so the worktree's paths survive the move.
 - **Re-protect after each `git worktree add`, `move` or `repair`.** A new admin directory and
   worktree, or rewritten `commondir`, `gitdir` and `.git` files, carry no deny until it runs.
   Between the two an agent can tamper with them; the re-run then refuses what it does not
@@ -288,8 +308,8 @@ processes survive the loop is not deleted: a process left running as a deleted u
 the rebuilt agent, which `setup.sh`'s numbering (one above the highest uid) usually gives the
 same uid. `teardown.sh` prints what survived, reports the user under `REMAINS` and exits 1.
 After a reinstall, `setup.sh` rebuilds
-everything from nothing, and each checkout re-cloned under `repos/` needs `protect-checkout.sh`
-again, before any agent can reach it.
+everything from nothing; re-clone each hosted checkout with `provision-checkout.sh`, which
+protects it before any agent can reach it.
 
 ## Spike leftovers
 

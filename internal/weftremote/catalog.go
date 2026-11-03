@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
@@ -32,8 +33,9 @@ const (
 var v2ProjectID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // catalogProject is one project registered in tk's config.yaml, its binding
-// resolved independently of its tickets: a namespace is always browsable,
-// and only an available binding names a repository work may run in.
+// in weft.repositories resolved independently of its tickets: a namespace is
+// always browsable, and only an available binding names a repository work may
+// run in.
 type catalogProject struct {
 	Name         string
 	State        string
@@ -97,7 +99,7 @@ func (s *Service) readCatalog() (*catalog, error) {
 	homes := homeDirectories()
 	c := &catalog{store: store, snap: snap, byName: map[string]*catalogProject{}}
 	for _, name := range cfg.Names() {
-		p := bindProject(s.cfg.Paths.TKConfig, name, cfg.Projects[name].Path, homes)
+		p := bindProject(name, s.cfg.Weft.Repositories[name], homes)
 		p.Tickets = byNamespace[name]
 		ticket.SortByStatusPriorityID(p.Tickets)
 		if p.State == projectAvailable && len(p.Tickets) == 0 {
@@ -112,48 +114,97 @@ func (s *Service) readCatalog() (*catalog, error) {
 	return c, nil
 }
 
-// bindProject resolves a config.yaml binding to the checkout it names, or to
-// the reason it names none.
-func bindProject(configPath, name, path string, homes []string) *catalogProject {
+// repositoriesKey is shuttle's config.json key that binds each hosted project
+// to its checkout; tk's own path for the project is never consulted.
+const repositoriesKey = "weft.repositories"
+
+// bindProject resolves a weft.repositories binding to the checkout it names,
+// or to the reason it names none.
+func bindProject(name, path string, homes []string) *catalogProject {
 	p := &catalogProject{Name: name}
 	unavailable := func(code, detail string) *catalogProject {
 		p.State, p.ReasonCode, p.ReasonDetail = projectUnavailable, code, detail
 		return p
 	}
 	if path == "" {
-		return unavailable("no_binding", fmt.Sprintf("%s registers %s with no path", configPath, name))
+		return unavailable("no_binding", fmt.Sprintf("%s in shuttle's config.json binds no hosted checkout for %s", repositoriesKey, name))
 	}
 	if !filepath.IsAbs(path) {
-		return unavailable("no_binding", fmt.Sprintf("%s binds %s to %q, which is not an absolute path", configPath, name, path))
+		return unavailable("no_binding", fmt.Sprintf("%s binds %s to %q, which is not an absolute path", repositoriesKey, name, path))
 	}
 	rootBinding := func(path string) *catalogProject {
-		return unavailable("root_binding", fmt.Sprintf("%s binds %s to %s; a binding to / or the home directory names no checkout", configPath, name, path))
+		return unavailable("root_binding", fmt.Sprintf("%s binds %s to %s; a binding to / or the home directory names no checkout", repositoriesKey, name, path))
 	}
 	clean := filepath.Clean(path)
 	if clean == "/" || slices.Contains(homes, clean) {
 		return rootBinding(clean)
 	}
+	// An agent can add entries to repos/, so a bound name can be squatted, or
+	// swapped for a link elsewhere, after config.json was loaded. The entry is
+	// judged as found, before anything is resolved: a link, a non-directory or
+	// a foreign owner names no repository, so nothing (archive import included)
+	// adopts the place it points.
+	info, err := os.Lstat(clean)
+	if errors.Is(err, fs.ErrNotExist) {
+		p.Repository, p.RepositoryID = clean, sandbox.RepositoryID(clean)
+		return unavailable("checkout_missing", fmt.Sprintf("%s, the path %s binds %s to, does not exist on this host", clean, repositoriesKey, name))
+	}
+	if err != nil {
+		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, cannot be inspected: %v", clean, repositoriesKey, name, err))
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, is a symlink; a hosted checkout is a directory of its own", clean, repositoriesKey, name))
+	}
+	if !info.IsDir() {
+		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, is not a directory", clean, repositoriesKey, name))
+	}
+	if !ownedByDaemon(info) {
+		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, is not owned by uid %d, which this host runs as; an agent may have made it",
+			clean, repositoriesKey, name, os.Getuid()))
+	}
+	afterBindingInspected(clean)
 	canonical, err := sandbox.CanonicalRepository(clean)
 	if errors.Is(err, fs.ErrNotExist) {
 		p.Repository, p.RepositoryID = clean, sandbox.RepositoryID(clean)
-		return unavailable("checkout_missing", fmt.Sprintf("%s, the path %s binds %s to, does not exist on this host", clean, configPath, name))
+		return unavailable("checkout_missing", fmt.Sprintf("%s, the path %s binds %s to, does not exist on this host", clean, repositoriesKey, name))
 	}
 	if err != nil {
 		p.Repository, p.RepositoryID = clean, sandbox.RepositoryID(clean)
-		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, cannot be resolved: %v", clean, configPath, name, err))
+		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, cannot be resolved: %v", clean, repositoriesKey, name, err))
 	}
 	if canonical == "/" || slices.Contains(homes, canonical) {
 		return rootBinding(canonical)
 	}
-	p.Repository, p.RepositoryID = canonical, sandbox.RepositoryID(canonical)
-	if info, err := os.Stat(canonical); err != nil || !info.IsDir() {
-		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, is not a directory", canonical, configPath, name))
+	// Each lookup walks the path afresh, so the entry swapped between them is
+	// caught by identity: the resolved checkout must be the directory inspected,
+	// still a direct child of the bound parent.
+	parent, err := sandbox.CanonicalRepository(filepath.Dir(clean))
+	resolved, statErr := os.Stat(canonical)
+	if err != nil || statErr != nil || !os.SameFile(info, resolved) || filepath.Dir(canonical) != parent {
+		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, resolved to %s, which is not the directory inspected there; it was replaced while being bound",
+			clean, repositoriesKey, name, canonical))
 	}
-	if _, err := os.Lstat(filepath.Join(canonical, ".git")); err != nil {
-		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, has no .git: it is not a git checkout", canonical, configPath, name))
+	p.Repository, p.RepositoryID = canonical, sandbox.RepositoryID(canonical)
+	gitInfo, err := os.Lstat(filepath.Join(canonical, ".git"))
+	if err != nil {
+		return unavailable("not_a_repository", fmt.Sprintf("%s, the path %s binds %s to, has no .git: it is not a git checkout", canonical, repositoriesKey, name))
+	}
+	if gitInfo.Mode()&fs.ModeSymlink != 0 || !ownedByDaemon(gitInfo) {
+		return unavailable("not_a_repository", fmt.Sprintf("%s/.git, in the path %s binds %s to, is a symlink or not owned by uid %d, which this host runs as; an agent may have made it",
+			canonical, repositoriesKey, name, os.Getuid()))
 	}
 	p.State = projectAvailable
 	return p
+}
+
+// afterBindingInspected runs between a binding's inspection and its
+// resolution; a var so a test can replace the entry in that window.
+var afterBindingInspected = func(string) {}
+
+// ownedByDaemon is whether info's file belongs to the uid this process runs as.
+func ownedByDaemon(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Getuid()
 }
 
 // homeDirectories is the user's home as spelled and as resolved.

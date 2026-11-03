@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ type queueHost struct {
 	code     string
 	control  string
 	projects map[string]string
+	cfg      *config.Config
 	logs     *syncBuffer
 	// capabilities are what a weft-worker/v2 fixture worker's probe lists.
 	capabilities []any
@@ -139,9 +141,17 @@ func newQueueHost(t *testing.T) *queueHost {
 		h.checkout(name)
 		h.projects[name] = filepath.Join(h.code, name)
 	}
-	h.writeConfig()
 	srt := filepath.Join(root, "srt")
 	worker := filepath.Join(root, "weft-worker")
+	h.cfg = &config.Config{
+		Timezone: "UTC",
+		Paths:    config.Paths{TKConfig: h.tkConfig, SRTBin: srt, LoomHome: filepath.Join(root, "loom")},
+		Weft: config.Weft{
+			Listen: "127.0.0.1:0", WorkerBin: worker, Root: fixtureWeftRoot(t),
+			OAuthKeychainItem: fixtureOAuthItem, SegmentTimeoutSeconds: 30,
+		},
+	}
+	h.writeConfig()
 	if err := os.WriteFile(srt, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -153,15 +163,7 @@ func newQueueHost(t *testing.T) *queueHost {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	cfg := &config.Config{
-		Timezone: "UTC",
-		Paths:    config.Paths{TKConfig: h.tkConfig, SRTBin: srt, LoomHome: filepath.Join(root, "loom")},
-		Weft: config.Weft{
-			Listen: "127.0.0.1:0", WorkerBin: worker, Root: fixtureWeftRoot(t),
-			OAuthKeychainItem: fixtureOAuthItem, SegmentTimeoutSeconds: 30,
-		},
-	}
-	service, err := New(cfg, store, "secret-token", root, log.New(h.logs, "", 0))
+	service, err := New(h.cfg, store, "secret-token", root, log.New(h.logs, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +194,12 @@ func (h *queueHost) checkout(name string) {
 	}
 }
 
+// writeConfig registers h.projects in tk's config.yaml and binds each in
+// weft.repositories to the same path, the binding the catalog reads. The map
+// is replaced, never edited, so a catalog read already holding the old one
+// is not raced.
 func (h *queueHost) writeConfig() {
+	h.cfg.Weft.Repositories = maps.Clone(h.projects)
 	var b strings.Builder
 	b.WriteString("central_root: " + h.central + "\nprojects:\n")
 	for _, name := range keysOf(h.projects) {

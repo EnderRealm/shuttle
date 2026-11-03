@@ -112,6 +112,7 @@ are Keychain generic passwords and never appear in the file or launchd plist:
     "worker_bin": "/Users/you/.local/bin/weft-worker",
     "weft_root": "/Users/you/.shuttle/weft",
     "segment_timeout_seconds": 21600,
+    "repositories": {"shuttle": "/Users/Shared/weft/repos/shuttle"},
     "sandbox": {
       "allowed_domains": ["github.com"],
       "allow_write": [
@@ -139,6 +140,21 @@ segment's worktree is refused too: `allow_write` is shared by every segment, so
 such an entry would let every concurrent segment write this worktree. For the
 same reason a worktree under `/tmp` or the per-user temp dir, which every
 segment's profile grants, is refused, so `weft_root` must sit outside both.
+
+`repositories` binds each hosted tk project to its checkout. A binding that is
+not a path directly under `/Users/Shared/weft/repos`, where agent users can
+reach it, or that is under the operator's home, refuses the load, naming the
+path. Load checks the spelling only: agents can write `repos/`, so what is on
+disk there never stops shuttle starting; the catalog checks each checkout on
+every read and reports a missing, symlinked or foreign one unavailable. tk's `config.yaml` still
+decides which projects exist and holds their tickets, but its paths are never
+used: a tk project with no binding here is unavailable (`no_binding`), and
+project terminals open in the bound checkout. The daemon reads `config.json`
+at start, so restart it after adding a binding.
+`scripts/agent-users/provision-checkout.sh <origin-url>` clones and protects
+the checkout and prints the line to add (`docs/agent-users.md`). Nothing
+updates a hosted checkout from origin yet: after pushing from elsewhere, run
+`git -C /Users/Shared/weft/repos/<repo> pull --ff-only` before launching.
 
 ```sh
 ./shuttle run daily --dry-run

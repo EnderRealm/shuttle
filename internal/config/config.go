@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"shuttle/internal/keychain"
 )
@@ -21,6 +24,11 @@ const (
 	configFile = "config.json"
 	ledgerFile = "runs.db"
 	reportsDir = "reports"
+
+	// hostedRepositoriesRoot is where every hosted checkout lives. It mirrors
+	// SHARED_ROOT/repos in scripts/agent-users/common.sh, the tree setup.sh
+	// makes agent-writable.
+	hostedRepositoriesRoot = "/Users/Shared/weft/repos"
 )
 
 // Config is config.json, the §4.2 shape. Credentials are Keychain item names
@@ -90,6 +98,11 @@ type Weft struct {
 	Root                  string      `json:"weft_root"`
 	SegmentTimeoutSeconds int         `json:"segment_timeout_seconds"`
 	Sandbox               WeftSandbox `json:"sandbox"`
+	// Repositories binds each hosted tk project to its checkout, a directory
+	// directly under /Users/Shared/weft/repos. tk's config.yaml decides which
+	// projects exist; only this map decides where their work runs, so a
+	// project it does not name has no checkout.
+	Repositories map[string]string `json:"repositories,omitempty"`
 }
 
 // DefaultWeftOAuthKeychainItem names the login-Keychain generic password that
@@ -185,7 +198,50 @@ func Load() (*Config, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%s: trailing content after the config object", path)
 	}
+	if err := validateRepositories(hostedRepositoriesRoot, c.Weft.Repositories); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	return &c, nil
+}
+
+// validateRepositories refuses a hosted checkout binding agent users could not
+// reach: anything but a path directly under root, and anything under the
+// operator's home. The check is lexical only: agents can write root, so
+// whatever is on disk there is the catalog's to judge per project on every
+// read, never a reason for load to fail. Bindings are checked in key order,
+// so the error reported is the same on every load.
+func validateRepositories(root string, repos map[string]string) error {
+	for _, name := range slices.Sorted(maps.Keys(repos)) {
+		key, path := "weft.repositories."+name, repos[name]
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("%s: %q is not an absolute path; a hosted checkout must be a directory directly under %s", key, path, root)
+		}
+		clean := filepath.Clean(path)
+		for _, home := range operatorHomes() {
+			if clean == home || strings.HasPrefix(clean, home+string(filepath.Separator)) {
+				return fmt.Errorf("%s: %s is under the operator's home %s, which agent users cannot traverse; a hosted checkout must be a directory directly under %s, where agent users can reach it",
+					key, path, home, root)
+			}
+		}
+		if base := filepath.Base(clean); filepath.Dir(clean) != root || base == "." || base == ".." {
+			return fmt.Errorf("%s: %s is not a directory directly under %s, where agent users can reach a hosted checkout", key, path, root)
+		}
+	}
+	return nil
+}
+
+// operatorHomes is the operator's home as spelled and as resolved. / is left
+// out: everything is under it.
+func operatorHomes() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	homes := []string{filepath.Clean(home)}
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		homes = append(homes, resolved)
+	}
+	return slices.DeleteFunc(homes, func(h string) bool { return h == "/" })
 }
 
 // AgentsDir resolves the agent definitions directory: $SHUTTLE_AGENTS_DIR,

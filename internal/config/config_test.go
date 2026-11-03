@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -165,5 +166,76 @@ func TestWeftOAuthKeychainItemDefaults(t *testing.T) {
 	c.Weft.OAuthKeychainItem = "custom-item"
 	if got := c.WeftOAuthKeychainItem(); got != "custom-item" {
 		t.Errorf("configured item = %q", got)
+	}
+}
+
+func repositoriesConfig(binding string) string {
+	return strings.Replace(sampleConfig, `"segment_timeout_seconds": 21600,`,
+		`"segment_timeout_seconds": 21600, "repositories": {"shuttle": "/Users/Shared/weft/repos/shuttle", "weft": `+strconv.Quote(binding)+`},`, 1)
+}
+
+func TestLoadAcceptsAHostedRepositoryBinding(t *testing.T) {
+	writeConfig(t, repositoriesConfig("/Users/Shared/weft/repos/weft"))
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Weft.Repositories["weft"]; got != "/Users/Shared/weft/repos/weft" {
+		t.Errorf("weft.repositories.weft = %q", got)
+	}
+}
+
+func TestLoadRefusesRepositoryBindingsAgentsCannotReach(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		binding string
+		want    string
+	}{
+		{"operator home", filepath.Join(home, "code", "weft"), "under the operator's home"},
+		{"worktrees tree", "/Users/Shared/weft/worktrees/x", "not a directory directly under /Users/Shared/weft/repos"},
+		{"the root itself", "/Users/Shared/weft/repos", "not a directory directly under /Users/Shared/weft/repos"},
+		{"nested", "/Users/Shared/weft/repos/a/b", "not a directory directly under /Users/Shared/weft/repos"},
+		{"relative", "repos/weft", "not an absolute path"},
+		{"dot-dot escape", "/Users/Shared/weft/repos/../worktrees", "not a directory directly under /Users/Shared/weft/repos"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfig(t, repositoriesConfig(tc.binding))
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load succeeded, want an error")
+			}
+			for _, want := range []string{configFile, "weft.repositories.weft", tc.binding, tc.want} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// Load judges a binding by its spelling alone: agents can write repos/, so
+// nothing they plant there may stop shuttle from starting. A symlink child
+// pointing outside the root and a child not yet provisioned both load; the
+// catalog refuses them per project.
+func TestValidateRepositoriesIsLexical(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repos")
+	outside := filepath.Join(t.TempDir(), "elsewhere")
+	for _, dir := range []string{filepath.Join(root, "real"), outside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	repos := map[string]string{"real": filepath.Join(root, "real"), "missing": filepath.Join(root, "missing"), "linked": link}
+	if err := validateRepositories(root, repos); err != nil {
+		t.Errorf("bindings directly under the root, whatever is on disk there: %v", err)
 	}
 }

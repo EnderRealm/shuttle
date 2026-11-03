@@ -296,12 +296,6 @@ WT="$SHARED_ROOT/worktrees/.check-$$"
 STAGE="$SHARED_ROOT/.check-stage-$$"
 SCRATCH+=("$REPO-moved" "$WT-moved")
 
-# publish <from> <to>: rename(2), which unlike mv never moves into a directory at <to>: it
-# replaces an empty one and fails on anything else.
-publish() {
-  /usr/bin/perl -e 'rename($ARGV[0], $ARGV[1]) or die "rename $ARGV[0] to $ARGV[1]: $!\n"' "$1" "$2"
-}
-
 # The checkout and worktree are built, committed to and protected where no agent can reach them,
 # and only then published: an agent that could write in the checkout before protect-checkout.sh
 # ran could plant a hook or config that the operator's first commit would run. The stage is 0700

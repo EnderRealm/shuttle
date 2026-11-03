@@ -1,5 +1,6 @@
 # Names and permission sets shared by the agent-user scripts. Sourced, never run: setup.sh,
-# teardown.sh, protect-checkout.sh and check.sh must agree on every value here.
+# teardown.sh, protect-checkout.sh, provision-checkout.sh and check.sh must agree on every value
+# here.
 # docs/agent-users.md says what each piece is for.
 
 AGENT_PREFIX=weftagent
@@ -38,6 +39,12 @@ apply_shared_acl() {
   chmod +a "group:$AGENT_GROUP deny $KEEP_DENY" "$1"
   chmod +a "user:$2 allow $SHARED_PERMS" "$1"
   chmod +a "group:$AGENT_GROUP allow $SHARED_PERMS" "$1"
+}
+
+# publish <from> <to>: rename(2), which unlike mv never moves into a directory at <to>: it
+# replaces an empty one and fails on anything else.
+publish() {
+  /usr/bin/perl -e 'rename($ARGV[0], $ARGV[1]) or die "rename $ARGV[0] to $ARGV[1]: $!\n"' "$1" "$2"
 }
 
 # kill_agent <user>: SIGKILL every process whose real uid is <user> until none is left. pkill

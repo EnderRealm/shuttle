@@ -486,6 +486,7 @@ func newSupervisorFixtureIn(t *testing.T, dir string, refuseSandbox bool) *super
 			OAuthKeychainItem:     fixtureOAuthItem,
 			SegmentTimeoutSeconds: 10,
 			Sandbox:               config.WeftSandbox{AllowedDomains: []string{"github.com"}},
+			Repositories:          map[string]string{"demo": repo},
 		},
 	}
 	worktree, err := sandbox.WorktreePath(cfg.Weft.Root, repo, "demo/worker")

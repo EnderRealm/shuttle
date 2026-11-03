@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -194,6 +195,7 @@ type studio struct {
 	tkConfig  string
 	code      string
 	projects  map[string]string
+	cfg       *config.Config
 	runIDs    map[string]string // fixture run id -> this host's
 	ticketRun map[string]string // ticket -> this host's run
 }
@@ -216,13 +218,7 @@ func newStudio(t *testing.T) *studio {
 		s.projects[name] = filepath.Join(s.code, name)
 	}
 	s.projects["docs-site"] = filepath.Join(s.code, "docs-site")
-	s.writeConfig()
-	store, err := ledger.Open(filepath.Join(root, "runs.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	cfg := &config.Config{
+	s.cfg = &config.Config{
 		Timezone: "UTC",
 		Paths:    config.Paths{TKConfig: s.tkConfig, SRTBin: "/usr/bin/true"},
 		Weft: config.Weft{
@@ -230,7 +226,13 @@ func newStudio(t *testing.T) *studio {
 			Root: filepath.Join(root, "weft"), SegmentTimeoutSeconds: 10,
 		},
 	}
-	service, err := New(cfg, store, "secret-token", root, log.New(io.Discard, "", 0))
+	s.writeConfig()
+	store, err := ledger.Open(filepath.Join(root, "runs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	service, err := New(s.cfg, store, "secret-token", root, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +246,12 @@ func (s *studio) checkout(name string) {
 	}
 }
 
+// writeConfig registers s.projects in tk's config.yaml and binds each in
+// weft.repositories to the same path, the binding the catalog reads. The map
+// is replaced, never edited, so a catalog read already holding the old one
+// is not raced.
 func (s *studio) writeConfig() {
+	s.cfg.Weft.Repositories = maps.Clone(s.projects)
 	var b strings.Builder
 	b.WriteString("central_root: " + s.central + "\nprojects:\n")
 	names := make([]string, 0, len(s.projects))
@@ -980,6 +987,97 @@ func TestCatalogBindingsNeverDefaultARepository(t *testing.T) {
 			t.Errorf("%s ticket = %v", p["project"], rows)
 		}
 	}
+}
+
+// A project is bound by weft.repositories alone: tk's own path for it is
+// never a fallback, and a bound name an agent swapped for a symlink names no
+// checkout and no repository.
+func TestCatalogBindsFromWeftRepositoriesOnly(t *testing.T) {
+	s := newStudio(t)
+	s.checkout("linked-target")
+	s.projects["linked"] = filepath.Join(s.code, "linked")
+	if err := os.Symlink(filepath.Join(s.code, "linked-target"), s.projects["linked"]); err != nil {
+		t.Fatal(err)
+	}
+	s.writeConfig()
+	repositories := maps.Clone(s.cfg.Weft.Repositories)
+	delete(repositories, "loom")
+	s.cfg.Weft.Repositories = repositories
+	want := map[string][2]string{
+		"loom":   {"no_binding", "weft.repositories in shuttle's config.json binds no hosted checkout for loom"},
+		"linked": {"not_a_repository", s.projects["linked"] + ", the path weft.repositories binds linked to, is a symlink"},
+	}
+	seen := 0
+	for _, p := range s.get("/v2/projects")["projects"].([]any) {
+		p := p.(map[string]any)
+		name := p["project"].(string)
+		if name == "weft" && p["state"] == "unavailable" {
+			t.Errorf("weft, bound to a checkout, is unavailable: %v", p["reason"])
+		}
+		w, ok := want[name]
+		if !ok {
+			continue
+		}
+		seen++
+		reason, _ := p["reason"].(map[string]any)
+		detail, _ := reason["detail"].(string)
+		if p["state"] != "unavailable" || reasonCode(p) != w[0] || !strings.HasPrefix(detail, w[1]) {
+			t.Errorf("%s = %v %v, want unavailable %s: %s", name, p["state"], p["reason"], w[0], w[1])
+		}
+		if p["repository"] != nil || p["repository_id"] != nil {
+			t.Errorf("%s names a repository: %v %v", name, p["repository"], p["repository_id"])
+		}
+	}
+	if seen != len(want) {
+		t.Fatalf("saw %d of %d projects under test", seen, len(want))
+	}
+}
+
+// A bound directory an agent swaps for a link between the catalog inspecting
+// it and resolving it is refused: the operator-owned checkout the link names,
+// outside the bound parent, is never served as the project's repository.
+func TestCatalogRefusesABindingReplacedWhileBound(t *testing.T) {
+	s := newStudio(t)
+	private := filepath.Join(s.root, "home", "code", "shuttle")
+	if err := os.MkdirAll(filepath.Join(private, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.checkout("swapped")
+	bound := filepath.Join(s.code, "swapped")
+	s.projects["swapped"] = bound
+	s.writeConfig()
+	swaps := 0
+	prior := afterBindingInspected
+	afterBindingInspected = func(path string) {
+		if path != bound || swaps > 0 {
+			return
+		}
+		swaps++
+		if err := os.Rename(bound, bound+".inspected"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(private, bound); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { afterBindingInspected = prior })
+	for _, p := range s.get("/v2/projects")["projects"].([]any) {
+		p := p.(map[string]any)
+		if p["project"] != "swapped" {
+			continue
+		}
+		if swaps != 1 {
+			t.Fatalf("binding swapped %d times, want 1", swaps)
+		}
+		if p["state"] != "unavailable" || reasonCode(p) != "not_a_repository" {
+			t.Fatalf("swapped = %v %v, want unavailable not_a_repository", p["state"], p["reason"])
+		}
+		if p["repository"] != nil || p["repository_id"] != nil {
+			t.Fatalf("swapped names a repository: %v %v", p["repository"], p["repository_id"])
+		}
+		return
+	}
+	t.Fatal("swapped is not in the catalog")
 }
 
 func TestCatalogRefusesAnIncompleteTKRead(t *testing.T) {

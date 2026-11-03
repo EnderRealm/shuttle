@@ -68,6 +68,7 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 		Weft: config.Weft{
 			Listen: "127.0.0.1:0", WorkerBin: "/usr/bin/true",
 			Root: filepath.Join(root, "weft"), SegmentTimeoutSeconds: 10,
+			Repositories: map[string]string{"demo": projectPath},
 		},
 	}
 	service, err := New(cfg, store, "secret-token", root, log.New(io.Discard, "", 0))
