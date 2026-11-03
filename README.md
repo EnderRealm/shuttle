@@ -166,6 +166,8 @@ before the failure. CLI errors and scheduler decisions go to stderr. A foregroun
 both stdout and stderr there.
 
 [The sandbox notes](docs/sandbox.md) describe the runtime boundary and its measured
-behavior. [The observer contract](docs/observer-contract.md) describes the shared
+behavior. [The agent-user notes](docs/agent-users.md) describe the macOS users hosted
+agents run as, how to provision them, and what that boundary does not protect.
+[The observer contract](docs/observer-contract.md) describes the shared
 question, evidence, assessment, and action records. The phase-one design includes
 remaining work as well as implemented components.
