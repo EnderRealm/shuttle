@@ -291,7 +291,7 @@ func TestEventStreamResetsWhenCursorPredatesRetention(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.PruneWeftRetention(now.Add(-7 * 24 * time.Hour)); err != nil {
+	if _, err := f.store.PruneWeftRetention(now.Add(-eventRetention), now.Add(-idempotencyRetention)); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(f.service)

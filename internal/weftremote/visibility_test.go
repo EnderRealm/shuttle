@@ -1157,7 +1157,7 @@ func TestPrunedOutputReadsTruncated(t *testing.T) {
 	h.script(id, 1, h.fixtureSegment(id))
 	runID := h.waitDispatched(entryOf(h.launch(id, "launch-pruned"))["entry_id"].(string))
 	h.waitReaped(runID)
-	if err := h.store.PruneWeftRetention(time.Now().Add(time.Hour)); err != nil {
+	if _, err := h.store.PruneWeftRetention(time.Now().Add(time.Hour), time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	outputShape := learn(decode(t, fixtureBytes(t, "output.json")))

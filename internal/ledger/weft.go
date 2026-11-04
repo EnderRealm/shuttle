@@ -1363,23 +1363,44 @@ func (s *Store) WeftEventBounds() (oldest, newest int64, err error) {
 	return
 }
 
+// WeftPruned counts the rows one retention prune removed.
+type WeftPruned struct{ Events, Output, Requests int64 }
+
 // PruneWeftRetention drops what is retained only for a window: state events
-// and idempotency records older than before, and the output of every run that
-// ended before it (weft-service/v2 §8.1). Runs, segments, stages, questions
-// and answers are authoritative and never pruned.
-func (s *Store) PruneWeftRetention(before time.Time) error {
-	cutoff := weftTimestamp(before)
-	return s.withTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`DELETE FROM weft_events WHERE ts<?`, cutoff); err != nil {
+// older than events, the output of every run that ended before it
+// (weft-service/v2 §8.1), and idempotency records older than requests (§4.2).
+// Runs, segments, stages, questions and answers are authoritative and never
+// pruned.
+func (s *Store) PruneWeftRetention(events, requests time.Time) (WeftPruned, error) {
+	var pruned WeftPruned
+	cutoff := weftTimestamp(events)
+	err := s.withTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM weft_events WHERE ts<?`, cutoff)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM weft_output WHERE run_id IN
-			(SELECT id FROM weft_runs WHERE phase=? AND ended_at<?)`, WeftPhaseEnded, cutoff); err != nil {
+		if pruned.Events, err = res.RowsAffected(); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`DELETE FROM weft_requests WHERE created_at<?`, cutoff)
+		res, err = tx.Exec(`DELETE FROM weft_output WHERE run_id IN
+			(SELECT id FROM weft_runs WHERE phase=? AND ended_at<?)`, WeftPhaseEnded, cutoff)
+		if err != nil {
+			return err
+		}
+		if pruned.Output, err = res.RowsAffected(); err != nil {
+			return err
+		}
+		res, err = tx.Exec(`DELETE FROM weft_requests WHERE created_at<?`, weftTimestamp(requests))
+		if err != nil {
+			return err
+		}
+		pruned.Requests, err = res.RowsAffected()
 		return err
 	})
+	if err != nil {
+		return WeftPruned{}, err
+	}
+	return pruned, nil
 }
 
 func (s *Store) WeftEventsAfter(seq int64) ([]WeftEvent, error) {

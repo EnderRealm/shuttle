@@ -361,7 +361,7 @@ func (s *Service) Restart() error {
 	}
 	s.logChanges("", changes)
 	s.stateMu.Lock()
-	err = s.store.PruneWeftRetention(time.Now().Add(-retentionWindow))
+	err = s.pruneRetention()
 	s.stateMu.Unlock()
 	if err != nil {
 		return err

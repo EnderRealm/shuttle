@@ -27,9 +27,11 @@ import (
 const (
 	maxRequestBytes = 70 << 10
 	maxAnswerBytes  = 64 << 10
-	// retentionWindow is how long idempotency records, state events and an
-	// ended run's output are kept (weft-service/v2 §4.2, §8.1).
-	retentionWindow = 7 * 24 * time.Hour
+	// eventRetention is how long state events and an ended run's output are
+	// kept (weft-service/v2 §8.1, §10), and idempotencyRetention how long an
+	// idempotency record is (§4.2). /v2/service advertises both.
+	eventRetention       = 7 * 24 * time.Hour
+	idempotencyRetention = 7 * 24 * time.Hour
 )
 
 // Service is the authenticated weft host: weft-service/v2, and weft-remote/v1
@@ -49,6 +51,11 @@ type Service struct {
 	// Shuttle (§5.2). A full read of the Studio's store costs ~150ms, so the
 	// interval trades an external edit's latency against a daemon's idle CPU.
 	catalogPoll time.Duration
+	// prunePoll is how often the host enforces the retention windows. Neither
+	// weft_events.ts nor weft_requests.created_at is indexed, so each pass
+	// scans both tables; windows measured in days need nothing finer than
+	// an hour.
+	prunePoll time.Duration
 	// started is when this host process started, which the allowance tiles
 	// name while nothing has been observed.
 	started time.Time
@@ -105,7 +112,7 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	}
 	s := &Service{
 		cfg: cfg, store: store, token: token, tokenID: ledger.TokenID(token), hostID: hostID,
-		home: home, log: logger, catalogPoll: 5 * time.Second, started: time.Now(),
+		home: home, log: logger, catalogPoll: 5 * time.Second, prunePoll: time.Hour, started: time.Now(),
 		folders: newFolderHandles(), terms: map[string]*terminalSession{},
 	}
 	// Dispatch spawns segments through the supervisor, under the contract the
@@ -149,6 +156,7 @@ func (s *Service) ListenAndServe(ctx context.Context) error {
 		return err
 	}
 	go s.watchCatalog(ctx)
+	go s.watchRetention(ctx)
 	// Waiting entries survive a restart (§12): dispatch resumes once the
 	// restart pass and Restart have run.
 	go s.dispatch()
@@ -469,7 +477,7 @@ func (s *Service) mutate(w http.ResponseWriter, r *http.Request, execute func([]
 	defer s.mutateMu.Unlock()
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	if err := s.store.PruneWeftRetention(time.Now().Add(-retentionWindow)); err != nil {
+	if err := s.pruneRetention(); err != nil {
 		s.internal(w, err)
 		return
 	}

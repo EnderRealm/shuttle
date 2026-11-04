@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1478,7 +1479,7 @@ func TestTwoClientsConvergeThroughCatalogEventsAndGets(t *testing.T) {
 	s.ticket("weft", "example-ready-a0b1", "Render capacity on the rail", ticket.StatusReady)
 	s.sync()
 	b.consume(t, streamB, "weft", weft+1)
-	if err := s.store.PruneWeftRetention(time.Now().Add(time.Hour)); err != nil {
+	if _, err := s.store.PruneWeftRetention(time.Now().Add(time.Hour), time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	delete(s.projects, "added")
@@ -1642,5 +1643,104 @@ func TestHostWatchesTKForExternalEdits(t *testing.T) {
 	c.consume(t, str, "weft", 1)
 	if !strings.Contains(c.tickets["weft"], "Watched and edited") {
 		t.Fatalf("catalog after the watched edit = %s", c.tickets["weft"])
+	}
+}
+
+// A host whose traffic is all v2 still enforces the retention /v2/service
+// advertises: the retention watch, with no request in flight, drops state
+// events and idempotency records older than their windows and keeps those
+// inside them, and a cursor the prune left behind opens with a reset.
+func TestHostPrunesRetentionOnASchedule(t *testing.T) {
+	s := newStudio(t)
+	s.ticket("weft", "aged-0001", "Aged", ticket.StatusReady)
+	server := httptest.NewServer(s.service)
+	defer server.Close()
+	now := time.Now()
+
+	// Events from beyond the event window, with a cursor among them, then
+	// events just inside it.
+	s.store.SetClock(func() time.Time { return now.Add(-eventRetention - time.Hour) })
+	s.sync()
+	stale, err := s.store.WeftAsOf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ticket("weft", "aged-0001", "Aged and edited", ticket.StatusReady)
+	s.sync()
+	kept, err := s.store.WeftAsOf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept++
+	s.store.SetClock(func() time.Time { return now.Add(-eventRetention + time.Hour) })
+	s.ticket("weft", "aged-0001", "Kept", ticket.StatusOpen)
+	s.sync()
+	s.store.SetClock(time.Now)
+
+	tokenID := ledger.TokenID("secret-token")
+	for key, created := range map[string]time.Time{
+		"aged": now.Add(-idempotencyRetention - time.Hour),
+		"kept": now.Add(-idempotencyRetention + time.Hour),
+	} {
+		if err := s.store.PutWeftRequest(ledger.WeftRequest{
+			TokenID: tokenID, Key: key, Method: http.MethodPost, Path: "/v2/launches",
+			BodySHA: ledger.BodySHA(nil), Status: http.StatusAccepted, Response: []byte("{}\n"),
+			CreatedAt: formatTime(created),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Before the watch runs nothing has aged out: the cursor continues.
+	c := &client{studio: s}
+	str := openStream(t, server, fmt.Sprint(stale))
+	c.opening(t, str, false)
+	str.close()
+
+	s.service.prunePoll = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.service.watchRetention(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := s.store.GetWeftRequest(tokenID, "aged")
+		if errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the retention watch did not prune the aged idempotency record within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := s.store.GetWeftRequest(tokenID, "kept"); err != nil {
+		t.Fatalf("idempotency record inside the window: %v", err)
+	}
+	_, oldest, _, err := s.store.WeftStreamBounds()
+	if err != nil || oldest != kept {
+		t.Fatalf("oldest after the prune = %d %v, want %d", oldest, err, kept)
+	}
+
+	str = openStream(t, server, fmt.Sprint(stale))
+	defer str.close()
+	opening := c.opening(t, str, true)
+	if opening["oldest"] != float64(kept) {
+		t.Fatalf("reset stream names oldest %v, want %d", opening["oldest"], kept)
+	}
+}
+
+// The retention /v2/service advertises is the retention the host enforces.
+func TestServiceAdvertisesTheEnforcedRetention(t *testing.T) {
+	s := newStudio(t)
+	limits := s.get("/v2/service")["service"].(map[string]any)["limits"].(map[string]any)
+	for key, window := range map[string]time.Duration{
+		"event_retention_days":       eventRetention,
+		"idempotency_retention_days": idempotencyRetention,
+	} {
+		if limits[key] != float64(window/(24*time.Hour)) {
+			t.Errorf("limits.%s = %v, enforced window is %v", key, limits[key], window)
+		}
 	}
 }

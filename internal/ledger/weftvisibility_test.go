@@ -3,6 +3,7 @@ package ledger
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -140,10 +141,17 @@ func TestWeftOutputPruneSparesAuthoritativeState(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT count(*) FROM weft_events WHERE ts>=?`, weftTimestamp(now.Add(-7*24*time.Hour))).Scan(&recent); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.PruneWeftRetention(now.Add(-7 * 24 * time.Hour)); err != nil {
+	pruned, err := s.PruneWeftRetention(now.Add(-7*24*time.Hour), now.Add(-7*24*time.Hour))
+	if err != nil {
 		t.Fatal(err)
 	}
 	after := counts(t, s)
+	if want := (WeftPruned{
+		Events: int64(before["weft_events"] - after["weft_events"]),
+		Output: int64(before["weft_output"] - after["weft_output"]),
+	}); pruned != want {
+		t.Errorf("prune reported %+v, removed %+v", pruned, want)
+	}
 	for _, table := range []string{"weft_runs", "weft_segments", "weft_stages", "weft_questions", "weft_answers", "runs"} {
 		if after[table] != before[table] {
 			t.Errorf("%s: %d rows after the prune, %d before", table, after[table], before[table])
@@ -166,6 +174,57 @@ func TestWeftOutputPruneSparesAuthoritativeState(t *testing.T) {
 	run, err := s.GetWeftRun(ended.ID)
 	if err != nil || run.Outcome.String != "finished" || len(run.Stages) != 1 || len(run.Segments) != 2 {
 		t.Fatalf("ended run after the prune = %+v %v", run, err)
+	}
+}
+
+// Events and idempotency records age out by their own cutoffs: rows stamped
+// between the two cutoffs go from one table and stay in the other.
+func TestWeftRetentionPrunesEachTableByItsOwnCutoff(t *testing.T) {
+	s := newStore(t)
+	base := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	stamps := []time.Time{base.Add(-3 * time.Hour), base.Add(-2 * time.Hour), base.Add(-time.Hour)}
+	for i, at := range stamps {
+		if _, err := s.db.Exec(`INSERT INTO weft_events(ts,run_id,type,payload) VALUES(?,'','catalog','{}')`, weftTimestamp(at)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.PutWeftRequest(WeftRequest{TokenID: "token", Key: fmt.Sprint(i), Method: "POST", Path: "/v2/launches",
+			BodySHA: BodySHA(nil), Status: 202, Response: []byte("{}"), CreatedAt: weftTimestamp(at)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remaining := func(query string) []string {
+		t.Helper()
+		rows, err := s.db.Query(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var ts string
+			if err := rows.Scan(&ts); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, ts)
+		}
+		return out
+	}
+	// The event cutoff falls after the first stamp, the request cutoff after
+	// the second, so swapping them changes what each table keeps.
+	pruned, err := s.PruneWeftRetention(stamps[0].Add(time.Minute), stamps[1].Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (WeftPruned{Events: 1, Requests: 2}); pruned != want {
+		t.Errorf("prune reported %+v, want %+v", pruned, want)
+	}
+	events := remaining(`SELECT ts FROM weft_events ORDER BY ts`)
+	if want := []string{weftTimestamp(stamps[1]), weftTimestamp(stamps[2])}; !reflect.DeepEqual(events, want) {
+		t.Errorf("events after the prune = %v, want %v", events, want)
+	}
+	requests := remaining(`SELECT created_at FROM weft_requests ORDER BY created_at`)
+	if want := []string{weftTimestamp(stamps[2])}; !reflect.DeepEqual(requests, want) {
+		t.Errorf("idempotency records after the prune = %v, want %v", requests, want)
 	}
 }
 

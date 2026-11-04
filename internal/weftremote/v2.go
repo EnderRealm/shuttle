@@ -299,9 +299,10 @@ func (s *Service) handleService(w http.ResponseWriter) {
 		"conformance":     conformance(capabilities),
 		"capabilities":    listed,
 		"limits": map[string]any{
-			"capacity_default": ledger.WeftCapacityDefault, "segment_limit": 8,
-			"idempotency_retention_days": 7, "event_retention_days": 7, "settled_entry_hours": 12,
-			"output_retention_bytes": 256 << 10, "terminal_retention_bytes": 4 << 20,
+			"capacity_default": ledger.WeftCapacityDefault, "segment_limit": 8, "settled_entry_hours": 12,
+			"idempotency_retention_days": int(idempotencyRetention / (24 * time.Hour)),
+			"event_retention_days":       int(eventRetention / (24 * time.Hour)),
+			"output_retention_bytes":     256 << 10, "terminal_retention_bytes": 4 << 20,
 			"terminal_scrollback_lines": 10000, "answer_max_bytes": maxAnswerBytes,
 			"folder_handle_seconds": 900,
 		},
@@ -432,6 +433,42 @@ func (s *Service) handleV2Events(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// watchRetention prunes to the retention windows on an interval, so a host
+// whose traffic is all v2 enforces what /v2/service advertises (§4.2, §8.1).
+// A failed pass is logged and the next tick tries again.
+func (s *Service) watchRetention(ctx context.Context) {
+	ticker := time.NewTicker(s.prunePoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		s.stateMu.Lock()
+		err := s.pruneRetention()
+		s.stateMu.Unlock()
+		if err != nil {
+			s.log.Printf("weft retention host=%s: %v", s.hostID, err)
+		}
+	}
+}
+
+// pruneRetention drops what each retention window has aged out, and logs
+// whatever it removed. The caller holds stateMu.
+func (s *Service) pruneRetention() error {
+	now := time.Now()
+	pruned, err := s.store.PruneWeftRetention(now.Add(-eventRetention), now.Add(-idempotencyRetention))
+	if err != nil {
+		return err
+	}
+	if pruned != (ledger.WeftPruned{}) {
+		s.log.Printf("weft retention host=%s: pruned %d events, %d output chunks, %d idempotency records",
+			s.hostID, pruned.Events, pruned.Output, pruned.Requests)
+	}
+	return nil
 }
 
 // watchCatalog rereads tk on an interval so a change made outside Shuttle —
