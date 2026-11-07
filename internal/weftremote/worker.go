@@ -25,7 +25,7 @@ const WorkerContractV2 = "weft-worker/v2"
 // version document may list.
 var workerCapabilities = []string{
 	"segment", "land", "reconcile", "cleanup", "archive", "output", "liveness", "allowance",
-	"stale_base_check", "trial_environment",
+	"stale_base_check", "trial_environment", "agent_user",
 }
 
 // The bounds every probe of worker_bin runs under: a probe that outlives its

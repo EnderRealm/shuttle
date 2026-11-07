@@ -732,6 +732,10 @@ func TestWorkerProbeGatesOutputAndKeepsV1Dispatch(t *testing.T) {
 	if c := output(); c["state"] != "not_served" || !strings.Contains(c["reason"].(string), "lacks liveness") {
 		t.Fatalf("output without liveness = %v", c)
 	}
+	version(`["weft-remote/v1","weft-worker/v2"]`, `["segment","output","liveness","agent_user"]`)
+	if w := h.service.segments.worker.Load(); !w.has("agent_user") {
+		t.Fatalf("worker listing agent_user = %+v", w)
+	}
 	version(`["weft-remote/v1","weft-worker/v2"]`, `["segment","output","liveness","telepathy"]`)
 	if c := output(); c["state"] != "not_served" || !strings.Contains(c["reason"].(string), "undeclared or repeated capability") {
 		t.Fatalf("output under an undeclared capability = %v", c)
