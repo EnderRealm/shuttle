@@ -196,74 +196,84 @@ type WeftBinding struct {
 // names them. Each project's repository binding is kept as read, so a
 // repository resource names its projects (§6.2).
 func (s *Store) SyncWeftCatalog(bindings map[string]WeftBinding) (revisions map[string]int64, changed []string, err error) {
-	revisions = map[string]int64{}
 	err = s.withTx(func(tx *sql.Tx) error {
-		type row struct {
-			revision int64
-			digest   string
-		}
-		recorded := map[string]row{}
-		rows, err := tx.Query(`SELECT project,revision,digest FROM weft_catalog`)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var name string
-			var r row
-			if err := rows.Scan(&name, &r.revision, &r.digest); err != nil {
-				rows.Close()
-				return err
-			}
-			recorded[name] = r
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		var names []string
-		for name := range recorded {
-			names = append(names, name)
-		}
-		for name := range bindings {
-			if _, ok := recorded[name]; !ok {
-				names = append(names, name)
-			}
-		}
-		slices.Sort(names)
-		stamp := weftTimestamp(s.now())
-		for _, name := range names {
-			binding := bindings[name]
-			digest := binding.Digest
-			prior, seen := recorded[name]
-			if seen {
-				if _, err := tx.Exec(`UPDATE weft_catalog SET repository_id=?,repository=? WHERE project=?`,
-					nullString(binding.RepositoryID), nullString(binding.Repository), name); err != nil {
-					return err
-				}
-			}
-			switch {
-			case !seen:
-				if _, err := tx.Exec(`INSERT INTO weft_catalog(project,revision,digest,repository_id,repository) VALUES(?,0,?,?,?)`,
-					name, digest, nullString(binding.RepositoryID), nullString(binding.Repository)); err != nil {
-					return err
-				}
-			case prior.digest != digest:
-				prior.revision++
-				if _, err := tx.Exec(`UPDATE weft_catalog SET revision=?,digest=? WHERE project=?`, prior.revision, digest, name); err != nil {
-					return err
-				}
-			default:
-				revisions[name] = prior.revision
-				continue
-			}
-			revisions[name] = prior.revision
-			changed = append(changed, name)
-			if err := appendCatalogEventTx(tx, name, prior.revision, stamp); err != nil {
-				return err
-			}
-		}
-		return nil
+		revisions, changed, err = syncWeftCatalogTx(tx, bindings, weftTimestamp(s.now()))
+		return err
 	})
 	return revisions, changed, err
+}
+
+// SyncCatalog is SyncWeftCatalog inside this transaction.
+func (t *WeftTx) SyncCatalog(bindings map[string]WeftBinding) (map[string]int64, []string, error) {
+	return syncWeftCatalogTx(t.tx, bindings, t.Stamp())
+}
+
+func syncWeftCatalogTx(tx *sql.Tx, bindings map[string]WeftBinding, stamp string) (map[string]int64, []string, error) {
+	revisions := map[string]int64{}
+	var changed []string
+	type row struct {
+		revision int64
+		digest   string
+	}
+	recorded := map[string]row{}
+	rows, err := tx.Query(`SELECT project,revision,digest FROM weft_catalog`)
+	if err != nil {
+		return nil, nil, err
+	}
+	for rows.Next() {
+		var name string
+		var r row
+		if err := rows.Scan(&name, &r.revision, &r.digest); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		recorded[name] = r
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, err
+	}
+	var names []string
+	for name := range recorded {
+		names = append(names, name)
+	}
+	for name := range bindings {
+		if _, ok := recorded[name]; !ok {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		binding := bindings[name]
+		digest := binding.Digest
+		prior, seen := recorded[name]
+		if seen {
+			if _, err := tx.Exec(`UPDATE weft_catalog SET repository_id=?,repository=? WHERE project=?`,
+				nullString(binding.RepositoryID), nullString(binding.Repository), name); err != nil {
+				return nil, nil, err
+			}
+		}
+		switch {
+		case !seen:
+			if _, err := tx.Exec(`INSERT INTO weft_catalog(project,revision,digest,repository_id,repository) VALUES(?,0,?,?,?)`,
+				name, digest, nullString(binding.RepositoryID), nullString(binding.Repository)); err != nil {
+				return nil, nil, err
+			}
+		case prior.digest != digest:
+			prior.revision++
+			if _, err := tx.Exec(`UPDATE weft_catalog SET revision=?,digest=? WHERE project=?`, prior.revision, digest, name); err != nil {
+				return nil, nil, err
+			}
+		default:
+			revisions[name] = prior.revision
+			continue
+		}
+		revisions[name] = prior.revision
+		changed = append(changed, name)
+		if err := appendCatalogEventTx(tx, name, prior.revision, stamp); err != nil {
+			return nil, nil, err
+		}
+	}
+	return revisions, changed, nil
 }
 
 func appendCatalogEventTx(tx *sql.Tx, project string, revision int64, stamp string) error {
@@ -415,7 +425,13 @@ type WeftEntryRef struct {
 // WeftPendingEntries maps each ticket to its latest entry still waiting or
 // archiving.
 func (s *Store) WeftPendingEntries() (map[string]WeftEntryRef, error) {
-	rows, err := s.db.Query(`SELECT id,kind,state,ticket FROM weft_entries
+	return weftPendingEntries(s.db)
+}
+
+func (t *WeftTx) PendingEntries() (map[string]WeftEntryRef, error) { return weftPendingEntries(t.tx) }
+
+func weftPendingEntries(q querier) (map[string]WeftEntryRef, error) {
+	rows, err := q.Query(`SELECT id,kind,state,ticket FROM weft_entries
 		WHERE state IN ('waiting','archiving') ORDER BY position`)
 	if err != nil {
 		return nil, err
@@ -442,6 +458,15 @@ type WeftRunQuery struct {
 // QueryWeftRuns reads runs newest first, ties broken by id so a page boundary
 // is exact.
 func (s *Store) QueryWeftRuns(q WeftRunQuery) ([]*WeftRun, error) {
+	return queryWeftRuns(s.db, q)
+}
+
+// WeftRuns is the ticket's runs, newest first.
+func (t *WeftTx) WeftRuns(ticket string) ([]*WeftRun, error) {
+	return queryWeftRuns(t.tx, WeftRunQuery{Ticket: ticket})
+}
+
+func queryWeftRuns(db querier, q WeftRunQuery) ([]*WeftRun, error) {
 	query := `SELECT ` + weftRunColumns + ` FROM weft_runs`
 	var where []string
 	var args []any
@@ -472,7 +497,7 @@ func (s *Store) QueryWeftRuns(q WeftRunQuery) ([]*WeftRun, error) {
 	if q.Limit > 0 {
 		query += " LIMIT " + strconv.Itoa(q.Limit)
 	}
-	rows, err := s.db.Query(query, args...)
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +518,7 @@ func (s *Store) QueryWeftRuns(q WeftRunQuery) ([]*WeftRun, error) {
 		return nil, err
 	}
 	for _, run := range out {
-		if err := loadWeftChildren(s.db, run); err != nil {
+		if err := loadWeftChildren(db, run); err != nil {
 			return nil, err
 		}
 	}

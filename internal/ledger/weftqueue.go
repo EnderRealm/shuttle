@@ -571,6 +571,35 @@ func (t *WeftTx) guard(ticket, runID string) error {
 	return nil
 }
 
+// EditGuard is §5.4's guard on a ticket edit: §6.2's with no run excepted,
+// reaching every run whose settlement is reconciling and every waiting or
+// archiving entry but a cleanup, which writes no ticket status. Each of those
+// may still write the ticket's status, so a hand edit never races it.
+func (t *WeftTx) EditGuard(ticket string) error {
+	var run, phase, settlement string
+	err := t.tx.QueryRow(`SELECT id,phase,settlement_state FROM weft_runs WHERE ticket=? AND (phase IN (?,?,?,?) OR settlement_state=?)
+		ORDER BY created_at LIMIT 1`, ticket, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked, WeftPhaseSettling,
+		WeftSettlementReconciling).Scan(&run, &phase, &settlement)
+	switch {
+	case err == nil && settlement == WeftSettlementReconciling:
+		return refuse("ticket_in_flight", "%s has run %s reconciling its landing; edit the ticket once that run is over", ticket, run)
+	case err == nil:
+		return refuse("ticket_in_flight", "%s has run %s in phase %s; edit the ticket once that run is over", ticket, run, WeftV2Phase(phase))
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
+	var entry, kind, state string
+	err = t.tx.QueryRow(`SELECT id,kind,state FROM weft_entries WHERE ticket=? AND state IN (?,?) AND kind<>?
+		ORDER BY position LIMIT 1`, ticket, WeftEntryWaiting, WeftEntryArchiving, WeftEntryCleanup).Scan(&entry, &kind, &state)
+	switch {
+	case err == nil:
+		return refuse("ticket_in_flight", "%s has %s entry %s %s in the queue; edit the ticket once that entry has left it", ticket, kind, entry, state)
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
+	return nil
+}
+
 func (t *WeftTx) insertEntry(a WeftAdmission) (*WeftEntry, error) {
 	id, err := insertEntryTx(t.tx, a, WeftEntryWaiting, t.store.now())
 	if err != nil {
@@ -1218,31 +1247,27 @@ func (s *Store) DispatchWeft(d WeftDispatch) (spawn []string, changes []WeftChan
 	return spawn, changes, err
 }
 
-// RevalidateWeftEntries rechecks the waiting entries of projects whose
-// catalog changed (§6.3), invalidating visibly those that no longer hold.
-func (s *Store) RevalidateWeftEntries(projects []string, check func(*WeftEntry) (string, string)) (changes []WeftChange, err error) {
-	err = s.WeftTx(func(t *WeftTx) error {
-		for _, project := range projects {
-			entries, err := loadWeftEntries(t.tx, `state=? AND project=?`, WeftEntryWaiting, project)
+// RevalidateEntries rechecks the waiting entries of projects whose catalog
+// changed (§6.3), invalidating visibly those that no longer hold.
+func (t *WeftTx) RevalidateEntries(projects []string, check func(*WeftEntry) (string, string)) error {
+	for _, project := range projects {
+		entries, err := loadWeftEntries(t.tx, `state=? AND project=?`, WeftEntryWaiting, project)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			reason, detail, err := t.revalidate(e, check)
 			if err != nil {
 				return err
 			}
-			for _, e := range entries {
-				reason, detail, err := t.revalidate(e, check)
-				if err != nil {
+			if reason != "" {
+				if err := t.invalidate(e, reason, detail); err != nil {
 					return err
-				}
-				if reason != "" {
-					if err := t.invalidate(e, reason, detail); err != nil {
-						return err
-					}
 				}
 			}
 		}
-		changes = t.Changes
-		return nil
-	})
-	return changes, err
+	}
+	return nil
 }
 
 // WeftReservation is one repository's holder (§6.2).

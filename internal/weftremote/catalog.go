@@ -250,11 +250,28 @@ func projectDigest(p *catalogProject, snap *ticket.Snapshot) (string, error) {
 // with its catalog event, and revalidates those projects' waiting entries
 // against the read (§5.2, §6.3). The caller holds stateMu for writing.
 func (s *Service) recordCatalog(c *catalog) error {
+	var changes []ledger.WeftChange
+	err := s.store.WeftTx(func(tx *ledger.WeftTx) error {
+		if err := s.recordCatalogTx(tx, c); err != nil {
+			return err
+		}
+		changes = tx.Changes
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	s.logChanges("", changes)
+	return nil
+}
+
+// recordCatalogTx is recordCatalog inside a transaction the caller commits.
+func (s *Service) recordCatalogTx(tx *ledger.WeftTx, c *catalog) error {
 	bindings := make(map[string]ledger.WeftBinding, len(c.projects))
 	for _, p := range c.projects {
 		bindings[p.Name] = ledger.WeftBinding{Digest: p.digest, RepositoryID: p.RepositoryID, Repository: p.Repository}
 	}
-	revisions, changed, err := s.store.SyncWeftCatalog(bindings)
+	revisions, changed, err := tx.SyncCatalog(bindings)
 	if err != nil {
 		return err
 	}
@@ -264,12 +281,7 @@ func (s *Service) recordCatalog(c *catalog) error {
 	if len(changed) == 0 {
 		return nil
 	}
-	changes, err := s.store.RevalidateWeftEntries(changed, s.entryCheck(c))
-	if err != nil {
-		return err
-	}
-	s.logChanges("", changes)
-	return nil
+	return tx.RevalidateEntries(changed, s.entryCheck(c))
 }
 
 // syncCatalog is one pass of the host watching tk.
@@ -405,6 +417,12 @@ func (s *Service) handleCatalogTicket(w http.ResponseWriter, id string) {
 		s.v2Error(w, http.StatusNotFound, "ticket_not_found", id+" was not found on host "+s.hostID)
 		return
 	}
+	s.read(w, v.asOf, map[string]any{"ticket": v.ticketDetail(p, t)})
+}
+
+// ticketDetail is one ticket as GET /v2/tickets/{project}/{slug} reads it:
+// its catalog row with its sections, its notes count and its runs.
+func (v *catalogView) ticketDetail(p *catalogProject, t *ticket.Ticket) map[string]any {
 	row := v.ticketRow(p, t)
 	description, _, acceptance, _ := ticket.BodySections(t.Body)
 	row["description"] = nullableText(strings.TrimSpace(description))
@@ -415,7 +433,7 @@ func (s *Service) handleCatalogTicket(w http.ResponseWriter, id string) {
 		runIDs = append(runIDs, run.ID)
 	}
 	row["runs"] = runIDs
-	s.read(w, v.asOf, map[string]any{"ticket": row})
+	return row
 }
 
 // ticketRow is one catalog entry (§5.2): the ticket in whatever status it
