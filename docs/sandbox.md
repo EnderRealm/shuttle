@@ -293,7 +293,12 @@ nothing.
 
 ## Hosted coding profile
 
-Hosted `weft-remote/v1` segments use `CodingProfileJSON`, not the report profile
+Hosted segments no longer run under this profile: each runs as its own agent
+user (`docs/agent-users.md`), and the supervisor writes no profile. What follows
+is the profile segments launched before that ran under; `reap.Restart` still
+sweeps the boundary of such a row left in flight.
+
+Hosted `weft-remote/v1` segments used `CodingProfileJSON`, not the report profile
 above. Shuttle authors one profile before spawning `weft-worker`; the worker is
 given that path and must place every model launch behind `srt -s <profile> --`.
 The host first runs `srt -s <profile> -c true`, and records a `sandbox` failure
@@ -397,8 +402,7 @@ temp dir the supervisor grants. The checkout is writable both on the host and,
 as the segment's worktree, inside a hosted segment; `.gitignore` covers the
 roots a killed run leaves behind. The opt-in `SHUTTLE_LIVE_SRT` fixtures that run the real srt
 are the third: `liveCodingRoot`
-(`internal/sandbox/coding_test.go`) and the `newSupervisorFixtureIn(t,
-"/var/tmp", …)` call in `internal/weftremote/contain_darwin_test.go` keep a
+(`internal/sandbox/coding_test.go`) keeps a
 literal `/var/tmp` root, because their run directory must sit outside every
 coding-profile grant — `/tmp` and the per-user `TMPDIR` — or the coding check
 refuses it as writable. `internal/reap`'s `hostTmpRoot` is the fourth: it keeps
@@ -417,11 +421,7 @@ invocation, under a profile with the coding profile's network keys and its
   another: `/usr/bin/sandbox-exec` exits 71. The containment tests that stand in
   for a model process with a holder under its own profile start one — the nine
   `internal/reap`'s package doc names, failing with `start detached child: exit
-  status 71`, and `internal/weftremote`'s
-  `TestSupervisorContainsDetachedHoldersBeforeReleasingRepository` and
-  `TestSupervisorSettlementLeavesAConcurrentSegmentAlone`, failing with `holder
-  pid: … no such file or directory` or `condition did not become true` while
-  they wait for a holder that never started. `internal/sandbox`'s
+  status 71`. `internal/sandbox`'s
   `TestCheckRefusesAMalformedProfile` runs the real srt, which inside srt fails
   one step earlier: with `allowUnixSockets` empty it cannot bind its own mux
   socket (`Error: listen EPERM: operation not permitted …/srt-mux-<pid>-0.sock`).
@@ -436,12 +436,7 @@ invocation, under a profile with the coding profile's network keys and its
   processes in its own sandbox, so process listing is not in itself denied:
   every `internal/reap` test but the nine above passes inside it.
   `kern.proc.uid` is outside that policy and refused, and it is the listing
-  `reap.Contain`'s sweep starts from. Every `internal/weftremote` test whose
-  fixture segment settles through the supervisor's real containment — most of
-  the supervisor, queue, landing and visibility tests — keeps its repository
-  reservation, logs `containment: kern.proc.uid 501: operation not permitted;
-  reservation retained`, and fails on a timed-out wait (`condition did not
-  become true`) or on that log line. `kern.proc.tty`, which the terminal host
+  `reap.Contain`'s sweep starts from. `kern.proc.tty`, which the terminal host
   lists a PTY's jobs by, is outside the policy too; the terminal tests fail on
   the local bind before reaching it.
 

@@ -114,6 +114,10 @@ type WeftSegment struct {
 	// WorkerContract is the worker protocol the segment was launched under;
 	// NULL is a segment launched before it was recorded, under weft-remote/v1.
 	WorkerContract sql.NullString
+	// AgentUser is the agent user the segment runs as, held from its claim
+	// until it settles; NULL for a maintenance segment and for one claimed
+	// before hosted segments ran as agent users.
+	AgentUser sql.NullString
 }
 
 type WeftStage struct {
@@ -181,6 +185,8 @@ type WeftRequest struct {
 
 type WeftLaunch struct {
 	Ticket, Project, Repo, Branch, Worktree, RunDirRoot string
+	// AgentUser is the agent user the first segment is claimed with.
+	AgentUser string
 }
 
 // ClaimWeft creates an API run, its first phase-1 ledger segment and the
@@ -240,8 +246,8 @@ func mintWeftRunTx(tx *sql.Tx, p WeftLaunch, now time.Time, entryID, recordedUnd
 	if err := insertWeftLedgerRunTx(tx, ledgerID, runDir, stamp, now); err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(`INSERT INTO weft_segments(run_id,segment,kind,ledger_run_id)
-		VALUES(?,?,?,?)`, runID, 1, "launch", ledgerID); err != nil {
+	if _, err := tx.Exec(`INSERT INTO weft_segments(run_id,segment,kind,ledger_run_id,agent_user)
+		VALUES(?,?,?,?,?)`, runID, 1, "launch", ledgerID, nullString(p.AgentUser)); err != nil {
 		return "", err
 	}
 	return runID, nil
@@ -307,7 +313,7 @@ func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot string) (*We
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, ErrWeftQuestionPending
 	}
-	if _, err := claimNextSegmentTx(tx, run, "answer", answerID, runDirRoot, s.now()); err != nil {
+	if _, err := claimNextSegmentTx(tx, run, "answer", answerID, "", runDirRoot, s.now()); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(`UPDATE weft_runs SET summary=NULL WHERE id=?`, runID); err != nil {
@@ -341,10 +347,10 @@ func (s *Store) ClaimWeftAnswer(runID, questionID, text, runDirRoot string) (*We
 const WeftSegmentLimit = 8
 
 // claimNextSegmentTx claims the run's next segment of kind — an answer or a
-// resume — with its phase-1 ledger row, takes the repository reservation and
-// moves the run back to queued, keeping the last summary until the worker
-// reports another. The caller writes the run event.
-func claimNextSegmentTx(tx *sql.Tx, run *WeftRun, kind, answerID, runDirRoot string, now time.Time) (int, error) {
+// resume — as agentUser with its phase-1 ledger row, takes the repository
+// reservation and moves the run back to queued, keeping the last summary
+// until the worker reports another. The caller writes the run event.
+func claimNextSegmentTx(tx *sql.Tx, run *WeftRun, kind, answerID, agentUser, runDirRoot string, now time.Time) (int, error) {
 	segment, err := nextSegmentTx(tx, run.ID)
 	if err != nil {
 		return 0, err
@@ -356,7 +362,7 @@ func claimNextSegmentTx(tx *sql.Tx, run *WeftRun, kind, answerID, runDirRoot str
 	if err := acquireRepository(tx, run.RepositoryID, run.Repo, WeftHolderRun, run.ID, stamp); err != nil {
 		return 0, err
 	}
-	if _, err := insertWeftSegmentTx(tx, run.ID, segment, kind, answerID, runDirRoot, now); err != nil {
+	if _, err := insertWeftSegmentTx(tx, run.ID, segment, kind, answerID, agentUser, runDirRoot, now); err != nil {
 		return 0, err
 	}
 	// A new pipeline segment is a new attempt: a stop of an earlier one does
@@ -435,7 +441,7 @@ func nextSegmentTx(tx *sql.Tx, runID string) (int, error) {
 	return n, err
 }
 
-func insertWeftSegmentTx(tx *sql.Tx, runID string, segment int, kind, answerID, runDirRoot string, now time.Time) (string, error) {
+func insertWeftSegmentTx(tx *sql.Tx, runID string, segment int, kind, answerID, agentUser, runDirRoot string, now time.Time) (string, error) {
 	ledgerID, err := NewRunID(WeftAgent, now.UTC())
 	if err != nil {
 		return "", err
@@ -445,8 +451,8 @@ func insertWeftSegmentTx(tx *sql.Tx, runID string, segment int, kind, answerID, 
 	if err := insertWeftLedgerRunTx(tx, ledgerID, runDir, stamp, now); err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(`INSERT INTO weft_segments(run_id,segment,kind,ledger_run_id,answer_id)
-		VALUES(?,?,?,?,?)`, runID, segment, kind, ledgerID, nullString(answerID)); err != nil {
+	if _, err := tx.Exec(`INSERT INTO weft_segments(run_id,segment,kind,ledger_run_id,answer_id,agent_user)
+		VALUES(?,?,?,?,?,?)`, runID, segment, kind, ledgerID, nullString(answerID), nullString(agentUser)); err != nil {
 		return "", err
 	}
 	return ledgerID, nil
@@ -501,7 +507,7 @@ func (s *Store) ClaimWeftResume(runID, runDirRoot string) (*WeftRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := claimNextSegmentTx(tx, run, "resume", answerID, runDirRoot, s.now()); err != nil {
+	if _, err := claimNextSegmentTx(tx, run, "resume", answerID, "", runDirRoot, s.now()); err != nil {
 		return nil, err
 	}
 	if err := appendRunEventTx(tx, runID, weftTimestamp(s.now())); err != nil {
@@ -1059,6 +1065,30 @@ func (s *Store) WeftCodingWorktree(ledgerRunID string) (string, bool, error) {
 	return worktree, true, nil
 }
 
+// WeftAgentSegment is the hosted weft segment a phase-1 row is, when that
+// segment holds an agent user.
+type WeftAgentSegment struct {
+	RunID     string
+	Segment   int
+	AgentUser string
+}
+
+// WeftSegmentAgent answers, for a phase-1 row that is a hosted weft segment
+// holding an agent user, the segment and its user, and ok false for any
+// other row.
+func (s *Store) WeftSegmentAgent(ledgerRunID string) (WeftAgentSegment, bool, error) {
+	var a WeftAgentSegment
+	err := s.db.QueryRow(`SELECT run_id,segment,agent_user FROM weft_segments WHERE ledger_run_id=? AND agent_user IS NOT NULL`,
+		ledgerRunID).Scan(&a.RunID, &a.Segment, &a.AgentUser)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WeftAgentSegment{}, false, nil
+	}
+	if err != nil {
+		return WeftAgentSegment{}, false, err
+	}
+	return a, true, nil
+}
+
 // ReconcileWeftUnknown projects a phase-1 restart closure into the API ledger
 // and releases the reservation only after reap established the process gone.
 // It is §12 steps 1 and 2: a landing segment the pass closed without its
@@ -1211,7 +1241,7 @@ func scanWeftRun(sc scanner) (*WeftRun, error) {
 
 func loadWeftChildren(q querier, run *WeftRun) error {
 	rows, err := q.Query(`SELECT ws.run_id,ws.segment,ws.kind,ws.ledger_run_id,ws.worker_run_id,
-		ws.answer_id,ws.terminal,ws.failure,ws.worker_contract,r.run_dir,r.claimed_at,r.started_at,r.ended_at
+		ws.answer_id,ws.terminal,ws.failure,ws.worker_contract,ws.agent_user,r.run_dir,r.claimed_at,r.started_at,r.ended_at
 		FROM weft_segments ws JOIN runs r ON r.id=ws.ledger_run_id
 		WHERE ws.run_id=? ORDER BY ws.segment`, run.ID)
 	if err != nil {
@@ -1220,7 +1250,7 @@ func loadWeftChildren(q querier, run *WeftRun) error {
 	for rows.Next() {
 		var seg WeftSegment
 		if err := rows.Scan(&seg.RunID, &seg.Segment, &seg.Kind, &seg.LedgerRunID,
-			&seg.WorkerRunID, &seg.AnswerID, &seg.Terminal, &seg.Failure, &seg.WorkerContract,
+			&seg.WorkerRunID, &seg.AnswerID, &seg.Terminal, &seg.Failure, &seg.WorkerContract, &seg.AgentUser,
 			&seg.RunDir, &seg.ClaimedAt, &seg.StartedAt, &seg.EndedAt); err != nil {
 			rows.Close()
 			return err

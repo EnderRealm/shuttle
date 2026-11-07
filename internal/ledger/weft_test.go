@@ -410,7 +410,7 @@ func TestRestartSettlesArchivingEntriesByTheirArchiveRef(t *testing.T) {
 		t.Fatalf("archiving entries hold %+v slots, %v", c, err)
 	}
 	var asked []string
-	released, _, spawn, err := s.RestartWeftQueue(WeftDispatch{WeftRoot: filepath.Join(root, "weft"), RunDirRoot: runs},
+	released, _, spawn, err := s.RestartWeftQueue(WeftDispatch{SharedRoot: filepath.Join(root, "weft"), RunDirRoot: runs, AgentUsers: []string{"weftagent1", "weftagent2"}},
 		func(repo, ref string) (string, error) {
 			asked = append(asked, ref)
 			if ref == "refs/weft/archive/"+first.ID {

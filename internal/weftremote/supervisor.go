@@ -1,7 +1,6 @@
 package weftremote
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -31,10 +30,6 @@ var segmentKillGrace = 5 * time.Second
 const segmentKillPoll = 50 * time.Millisecond
 
 var afterWorkerSpawn = func() {}
-
-// containSegment is the sweep a coding segment's settlement waits on. A var
-// so a test can drive a boundary that will not empty.
-var containSegment = reap.Contain
 
 // containSession is the sweep of what is left of a segment's worker session.
 // A var so a test can watch it, or drive a session that will not empty.
@@ -92,6 +87,13 @@ type Supervisor struct {
 	probeMu sync.Mutex
 	// output wakes the output streams when a chunk is retained.
 	output *broadcast
+	// sharedRoot is the root a new run's worktree is derived under, whose
+	// worktrees/ is every segment's --worktree-root: config.HostedSharedRoot,
+	// which a test moves.
+	sharedRoot string
+	// killUser kills every process of a segment's agent user; a test hands
+	// it a process table of its own.
+	killUser func(user string) ([]reap.UserProcess, error)
 }
 
 func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger *log.Logger, locks ...*sync.RWMutex) *Supervisor {
@@ -102,6 +104,7 @@ func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger 
 	return &Supervisor{
 		cfg: cfg, store: store, home: home, log: logger, stateMu: stateMu,
 		active: make(map[string]*activeSegment), stopping: make(map[string]bool), output: newBroadcast(),
+		sharedRoot: config.HostedSharedRoot, killUser: reap.KillUser,
 	}
 }
 
@@ -157,13 +160,23 @@ func landServed(w *workerInfo) bool { return w.has("land") && w.has("reconcile")
 // so it is safe inside a ledger transaction.
 func (s *Supervisor) dispatchBase() ledger.WeftDispatch {
 	return ledger.WeftDispatch{
-		WeftRoot: s.cfg.Weft.Root, RunDirRoot: filepath.Join(s.home, "runs", ledger.WeftAgent),
-		Land: landServed(s.worker.Load()),
+		SharedRoot: s.sharedRoot, RunDirRoot: filepath.Join(s.home, "runs", ledger.WeftAgent),
+		AgentUsers: s.cfg.Weft.AgentUsers, Land: landServed(s.worker.Load()),
 	}
 }
 
-// maintenance reports whether a segment kind launches no model: it needs no
-// sandbox profile and holds no slot (§11.1).
+// worktreeRoot is the --worktree-root every segment is launched with.
+func (s *Supervisor) worktreeRoot() string { return filepath.Join(s.sharedRoot, sandbox.WorktreesDir) }
+
+// hosted reports whether the run's worktree is under the worktree root,
+// where agent users can reach it; a run launched before they ran its
+// segments has its worktree under weft_root.
+func (s *Supervisor) hosted(run *ledger.WeftRun) bool {
+	return strings.HasPrefix(run.Worktree, s.worktreeRoot()+string(filepath.Separator))
+}
+
+// maintenance reports whether a segment kind launches no model: it runs as
+// the operator, holds no agent user and holds no slot (§11.1).
 func maintenance(kind string) bool {
 	return oneOf(kind, ledger.WeftSegmentReconcile, ledger.WeftSegmentCleanup, ledger.WeftSegmentArchive)
 }
@@ -226,14 +239,13 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		return nil, err
 	}
 	var l *launch
-	class := ledger.ClassPreflight
 	if maintenance(segment.Kind) {
 		l, err = s.prepareMaintenance(run, segment, runDir)
 	} else {
-		l, class, err = s.preparePipeline(run, segment, runDir)
+		l, err = s.preparePipeline(run, segment, runDir)
 	}
 	if err != nil {
-		return s.failBeforeSpawn(run, segment, class, err)
+		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
 	}
 	argv, env, contract, worker := l.argv, l.env, l.contract, l.worker
 	if err := writeRunRecord(runDir, run, segment, contract, argv, env, 0); err != nil {
@@ -421,18 +433,24 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 			}
 		}
 	}
-	if err := ensureProcessGroupGone(cmd.Process.Pid); err != nil {
+	// The agent's processes share the worker's process group and session,
+	// where the operator's signals do not reach them: the group and session
+	// sweeps would outlast their SIGKILL. So the user goes first, and again
+	// once the operator's processes are gone, since one of those could have
+	// launched another as the user in between.
+	if err := s.containUser(run, segment); err != nil {
 		return nil, err
 	}
-	if !maintenance(segment.Kind) {
-		if err := s.contain(run, segment, runDir); err != nil {
-			return nil, err
-		}
+	if err := ensureProcessGroupGone(cmd.Process.Pid); err != nil {
+		return nil, err
 	}
 	if exitErr != nil {
 		return nil, fmt.Errorf("weft segment %s: %w; reservation retained", segmentIDs(s.hostID, run.ID, segment, ""), exitErr)
 	}
 	if err := s.containSession(run, segment, cmd.Process.Pid); err != nil {
+		return nil, err
+	}
+	if err := s.containUser(run, segment); err != nil {
 		return nil, err
 	}
 	waitErr := cmd.Wait()
@@ -482,67 +500,47 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 }
 
 // preparePipeline is a launch, answer or resume segment's preflight: the
-// coding sandbox profile established, the answer file written, and --land
-// passed while the worker can land (§7.1). Its failure carries its class.
-func (s *Supervisor) preparePipeline(run *ledger.WeftRun, segment ledger.WeftSegment, runDir string) (*launch, string, error) {
+// segment's agent user and a worker that can launch as it, a worktree that
+// user can reach, the answer file written, and --land passed while the worker
+// can land (§7.1).
+func (s *Supervisor) preparePipeline(run *ledger.WeftRun, segment ledger.WeftSegment, runDir string) (*launch, error) {
+	if !segment.AgentUser.Valid {
+		return nil, fmt.Errorf("segment %d holds no agent user: it was claimed before hosted segments ran as agent users", segment.Segment)
+	}
+	if !s.hosted(run) {
+		return nil, fmt.Errorf("run %s's worktree %s is not under %s, where agent users can reach it; start the run fresh", run.ID, run.Worktree, s.worktreeRoot())
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return nil, ledger.ClassPreflight, err
-	}
-	catalog, err := loadTickets(s.cfg.Paths.TKConfig)
-	if err != nil {
-		return nil, ledger.ClassPreflight, err
-	}
-	userTempDir, err := sandbox.UserTempDir()
-	if err != nil {
-		return nil, ledger.ClassPreflight, err
-	}
-	coding := sandbox.CodingOptions{
-		SRTBin: s.cfg.Paths.SRTBin, RunDir: runDir, HomeDir: homeDir, PATH: workerPath,
-		Repo: run.Repo, TicketsRoot: catalog.config.CentralRoot, Worktree: run.Worktree,
-		UserTempDir:    userTempDir,
-		AllowedDomains: s.cfg.Weft.Sandbox.AllowedDomains,
-		AllowWrite:     s.cfg.Weft.Sandbox.AllowWrite,
+		return nil, err
 	}
 	if err := executable(s.cfg.Weft.WorkerBin); err != nil {
-		return nil, ledger.ClassPreflight, err
+		return nil, err
 	}
-	// A worker that speaks weft-worker/v2 is launched under it; one that does
-	// not keeps the developmental slice's weft-remote/v1 dispatch (§2.4).
-	l := &launch{worker: s.refreshWorker(), contract: ContractVersion}
-	if l.worker.speaks(WorkerContractV2) {
-		l.contract = WorkerContractV2
-		l.land = landServed(l.worker)
+	l := &launch{worker: s.refreshWorker(), contract: WorkerContractV2}
+	if !l.worker.has("agent_user") {
+		return nil, fmt.Errorf("%s does not speak %s with the agent_user capability", s.cfg.Weft.WorkerBin, WorkerContractV2)
 	}
+	l.land = landServed(l.worker)
 	oauthToken, err := s.oauthToken()
 	if err != nil {
-		return nil, ledger.ClassPreflight, err
+		return nil, err
 	}
-	if err := executable(s.cfg.Paths.SRTBin); err != nil {
-		return nil, ledger.ClassSandbox, err
-	}
-	profilePath, err := sandbox.WriteCodingProfile(coding)
-	if err != nil {
-		return nil, ledger.ClassSandbox, err
-	}
-	checkCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	err = sandbox.CheckCoding(checkCtx, coding)
-	cancel()
-	if err != nil {
-		return nil, ledger.ClassSandbox, err
+	if err := os.MkdirAll(sandbox.SegmentTmpDir(runDir), 0o700); err != nil {
+		return nil, err
 	}
 	answerPath, err := s.writeAnswer(run, segment, runDir, l.contract)
 	if err != nil {
-		return nil, ledger.ClassPreflight, err
+		return nil, err
 	}
-	l.argv = s.argv(run, segment, l.contract, profilePath, answerPath, l.land)
+	l.argv = s.argv(run, segment, l.contract, answerPath, l.land)
 	l.env = s.environ(homeDir, runDir, oauthToken)
-	return l, "", nil
+	return l, nil
 }
 
 // prepareMaintenance is a reconcile, cleanup or archive segment's preflight
-// (§11.1): it launches no model, so it needs no sandbox profile, only a
-// weft-worker/v2 worker with its kind's capability.
+// (§11.1): it launches no model, so it runs as the operator with no agent
+// user, needing only a weft-worker/v2 worker with its kind's capability.
 func (s *Supervisor) prepareMaintenance(run *ledger.WeftRun, segment ledger.WeftSegment, runDir string) (*launch, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -564,6 +562,12 @@ func (s *Supervisor) prepareMaintenance(run *ledger.WeftRun, segment ledger.Weft
 		"--run", run.ID, "--segment", fmt.Sprint(segment.Segment),
 		"--ticket", run.Ticket, "--repo", run.Repo, "--weft-root", s.cfg.Weft.Root,
 	}
+	// A run whose segments were launched as agent users has its worktree and
+	// base record where its maintenance can find them only under the same
+	// --worktree-root (§11.1); one launched before has them under weft_root.
+	if s.hosted(run) {
+		l.argv = append(l.argv, "--worktree-root", s.worktreeRoot())
+	}
 	switch segment.Kind {
 	case ledger.WeftSegmentReconcile:
 		l.argv = append(l.argv, "--worker-run", latestWorkerBefore(run, segment.Segment))
@@ -584,19 +588,24 @@ func (s *Supervisor) prepareMaintenance(run *ledger.WeftRun, segment ledger.Weft
 }
 
 // worktreeMoved is why a cleanup or archive may not run: the worktree it
-// derives from weft_root as configured now is not the run's, which the
-// operator authorized. "" when it is.
+// derives as configured now is not the run's, which the operator authorized.
+// "" when it is. A run launched as agent users derives under the shared root,
+// one launched before under weft_root.
 func (s *Supervisor) worktreeMoved(run *ledger.WeftRun, segment ledger.WeftSegment) string {
 	if segment.Kind != ledger.WeftSegmentCleanup && segment.Kind != ledger.WeftSegmentArchive {
 		return ""
 	}
-	worktree, err := sandbox.WorktreePath(s.cfg.Weft.Root, run.Repo, run.Ticket)
+	root := s.cfg.Weft.Root
+	if s.hosted(run) {
+		root = s.sharedRoot
+	}
+	worktree, err := sandbox.WorktreePath(root, run.Repo, run.Ticket)
 	switch {
 	case err != nil:
-		return fmt.Sprintf("not launched: the %s worktree under weft_root %s cannot be derived: %v", segment.Kind, s.cfg.Weft.Root, err)
+		return fmt.Sprintf("not launched: the %s worktree under %s cannot be derived: %v", segment.Kind, root, err)
 	case worktree != run.Worktree:
-		return fmt.Sprintf("not launched: under weft_root %s the %s would act on %s, not run %s's worktree %s",
-			s.cfg.Weft.Root, segment.Kind, worktree, run.ID, run.Worktree)
+		return fmt.Sprintf("not launched: under %s the %s would act on %s, not run %s's worktree %s",
+			root, segment.Kind, worktree, run.ID, run.Worktree)
 	}
 	return ""
 }
@@ -674,15 +683,23 @@ func ensureProcessGroupGone(pgid int) error {
 	return nil
 }
 
-// contain is the rest of that boundary for a segment that ran under the
-// coding profile: a descendant that called setsid left the process group with
-// the profile's write grant. Until the sweep establishes that no process holds
-// it, the segment is not settled and its reservation is retained.
-func (s *Supervisor) contain(run *ledger.WeftRun, segment ledger.WeftSegment, runDir string) error {
+// containUser is the rest of that boundary for a segment that runs as an
+// agent user: every process of the user is killed, which reaches a
+// descendant that called setsid. The user is the segment's alone, so nothing
+// of it is another's. Until the kill establishes that none is left the
+// segment is not settled, so its user and its reservation are retained.
+func (s *Supervisor) containUser(run *ledger.WeftRun, segment ledger.WeftSegment) error {
+	if !segment.AgentUser.Valid {
+		return nil
+	}
 	ids := segmentIDs(s.hostID, run.ID, segment, "")
-	c, err := containSegment(reap.SegmentBoundary(runDir))
-	if c.Found() {
-		s.log.Printf("weft segment %s: containment %s", ids, c)
+	found, err := s.killUser(segment.AgentUser.String)
+	if len(found) > 0 {
+		names := make([]string, len(found))
+		for i, p := range found {
+			names[i] = p.String()
+		}
+		s.log.Printf("weft segment %s: agent user %s: killed %d process(es) %s", ids, segment.AgentUser.String, len(found), strings.Join(names, " "))
 	}
 	if err != nil {
 		return fmt.Errorf("weft segment %s: containment: %w; reservation retained", ids, err)
@@ -755,14 +772,15 @@ func executable(path string) error {
 	return nil
 }
 
-// argv is a pipeline segment's command line, with --land while the host
-// lands (§7.1).
-func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, contract, profilePath, answerPath string, land bool) []string {
+// argv is a pipeline segment's command line: as its agent user, with --land
+// while the host lands (§7.1, §11.6). It carries no credential: argv is
+// visible to every user on the machine, the agents included.
+func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, contract, answerPath string, land bool) []string {
 	argv := []string{
 		s.cfg.Weft.WorkerBin, "segment", "--contract", contract,
 		"--run", run.ID, "--segment", fmt.Sprint(segment.Segment),
 		"--ticket", run.Ticket, "--repo", run.Repo, "--weft-root", s.cfg.Weft.Root,
-		"--sandbox-profile", profilePath,
+		"--agent-user", segment.AgentUser.String, "--worktree-root", s.worktreeRoot(),
 	}
 	if land {
 		argv = append(argv, "--land")
@@ -777,10 +795,10 @@ func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, contr
 	return argv
 }
 
-// oauthToken reads the segment's Claude credential. The coding profile denies
-// ~/Library/Keychains, so the subscription token the CLI keeps in the login
-// Keychain has to reach the worker by environment; the error names the item
-// and never the value.
+// oauthToken reads the segment's Claude credential. An agent user cannot read
+// the operator's login Keychain, so the subscription token the CLI keeps
+// there has to reach the worker by environment, and the agent through the
+// sudoers env_keep; the error names the item and never the value.
 func (s *Supervisor) oauthToken() (string, error) {
 	item := s.cfg.WeftOAuthKeychainItem()
 	find := keychain.Find

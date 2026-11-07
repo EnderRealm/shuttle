@@ -123,8 +123,8 @@ func waitArgv(t *testing.T, pid int, argv []string) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		isRun, err := processIsRun(pid, dir)
-		if err == nil && (dir == "" || isRun) {
+		argv, err := processArgv(pid)
+		if err == nil && (dir == "" || runArgv(argv, dir)) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -915,9 +915,9 @@ func TestRestartHoldsARowWhoseIdentityLookupFails(t *testing.T) {
 	cmd := spawn(t, ownedArgv(dir, "sleep 300 & wait"), true)
 	pid := cmd.Process.Pid
 	run := claim(t, s, "2026-09-02T04:30:00-07:00", time.Now(), pid, dir)
-	was := lookupIsRun
-	lookupIsRun = func(int, string) (bool, error) { return false, errors.New("sysctl: boom") }
-	t.Cleanup(func() { lookupIsRun = was })
+	was := lookupArgv
+	lookupArgv = func(int) ([]string, error) { return nil, errors.New("sysctl: boom") }
+	t.Cleanup(func() { lookupArgv = was })
 
 	outcomes := restart(t, s)
 	assertOutcome(t, outcomes[0], run, ActionUnresolved, pid)

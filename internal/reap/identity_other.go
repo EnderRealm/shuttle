@@ -14,7 +14,7 @@ var errNoIdentity = errors.New("process identity is not readable on this platfor
 
 func processStart(int) (time.Time, error) { return time.Time{}, errNoIdentity }
 
-func processIsRun(int, string) (bool, error) { return false, errNoIdentity }
+func processArgv(int) ([]string, error) { return nil, errNoIdentity }
 
 func groupMembers(int) ([]member, error) { return nil, errNoIdentity }
 
@@ -23,3 +23,5 @@ func sessionMembers(int) ([]sessionMember, error) { return nil, errNoIdentity }
 func userProcesses() ([]member, error) { return nil, errNoIdentity }
 
 func processState(int) (member, bool, error) { return member{}, false, errNoIdentity }
+
+func uidProcesses(int) ([]UserProcess, error) { return nil, errNoIdentity }

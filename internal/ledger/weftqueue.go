@@ -126,20 +126,120 @@ func (c WeftCapacity) Resource() map[string]any {
 }
 
 func weftCapacity(q querier) (WeftCapacity, error) {
-	c := WeftCapacity{Cap: WeftCapacityDefault}
-	var capacity sql.NullString
-	err := q.QueryRow(`SELECT (SELECT value FROM weft_settings WHERE key=?), (`+weftRunningSQL+`),
-		(SELECT count(*) FROM weft_entries WHERE state=?)`, weftCapacityKey, WeftEntryWaiting).
-		Scan(&capacity, &c.Running, &c.Waiting)
+	var c WeftCapacity
+	var capacity, users sql.NullString
+	err := q.QueryRow(`SELECT (SELECT value FROM weft_settings WHERE key=?), (SELECT value FROM weft_settings WHERE key=?),
+		(`+weftRunningSQL+`), (SELECT count(*) FROM weft_entries WHERE state=?)`,
+		weftCapacityKey, weftAgentUsersKey, WeftEntryWaiting).
+		Scan(&capacity, &users, &c.Running, &c.Waiting)
 	if err != nil {
 		return c, err
 	}
+	c.Cap, err = weftCap(capacity, users)
+	return c, err
+}
+
+// weftCap is the cap as stored, else WeftCapacityDefault bounded by the
+// host's agent users once they are recorded. A stored cap above that count is
+// refused at service start (ConfigureWeftAgentUsers) and by the capacity
+// route, not bounded here.
+func weftCap(capacity, users sql.NullString) (int, error) {
 	if capacity.Valid {
-		if c.Cap, err = strconv.Atoi(capacity.String); err != nil {
-			return c, fmt.Errorf("weft capacity %q: %w", capacity.String, err)
+		n, err := strconv.Atoi(capacity.String)
+		if err != nil {
+			return 0, fmt.Errorf("weft capacity %q: %w", capacity.String, err)
+		}
+		return n, nil
+	}
+	if !users.Valid {
+		return WeftCapacityDefault, nil
+	}
+	n, err := strconv.Atoi(users.String)
+	if err != nil {
+		return 0, fmt.Errorf("weft agent users %q: %w", users.String, err)
+	}
+	return min(WeftCapacityDefault, n), nil
+}
+
+// ConfigureWeftAgentUsers records how many agent users the host has, which
+// an unset cap defaults to at most (§6.1), and refuses a stored cap above
+// that: every live segment runs as its own agent user, so such a cap could
+// never be met. A cap the count moves is announced by its capacity event.
+func (s *Store) ConfigureWeftAgentUsers(n int) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		var stored sql.NullString
+		err := tx.QueryRow(`SELECT value FROM weft_settings WHERE key=?`, weftCapacityKey).Scan(&stored)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if stored.Valid {
+			capacity, err := strconv.Atoi(stored.String)
+			if err != nil {
+				return fmt.Errorf("weft capacity %q: %w", stored.String, err)
+			}
+			if capacity > n {
+				return fmt.Errorf("the weft capacity stored in the ledger is %d, more than the %d agent user(s) in weft.agent_users: every live segment runs as its own agent user. Add agent users, or lower the capacity to %d or less with PUT /v2/queue/capacity while there are enough",
+					capacity, n, n)
+			}
+		}
+		before, err := weftCapacity(tx)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO weft_settings(key,value) VALUES(?,?)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value`, weftAgentUsersKey, strconv.Itoa(n)); err != nil {
+			return err
+		}
+		after, err := weftCapacity(tx)
+		if err != nil || after.Cap == before.Cap {
+			return err
+		}
+		return capacityStepTx(tx, weftTimestamp(s.now()))
+	})
+}
+
+// weftHeldAgentUsersSQL is every agent user a pipeline segment holds: one
+// whose phase-1 row is claimed or running. A segment settles only once its
+// user's processes are gone, so a user is free again only after that.
+const weftHeldAgentUsersSQL = `SELECT s.agent_user FROM weft_segments s JOIN runs r ON r.id=s.ledger_run_id
+	WHERE s.agent_user IS NOT NULL AND r.status IN ('` + StatusClaimed + `','` + StatusRunning + `')`
+
+// freeAgentUser is the first of users no unsettled segment holds, or "" when
+// every one is held.
+func freeAgentUser(q querier, users []string) (string, error) {
+	rows, err := q.Query(weftHeldAgentUsersSQL)
+	if err != nil {
+		return "", err
+	}
+	held := map[string]bool{}
+	for rows.Next() {
+		var user string
+		if err := rows.Scan(&user); err != nil {
+			rows.Close()
+			return "", err
+		}
+		held[user] = true
+	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
+	for _, user := range users {
+		if !held[user] {
+			return user, nil
 		}
 	}
-	return c, nil
+	return "", nil
+}
+
+// agentUser is the user the entry's pipeline segment is claimed with.
+// blocking has already made the entry wait while none is free, so none
+// being free here is a ledger that holds more segments than slots.
+func (t *WeftTx) agentUser(e *WeftEntry, d WeftDispatch) (string, error) {
+	user, err := freeAgentUser(t.tx, d.AgentUsers)
+	if err == nil && user == "" {
+		err = fmt.Errorf("entry %s: every one of the %d agent users is held by an unsettled segment", e.ID, len(d.AgentUsers))
+	}
+	return user, err
 }
 
 func queueRevision(q querier) (int64, error) {
@@ -946,7 +1046,11 @@ func (t *WeftTx) SetCapacity(capacity int, revision int64) error {
 
 // WeftDispatch is what dispatch needs from the host.
 type WeftDispatch struct {
-	WeftRoot, RunDirRoot string
+	// SharedRoot is the root a new run's worktree is derived under.
+	SharedRoot, RunDirRoot string
+	// AgentUsers are the host's agent users: a pipeline segment is claimed
+	// with the first one no unsettled segment holds.
+	AgentUsers []string
 	// Land is whether the host serves landing: a run minted while it does is
 	// pending its landing from the start (§7.1).
 	Land bool
@@ -977,7 +1081,7 @@ func (t *WeftTx) Dispatch(d WeftDispatch) error {
 		return err
 	}
 	for _, e := range entries {
-		reason, holderKind, holderID, err := t.blocking(e, paused, c)
+		reason, holderKind, holderID, err := t.blocking(e, paused, c, d.AgentUsers)
 		if err != nil {
 			return err
 		}
@@ -1009,8 +1113,10 @@ func (t *WeftTx) Dispatch(d WeftDispatch) error {
 }
 
 // blocking is the first wait that applies to the entry (§6.3). Reconcile and
-// cleanup entries ignore a landing pause and hold no slot (§6.1, §7.5).
-func (t *WeftTx) blocking(e *WeftEntry, paused bool, c WeftCapacity) (reason, holderKind, holderID string, err error) {
+// cleanup entries ignore a landing pause and hold no slot (§6.1, §7.5);
+// every other entry needs a slot and, for the pipeline segment it claims
+// now or once its archive step is over, one of users free.
+func (t *WeftTx) blocking(e *WeftEntry, paused bool, c WeftCapacity, users []string) (reason, holderKind, holderID string, err error) {
 	if paused {
 		return WeftWaitHostPaused, "", "", nil
 	}
@@ -1031,8 +1137,15 @@ func (t *WeftTx) blocking(e *WeftEntry, paused bool, c WeftCapacity) (reason, ho
 	case !errors.Is(err, sql.ErrNoRows):
 		return "", "", "", err
 	}
-	if c.Running >= c.Cap && !repair {
+	if repair {
+		return "", "", "", nil
+	}
+	if c.Running >= c.Cap {
 		return WeftWaitCapacity, "", "", nil
+	}
+	user, err := freeAgentUser(t.tx, users)
+	if err != nil || user == "" {
+		return WeftWaitCapacity, "", "", err
 	}
 	return "", "", "", nil
 }
@@ -1165,14 +1278,18 @@ func (t *WeftTx) dispatch(e *WeftEntry, d WeftDispatch) (bool, error) {
 		t.change("dispatched", e, runID, "")
 		return slot, nil
 	case WeftEntryLaunch, WeftEntryFrontier:
-		worktree, err := sandbox.WorktreePath(d.WeftRoot, e.Repository, e.Ticket)
+		worktree, err := sandbox.WorktreePath(d.SharedRoot, e.Repository, e.Ticket)
 		if err != nil {
 			return false, t.invalidate(e, WeftInvalidBinding, fmt.Sprintf("%s cannot be resolved: %v", e.Repository, err))
+		}
+		user, err := t.agentUser(e, d)
+		if err != nil {
+			return false, err
 		}
 		settlement, detail := d.mintSettlement()
 		runID, err = mintWeftRunTx(t.tx, WeftLaunch{
 			Ticket: e.Ticket, Project: e.Project, Repo: e.Repository, Branch: e.Ticket,
-			Worktree: worktree, RunDirRoot: d.RunDirRoot,
+			Worktree: worktree, RunDirRoot: d.RunDirRoot, AgentUser: user,
 		}, now, e.ID, WeftRecordedV2, settlement, detail)
 		if err != nil {
 			return false, err
@@ -1191,7 +1308,11 @@ func (t *WeftTx) dispatch(e *WeftEntry, d WeftDispatch) (bool, error) {
 				return false, err
 			}
 		}
-		segment, err := claimNextSegmentTx(t.tx, run, e.Kind, answerID, d.RunDirRoot, now)
+		user, err := t.agentUser(e, d)
+		if err != nil {
+			return false, err
+		}
+		segment, err := claimNextSegmentTx(t.tx, run, e.Kind, answerID, user, d.RunDirRoot, now)
 		if errors.Is(err, ErrWeftSegmentLimit) {
 			return false, t.invalidate(e, WeftInvalidRun, fmt.Sprintf("run %s has claimed all %d segments", run.ID, WeftSegmentLimit))
 		}
@@ -1424,7 +1545,7 @@ func (t *WeftTx) settleArchiving(e *WeftEntry, d WeftDispatch, head string) erro
 		if err != nil {
 			return err
 		}
-		reason, holderKind, holderID, err := t.blocking(e, paused, c)
+		reason, holderKind, holderID, err := t.blocking(e, paused, c, d.AgentUsers)
 		if err != nil {
 			return err
 		}
@@ -1438,14 +1559,18 @@ func (t *WeftTx) settleArchiving(e *WeftEntry, d WeftDispatch, head string) erro
 		t.change("archive_absent", e, old, ref+" does not name "+want)
 		return queueStepTx(t.tx, stamp, true, e.ID)
 	}
-	worktree, err := sandbox.WorktreePath(d.WeftRoot, e.Repository, e.Ticket)
+	worktree, err := sandbox.WorktreePath(d.SharedRoot, e.Repository, e.Ticket)
+	if err != nil {
+		return err
+	}
+	user, err := t.agentUser(e, d)
 	if err != nil {
 		return err
 	}
 	settlement, detail := d.mintSettlement()
 	runID, err := mintWeftRunTx(t.tx, WeftLaunch{
 		Ticket: e.Ticket, Project: e.Project, Repo: e.Repository, Branch: e.Ticket,
-		Worktree: worktree, RunDirRoot: d.RunDirRoot,
+		Worktree: worktree, RunDirRoot: d.RunDirRoot, AgentUser: user,
 	}, now, e.ID, WeftRecordedV2, settlement, detail)
 	if err != nil {
 		return err

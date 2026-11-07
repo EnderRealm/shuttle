@@ -116,33 +116,43 @@ are Keychain generic passwords and never appear in the file or launchd plist:
     "weft_root": "/Users/you/.shuttle/weft",
     "segment_timeout_seconds": 21600,
     "repositories": {"shuttle": "/Users/Shared/weft/repos/shuttle"},
-    "sandbox": {
-      "allowed_domains": ["github.com"],
-      "allow_write": [
-        "/Users/you/Library/Caches/org.swift.swiftpm",
-        "/Users/you/Library/org.swift.swiftpm"
-      ]
-    }
+    "agent_users": ["weftagent1", "weftagent2", "weftagent3"]
   }
 }
 ```
 
+`agent_users` are the hosted slots' macOS users, provisioned by
+`scripts/agent-users/setup.sh` (`docs/agent-users.md`). Each live segment runs
+as one of them, never shared: its worker is launched with `--agent-user <user>
+--worktree-root /Users/Shared/weft/worktrees`, and every new run's worktree is
+under that root. A user returns to the pool only once its segment has settled,
+which waits until `sudo -n -u <user> pkill -KILL -U <user>` has left no process
+of the user but the services launchd respawns in its session; a stop, a timeout
+and a daemon restart wait the same way. A duplicate, a name that is not an
+account name, the operator, a member of `admin` or `staff`, or an account whose
+groups cannot be read refuses the load, naming the entry, as does a second name
+with an earlier entry's uid. So does a `weft_root` at or inside
+`/Users/Shared/weft/worktrees` or `/Users/Shared/weft/repos`, which agent users
+can write. The
+capacity is the ledger's, set with `PUT /v2/queue/capacity`: unset, it is three
+or the number of agent users, whichever is fewer; the route refuses one above
+that number, and a stored one above it stops the service from starting.
+
+The `sandbox` block this key replaced is an unknown key now, which refuses the
+load: when deploying a shuttle that runs segments as agent users, remove
+`weft.sandbox` from `config.json` and add `weft.agent_users`. A run whose
+worktree is under `weft_root`, launched before, is not answered or resumed: its
+answer or resume fails its preflight, and only its cleanup, archive and
+reconcile still run.
+
 `oauth_keychain_item` (default `weft-claude-oauth-token`) names a login-Keychain
 generic password holding a long-lived token from `claude setup-token`; the daemon
-reads it at each launch and hands it to the segment as `CLAUDE_CODE_OAUTH_TOKEN`,
-because the coding sandbox denies the Keychain where the CLI keeps the
-subscription credential. The daemon refuses a listener outside loopback or
+reads it at each launch and hands it to the worker as `CLAUDE_CODE_OAUTH_TOKEN`,
+which reaches the agent user through the sudoers `env_keep`, because an agent
+user cannot read the Keychain where the CLI keeps the subscription credential.
+It is never in argv. The daemon refuses a listener outside loopback or
 `100.64.0.0/10`, and refuses each segment before spawning the worker if that item
-is missing or if its coding sandbox cannot be generated and preflighted.
-An `allow_write` entry equal to or containing the segment's run directory
-(`~/.shuttle/runs/weft/<id>`) is refused: at settlement the daemon finds every
-sandboxed process still holding the segment's write grant, including one that
-left the worker's process group, by its being denied that directory, and kills
-it before the repository is released. An entry equal to or containing the
-segment's worktree is refused too: `allow_write` is shared by every segment, so
-such an entry would let every concurrent segment write this worktree. For the
-same reason a worktree under `/tmp` or the per-user temp dir, which every
-segment's profile grants, is refused, so `weft_root` must sit outside both.
+is missing or the worker does not list the `agent_user` capability.
 
 `repositories` binds each hosted tk project to its checkout. A binding that is
 not a path directly under `/Users/Shared/weft/repos`, where agent users can

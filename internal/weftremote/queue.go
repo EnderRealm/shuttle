@@ -610,6 +610,11 @@ func (s *Service) handleCapacity(w http.ResponseWriter, r *http.Request) {
 		if req.Cap < 1 {
 			return refused("malformed", "cap must be at least 1, not %d", req.Cap), nil
 		}
+		// Every live segment runs as its own agent user, so a cap above them
+		// could never be met.
+		if users := len(s.cfg.Weft.AgentUsers); req.Cap > users {
+			return refused("malformed", "cap %d is more than the %d agent user(s) in weft.agent_users; each live segment runs as its own", req.Cap, users), nil
+		}
 		c, err := s.readCatalog()
 		if err != nil {
 			return nil, err

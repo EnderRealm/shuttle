@@ -22,7 +22,7 @@ import (
 )
 
 func TestSupervisorRunsFixtureWorkerToParkedState(t *testing.T) {
-	f := newSupervisorFixture(t, false)
+	f := newSupervisorFixture(t)
 	run := f.claim(t, "demo/worker")
 	if err := f.supervisor.run(run.ID); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestSupervisorRunsFixtureWorkerToParkedState(t *testing.T) {
 	if row.Status != ledger.StatusCompleted || !row.PID.Valid {
 		t.Fatalf("segment row = %+v", row)
 	}
-	for _, name := range []string{"run.json", "srt.json", "events.ndjson", "stderr.log", "result.json"} {
+	for _, name := range []string{"run.json", "events.ndjson", "stderr.log", "result.json"} {
 		if _, err := os.Stat(filepath.Join(got.Segments[0].RunDir.String, name)); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
@@ -56,7 +56,7 @@ func TestSupervisorRunsFixtureWorkerToParkedState(t *testing.T) {
 }
 
 // result.json names the contract its segment was launched under, the one
-// run.json records, for a weft-remote/v1 worker and a weft-worker/v2 one.
+// run.json records.
 func TestResultJSONCarriesLaunchContract(t *testing.T) {
 	check := func(t *testing.T, runDir, want string) {
 		t.Helper()
@@ -76,14 +76,6 @@ func TestResultJSONCarriesLaunchContract(t *testing.T) {
 			}
 		}
 	}
-	t.Run("v1", func(t *testing.T) {
-		f := newSupervisorFixture(t, false)
-		run := f.claim(t, "demo/worker")
-		if err := f.supervisor.run(run.ID); err != nil {
-			t.Fatal(err)
-		}
-		check(t, run.Segments[0].RunDir.String, ContractVersion)
-	})
 	t.Run("v2", func(t *testing.T) {
 		h := newV2Host(t)
 		id := "weft/example-second-4c2d"
@@ -103,14 +95,14 @@ func TestResultJSONCarriesLaunchContract(t *testing.T) {
 }
 
 func TestSupervisorHandsSegmentTheOAuthTokenByEnvironmentOnly(t *testing.T) {
-	f := newSupervisorFixture(t, false)
+	f := newSupervisorFixture(t)
 	run := f.claim(t, "demo/worker")
 	seen := filepath.Join(f.root, "oauth-seen")
-	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, "demo/worker")
+	worktree, err := sandbox.WorktreePath(f.supervisor.sharedRoot, f.repo, "demo/worker")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\n" + v1WorkerGuard + "if [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = '" + fixtureOAuthToken +
+	script := "#!/bin/sh\n" + workerGuard + "if [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = '" + fixtureOAuthToken +
 		"' ]; then printf match > " + seen + "; else printf mismatch > " + seen + "; fi\n" +
 		strings.TrimPrefix(fixtureWorkerScript(worktree), "#!/bin/sh\n")
 	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
@@ -154,17 +146,17 @@ func TestSupervisorHandsSegmentTheOAuthTokenByEnvironmentOnly(t *testing.T) {
 	}
 }
 
-// Tools that honour TMPDIR stay inside the segment's own temp dir, the one
-// its profile grants, rather than the shared /tmp.
+// Tools that honour TMPDIR stay inside the segment's own temp dir rather
+// than the shared /tmp.
 func TestSegmentEnvironmentSetsTmpdir(t *testing.T) {
-	f := newSupervisorFixture(t, false)
+	f := newSupervisorFixture(t)
 	run := f.claim(t, "demo/worker")
 	seen := filepath.Join(f.root, "tmpdir-seen")
-	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, "demo/worker")
+	worktree, err := sandbox.WorktreePath(f.supervisor.sharedRoot, f.repo, "demo/worker")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\n" + v1WorkerGuard + "printf '%s\\n%s\\n' \"$TMPDIR\" \"$CLAUDE_CODE_TMPDIR\" > " + seen + "\n" +
+	script := "#!/bin/sh\n" + workerGuard + "printf '%s\\n%s\\n' \"$TMPDIR\" \"$CLAUDE_CODE_TMPDIR\" > " + seen + "\n" +
 		strings.TrimPrefix(fixtureWorkerScript(worktree), "#!/bin/sh\n")
 	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -199,7 +191,7 @@ func TestSegmentEnvironmentSetsTmpdir(t *testing.T) {
 }
 
 func TestSupervisorRefusesLaunchWhenOAuthItemIsMissing(t *testing.T) {
-	f := newSupervisorFixture(t, false)
+	f := newSupervisorFixture(t)
 	f.cfg.Weft.OAuthKeychainItem = "missing-oauth-item"
 	run := f.claim(t, "demo/oauth-missing")
 	err := f.supervisor.run(run.ID)
@@ -235,29 +227,6 @@ func TestSupervisorRefusesLaunchWhenOAuthItemIsMissing(t *testing.T) {
 	}
 }
 
-func TestSupervisorRefusesLaunchWhenSandboxCannotBeEstablished(t *testing.T) {
-	f := newSupervisorFixture(t, true)
-	run := f.claim(t, "demo/sandbox-failure")
-	if err := f.supervisor.run(run.ID); err == nil {
-		t.Fatal("run succeeded with a refusing sandbox")
-	}
-	got, err := f.store.GetWeftRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Phase != ledger.WeftPhaseEnded || got.Outcome.String != "failed" ||
-		got.Segments[0].Failure.String != ledger.ClassSandbox {
-		t.Fatalf("run = %+v", got)
-	}
-	if _, err := f.store.ClaimWeft(ledger.WeftLaunch{
-		Ticket: "demo/after-failure", Project: "demo", Repo: got.Repo,
-		Branch: "demo/after-failure", Worktree: filepath.Join(f.cfg.Weft.Root, "other"),
-		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
-	}); err != nil {
-		t.Fatalf("sandbox failure did not release repository: %v", err)
-	}
-}
-
 func TestSupervisorClassifiesWorkerProcessFailures(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -265,14 +234,14 @@ func TestSupervisorClassifiesWorkerProcessFailures(t *testing.T) {
 		class   string
 		timeout int
 	}{
-		{name: "zero without terminal", script: "#!/bin/sh\n" + v1WorkerGuard + "exit 0\n", class: ledger.ClassNoResult},
-		{name: "nonzero without terminal", script: "#!/bin/sh\n" + v1WorkerGuard + "exit 3\n", class: ledger.ClassDied},
-		{name: "protocol", script: "#!/bin/sh\n" + v1WorkerGuard + "printf 'not-json\\n'\n", class: ledger.ClassProtocol},
-		{name: "timeout", script: "#!/bin/sh\n" + v1WorkerGuard + "sleep 300\n", class: ledger.ClassStuck, timeout: 1},
+		{name: "zero without terminal", script: "#!/bin/sh\n" + workerGuard + "exit 0\n", class: ledger.ClassNoResult},
+		{name: "nonzero without terminal", script: "#!/bin/sh\n" + workerGuard + "exit 3\n", class: ledger.ClassDied},
+		{name: "protocol", script: "#!/bin/sh\n" + workerGuard + "printf 'not-json\\n'\n", class: ledger.ClassProtocol},
+		{name: "timeout", script: "#!/bin/sh\n" + workerGuard + "sleep 300\n", class: ledger.ClassStuck, timeout: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := newSupervisorFixture(t, false)
+			f := newSupervisorFixture(t)
 			if tt.timeout > 0 {
 				f.cfg.Weft.SegmentTimeoutSeconds = tt.timeout
 			}
@@ -296,8 +265,8 @@ func TestSupervisorClassifiesWorkerProcessFailures(t *testing.T) {
 }
 
 func TestSupervisorHoldsRepositoryUntilTerminalWorkerExits(t *testing.T) {
-	f := newSupervisorFixture(t, false)
-	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, "demo/worker")
+	f := newSupervisorFixture(t)
+	worktree, err := sandbox.WorktreePath(f.supervisor.sharedRoot, f.repo, "demo/worker")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,10 +302,10 @@ func TestSupervisorHoldsRepositoryUntilTerminalWorkerExits(t *testing.T) {
 }
 
 func TestSupervisorKillsDescendantsBeforeReleasingRepository(t *testing.T) {
-	f := newSupervisorFixture(t, false)
+	f := newSupervisorFixture(t)
 	run := f.claim(t, "demo/worker")
 	pidFile := filepath.Join(run.Segments[0].RunDir.String, "descendant.pid")
-	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, "demo/worker")
+	worktree, err := sandbox.WorktreePath(f.supervisor.sharedRoot, f.repo, "demo/worker")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,14 +342,14 @@ func TestSupervisorKillsDescendantsBeforeReleasingRepository(t *testing.T) {
 }
 
 func TestWorkerCannotRunBeforePIDIsDurable(t *testing.T) {
-	f := newSupervisorFixture(t, false)
+	f := newSupervisorFixture(t)
 	run := f.claim(t, "demo/worker")
 	marker := filepath.Join(run.Segments[0].RunDir.String, "worker-started")
-	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, "demo/worker")
+	worktree, err := sandbox.WorktreePath(f.supervisor.sharedRoot, f.repo, "demo/worker")
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\n" + v1WorkerGuard + "printf started > " + marker + "\n" +
+	script := "#!/bin/sh\n" + workerGuard + "printf started > " + marker + "\n" +
 		strings.TrimPrefix(fixtureWorkerScript(worktree), "#!/bin/sh\n")
 	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -426,25 +395,16 @@ type supervisorFixture struct {
 	cfg        *config.Config
 	supervisor *Supervisor
 	repo       string
+	users      *userTable
 }
 
-// newSupervisorFixture roots under /tmp rather than t.TempDir() or
-// os.TempDir(): the supervisor's coding preflight checks that srt's mux socket
-// under each segment's run directory fits the 103-byte unix socket path limit
-// even against a stand-in srt, and macOS's os.TempDir() (49–57 bytes) leaves
-// no room for it.
-func newSupervisorFixture(t *testing.T, refuseSandbox bool) *supervisorFixture {
+// newSupervisorFixture is a supervisor whose worker is a weft-worker/v2
+// fixture listing the agent_user capability, whose agent users' processes
+// are a table of its own, and whose shared root is the fixture's: no
+// process is ever killed as a real agent user.
+func newSupervisorFixture(t *testing.T) *supervisorFixture {
 	t.Helper()
-	return newSupervisorFixtureIn(t, "/tmp", refuseSandbox)
-}
-
-// newSupervisorFixtureIn roots the fixture under dir, all but its weft.root.
-// A test that runs real srt needs a dir outside /tmp: every coding profile
-// grants /tmp, so a run directory there is writable and the preflight refuses
-// it.
-func newSupervisorFixtureIn(t *testing.T, dir string, refuseSandbox bool) *supervisorFixture {
-	t.Helper()
-	root, err := os.MkdirTemp(dir, "sw-")
+	root, err := os.MkdirTemp("/tmp", "sw-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,35 +427,20 @@ func newSupervisorFixtureIn(t *testing.T, dir string, refuseSandbox bool) *super
 	), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	srt := filepath.Join(root, "srt")
-	exit := "0"
-	if refuseSandbox {
-		exit = "1"
-	}
-	if err := os.WriteFile(srt, []byte("#!/bin/sh\nexit "+exit+"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "version.json"), fixtureVersion(t, fixtureCapabilities), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	worker := filepath.Join(root, "weft-worker")
 	cfg := &config.Config{
 		Timezone: "UTC",
-		Paths: config.Paths{
-			TKConfig: tkConfig, SRTBin: srt, LoomHome: filepath.Join(root, "loom"),
-		},
+		Paths:    config.Paths{TKConfig: tkConfig, LoomHome: filepath.Join(root, "loom")},
 		Weft: config.Weft{
 			WorkerBin: worker, Root: fixtureWeftRoot(t),
 			OAuthKeychainItem:     fixtureOAuthItem,
 			SegmentTimeoutSeconds: 10,
-			Sandbox:               config.WeftSandbox{AllowedDomains: []string{"github.com"}},
 			Repositories:          map[string]string{"demo": repo},
+			AgentUsers:            fixtureAgentUsers,
 		},
-	}
-	worktree, err := sandbox.WorktreePath(cfg.Weft.Root, repo, "demo/worker")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := fixtureWorkerScript(worktree)
-	if err := os.WriteFile(worker, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
 	}
 	store, err := ledger.Open(filepath.Join(root, "runs.db"))
 	if err != nil {
@@ -509,14 +454,18 @@ func newSupervisorFixtureIn(t *testing.T, dir string, refuseSandbox bool) *super
 		}
 		return fixtureOAuthToken, nil
 	}
-	return &supervisorFixture{root: root, store: store, cfg: cfg, supervisor: supervisor, repo: repo}
+	users := newUserTable()
+	supervisor.sharedRoot = filepath.Join(root, "shared")
+	supervisor.killUser = users.killer().KillUser
+	f := &supervisorFixture{root: root, store: store, cfg: cfg, supervisor: supervisor, repo: repo, users: users}
+	if err := os.WriteFile(worker, []byte(fixtureWorkerScript(f.worktree(t, "demo/worker"))), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return f
 }
 
-// fixtureWeftRoot is a fixture's weft.root, where its worktrees go, under the
-// package directory. Every coding profile grants /tmp and the per-user temp
-// dir, which on the host is os.TempDir(), and the preflight refuses a worktree
-// under either. The package directory is in the checkout: writable on the
-// host and, as the segment's worktree, inside a hosted segment. The leading
+// fixtureWeftRoot is a fixture's weft.root under the package directory: the
+// operator's, apart from the shared root the worktrees go under. The leading
 // dot keeps the go command from reading it as a package.
 func fixtureWeftRoot(t *testing.T) string {
 	t.Helper()
@@ -532,15 +481,24 @@ func fixtureWeftRoot(t *testing.T) string {
 	return root
 }
 
-func (f *supervisorFixture) claim(t *testing.T, id string) *ledger.WeftRun {
+// worktree is where a run of the ticket has its worktree: under the shared
+// root, where agent users can reach it.
+func (f *supervisorFixture) worktree(t *testing.T, id string) string {
 	t.Helper()
-	worktree, err := sandbox.WorktreePath(f.cfg.Weft.Root, f.repo, id)
+	worktree, err := sandbox.WorktreePath(f.supervisor.sharedRoot, f.repo, id)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return worktree
+}
+
+// claim claims the ticket's run as weftagent1, as dispatch claims a first
+// segment with the first agent user free.
+func (f *supervisorFixture) claim(t *testing.T, id string) *ledger.WeftRun {
+	t.Helper()
 	run, err := f.store.ClaimWeft(ledger.WeftLaunch{
-		Ticket: id, Project: "demo", Repo: f.repo, Branch: id, Worktree: worktree,
-		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent),
+		Ticket: id, Project: "demo", Repo: f.repo, Branch: id, Worktree: f.worktree(t, id),
+		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent), AgentUser: fixtureAgentUsers[0],
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -548,13 +506,35 @@ func (f *supervisorFixture) claim(t *testing.T, id string) *ledger.WeftRun {
 	return run
 }
 
-// v1WorkerGuard is how a weft-remote/v1 worker answers the subcommands
-// weft-worker/v2 adds: exit 64, no event (§2.6).
-const v1WorkerGuard = "case \"$1\" in version|allowance-probe) exit 64 ;; esac\n"
+// fixtureCapabilities are what the supervisor fixture's worker lists: a
+// worker that runs segments as agent users and lands nothing.
+var fixtureCapabilities = []string{"segment", "cleanup", "archive", "output", "liveness", "allowance", "stale_base_check", "agent_user"}
 
+// fixtureVersion is the version document of a fixture worker listing
+// capabilities.
+func fixtureVersion(t *testing.T, capabilities []string) []byte {
+	t.Helper()
+	doc, err := json.Marshal(map[string]any{
+		"contract_version": WorkerContractV2, "event": "version", "worker_version": "fixture",
+		"contracts": []string{ContractVersion, WorkerContractV2}, "capabilities": capabilities,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+// workerGuard is how a fixture worker answers the subcommands that run no
+// segment: its version is the version.json beside it, and it probes no
+// allowance.
+const workerGuard = "case \"$1\" in version) cat \"$(dirname \"$0\")/version.json\"; exit 0 ;; allowance-probe) exit 64 ;; esac\n"
+
+// fixtureWorkerScript is a weft-worker/v2 segment that parks on a question,
+// its hello naming worktree and repeating fixtureCapabilities.
 func fixtureWorkerScript(worktree string) string {
 	quoted, _ := json.Marshal(worktree)
-	return "#!/bin/sh\n" + v1WorkerGuard + `run=
+	capabilities, _ := json.Marshal(fixtureCapabilities)
+	return "#!/bin/sh\n" + workerGuard + `run=
 segment=
 ticket=
 while [ "$#" -gt 0 ]; do
@@ -565,19 +545,19 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-printf '{"contract_version":"weft-remote/v1","run_id":"%s","worker_run_id":"20260916T120000Z-12345678","segment":%s,"seq":1,"ts":"2026-09-16T12:00:00.000Z","event":"hello","worker_version":"fixture","ticket":"%s","project":"demo","branch":"%s","worktree":%s,"base":"base","criteria":"criteria","resumed":null,"inherited":[],"answer":null,"stages":[]}\n' "$run" "$segment" "$ticket" "$ticket" '` + string(quoted) + `'
-printf '{"contract_version":"weft-remote/v1","run_id":"%s","worker_run_id":"20260916T120000Z-12345678","segment":%s,"seq":2,"ts":"2026-09-16T12:01:00.000Z","event":"stage","stage":"work","backend":"claude","occurrence":1,"attempt":1,"state":"needs_input","session":null,"detail":null,"exit_code":null,"turns":1,"spend":null,"processing_ms":100,"tokens":null}\n' "$run" "$segment"
-printf '{"contract_version":"weft-remote/v1","run_id":"%s","worker_run_id":"20260916T120000Z-12345678","segment":%s,"seq":3,"ts":"2026-09-16T12:01:01.000Z","event":"parked","stage":"work","occurrence":1,"attempt":1,"worker_outcome":"blocked","question":"Which shape?","head":"head","summary":{"state":"rendered"}}\n' "$run" "$segment"
+printf '{"contract_version":"weft-worker/v2","run_id":"%s","worker_run_id":"20260916T120000Z-12345678","segment":%s,"seq":1,"ts":"2026-09-16T12:00:00.000Z","event":"hello","worker_version":"fixture","capabilities":` + string(capabilities) + `,"land":false,"environment":{"tk_store_root":null,"work_evidence_dir":null},"registered":true,"ticket":"%s","project":"demo","branch":"%s","worktree":%s,"base":"base","criteria":"criteria","resumed":null,"inherited":[],"answer":null,"stages":[]}\n' "$run" "$segment" "$ticket" "$ticket" '` + string(quoted) + `'
+printf '{"contract_version":"weft-worker/v2","run_id":"%s","worker_run_id":"20260916T120000Z-12345678","segment":%s,"seq":2,"ts":"2026-09-16T12:01:00.000Z","event":"stage","stage":"work","backend":"claude","occurrence":1,"attempt":1,"state":"needs_input","session":null,"detail":null,"exit_code":null,"turns":1,"spend":null,"processing_ms":100,"tokens":null}\n' "$run" "$segment"
+printf '{"contract_version":"weft-worker/v2","run_id":"%s","worker_run_id":"20260916T120000Z-12345678","segment":%s,"seq":3,"ts":"2026-09-16T12:01:01.000Z","event":"parked","stage":"work","occurrence":1,"attempt":1,"worker_outcome":"blocked","question":"Which shape?","head":"head","summary":{"state":"rendered"}}\n' "$run" "$segment"
 `
 }
 
 // A failed version probe stands for workerReprobeAfter, then an unchanged
 // worker_bin is probed again; the same failure is logged once.
 func TestWorkerProbeRetriesAFailureAfterItsBackOff(t *testing.T) {
-	f := newSupervisorFixture(t, false)
+	f := newSupervisorFixture(t)
 	logs := &syncBuffer{}
 	f.supervisor.log = log.New(logs, "", 0)
-	version := filepath.Join(f.root, "version.json")
+	version := filepath.Join(f.root, "probed-version.json")
 	script := "#!/bin/sh\ncase \"$1\" in version) cat " + version + " 2>/dev/null || exit 64; exit 0 ;; esac\nexit 3\n"
 	if err := os.WriteFile(f.cfg.Weft.WorkerBin, []byte(script), 0o700); err != nil {
 		t.Fatal(err)

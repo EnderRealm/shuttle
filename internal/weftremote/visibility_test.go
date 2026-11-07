@@ -126,21 +126,30 @@ func newV2Host(t *testing.T) *queueHost {
 func newWorkerHost(t *testing.T, without ...string) *queueHost {
 	t.Helper()
 	h := newQueueHost(t)
-	version := decode(t, fixtureBytes(t, "worker-version.json")).(map[string]any)
-	for _, c := range version["capabilities"].([]any) {
-		if !slices.Contains(without, c.(string)) {
-			h.capabilities = append(h.capabilities, c)
-		}
-	}
-	version["capabilities"] = h.capabilities
-	doc, err := json.Marshal(version)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.writeControl("version.json", doc)
+	h.capabilities = h.writeVersion(without...)
 	h.worker(strings.Replace(v2WorkerScript, "CONTROL", h.control, 1))
 	t.Cleanup(func() { h.service.probes.Wait() })
 	return h
+}
+
+// writeVersion writes worker-version.json less the capabilities named as the
+// fixture worker's version.json, and answers the capabilities it lists.
+func (h *queueHost) writeVersion(without ...string) []any {
+	h.t.Helper()
+	version := decode(h.t, fixtureBytes(h.t, "worker-version.json")).(map[string]any)
+	var capabilities []any
+	for _, c := range version["capabilities"].([]any) {
+		if !slices.Contains(without, c.(string)) {
+			capabilities = append(capabilities, c)
+		}
+	}
+	version["capabilities"] = capabilities
+	doc, err := json.Marshal(version)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.writeControl("version.json", doc)
+	return capabilities
 }
 
 func (h *queueHost) writeControl(name string, data []byte) {
@@ -160,7 +169,7 @@ func (h *queueHost) worker(script string) {
 func (h *queueHost) worktree(ticketID string) string {
 	h.t.Helper()
 	project, _, _ := strings.Cut(ticketID, "/")
-	worktree, err := sandbox.WorktreePath(h.service.cfg.Weft.Root, h.repository(project), ticketID)
+	worktree, err := sandbox.WorktreePath(h.service.segments.sharedRoot, h.repository(project), ticketID)
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -665,10 +674,15 @@ func refuseCursorPastNewest(t *testing.T, h *queueHost, runID string) {
 	}
 }
 
-// The worker probe gates output; a worker that does not speak
-// weft-worker/v2 keeps weft-remote/v1 dispatch.
-func TestWorkerProbeGatesOutputAndKeepsV1Dispatch(t *testing.T) {
+// The worker probe gates output and the agent-user launch: a worker that
+// does not speak weft-worker/v2 with the agent_user capability is served no
+// output, and every segment it would run is refused at its preflight.
+func TestWorkerProbeGatesOutputAndTheAgentUserLaunch(t *testing.T) {
 	h := newQueueHost(t)
+	queueWorker := func(capabilities string) string {
+		return strings.Replace(strings.Replace(queueWorkerScript, "CONTROL", h.control, 1), "CAPABILITIES", capabilities, 1)
+	}
+	h.worker(strings.Replace(queueWorker("[]"), `  version) cat "$control/version.json"; exit 0 ;;`, `  version) exit 64 ;;`, 1))
 	if err := h.service.Restart(); err != nil {
 		t.Fatal(err)
 	}
@@ -702,22 +716,19 @@ func TestWorkerProbeGatesOutputAndKeepsV1Dispatch(t *testing.T) {
 	if !strings.Contains(h.logs.String(), "weft worker host="+h.service.hostID+": probe of "+h.service.cfg.Weft.WorkerBin+" failed: exited 64") {
 		t.Errorf("log lacks the probe diagnostic:\n%s", h.logs.String())
 	}
-	contract := func(ticketID string) string {
+	refused := func(ticketID string) {
+		t.Helper()
 		h.ticket(ticketID, ticket.StatusReady, 2)
-		runID := h.waitDispatched(entryOf(h.launch(ticketID, "launch-"+ticketID))["entry_id"].(string))
-		h.waitPhase(runID, ledger.WeftPhaseParked)
-		return h.get("/v2/runs/" + runID)["run"].(map[string]any)["segments"].([]any)[0].(map[string]any)["worker_contract"].(string)
+		run := h.waitReaped(h.waitDispatched(entryOf(h.launch(ticketID, "launch-"+ticketID))["entry_id"].(string)))
+		if got := run.Segments[0]; got.Failure.String != ledger.ClassPreflight || got.WorkerContract.Valid {
+			t.Fatalf("a segment of a worker without agent_user = %+v, want it refused at its preflight", got)
+		}
 	}
-	if got := contract("weft/v1-only-0001"); got != ContractVersion {
-		t.Fatalf("a v1 worker's segment ran under %s", got)
-	}
+	refused("weft/v1-only-0001")
 
-	// A worker whose version names only weft-remote/v1 keeps v1 dispatch too.
 	version := func(contracts, capabilities string) {
-		h.writeControl("version.json", []byte(`{"contract_version":"weft-worker/v2","event":"version","worker_version":"weft-worker 0.1.9 (weft@old)","contracts":`+contracts+`,"capabilities":`+capabilities+`}`))
-		h.worker(strings.Replace(strings.Replace(queueWorkerScript, "CONTROL", h.control, 1),
-			`case "$1" in version|allowance-probe) exit 64 ;; esac`,
-			`case "$1" in version) cat "`+h.control+`/version.json"; exit 0 ;; allowance-probe) exit 64 ;; esac`, 1))
+		h.writeControl("version.json", []byte(`{"contract_version":"weft-worker/v2","event":"version","worker_version":"weft-worker 0.2.0 (weft@dev)","contracts":`+contracts+`,"capabilities":`+capabilities+`}`))
+		h.worker(queueWorker(capabilities))
 		h.service.dispatch()
 	}
 	version(`["weft-remote/v1"]`, `["segment"]`)
@@ -725,16 +736,21 @@ func TestWorkerProbeGatesOutputAndKeepsV1Dispatch(t *testing.T) {
 		t.Fatalf("output under a v1-only version = %v", c)
 	}
 	claudeTile("it does not list the allowance capability of weft-worker/v2")
-	if got := contract("weft/v1-only-0002"); got != ContractVersion {
-		t.Fatalf("a v1-only worker's segment ran under %s", got)
-	}
+	refused("weft/v1-only-0002")
 	version(`["weft-remote/v1","weft-worker/v2"]`, `["segment","output","stale_base_check"]`)
 	if c := output(); c["state"] != "not_served" || !strings.Contains(c["reason"].(string), "lacks liveness") {
 		t.Fatalf("output without liveness = %v", c)
 	}
+	refused("weft/no-agent-user-0003")
 	version(`["weft-remote/v1","weft-worker/v2"]`, `["segment","output","liveness","agent_user"]`)
 	if w := h.service.segments.worker.Load(); !w.has("agent_user") {
 		t.Fatalf("worker listing agent_user = %+v", w)
+	}
+	h.ticket("weft/agent-user-0004", ticket.StatusReady, 2)
+	runID := h.waitDispatched(entryOf(h.launch("weft/agent-user-0004", "launch-agent-user"))["entry_id"].(string))
+	h.waitPhase(runID, ledger.WeftPhaseParked)
+	if got := h.run(runID).Segments[0].WorkerContract.String; got != WorkerContractV2 {
+		t.Fatalf("a segment of a worker listing agent_user ran under %q", got)
 	}
 	version(`["weft-remote/v1","weft-worker/v2"]`, `["segment","output","liveness","telepathy"]`)
 	if c := output(); c["state"] != "not_served" || !strings.Contains(c["reason"].(string), "undeclared or repeated capability") {

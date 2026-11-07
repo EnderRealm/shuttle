@@ -999,7 +999,8 @@ func TestFreshArchivesThenStartsANewRun(t *testing.T) {
 	}
 	argv := h.argv()
 	if !strings.Contains(argv, "archive --contract weft-worker/v2 --run "+old.ID+" --segment 2 --ticket "+id+" --repo "+old.Repo+
-		" --weft-root "+h.service.cfg.Weft.Root+" --archive-ref "+ledger.WeftArchiveRef(old.ID)+" --head "+fixtureHead) ||
+		" --weft-root "+h.service.cfg.Weft.Root+" --worktree-root "+h.service.segments.worktreeRoot()+
+		" --archive-ref "+ledger.WeftArchiveRef(old.ID)+" --head "+fixtureHead) ||
 		!strings.Contains(argv, "segment --contract weft-worker/v2 --run "+newRun) || strings.Contains(argv, "--resume") {
 		t.Fatalf("argv = %s", argv)
 	}
@@ -1258,12 +1259,12 @@ func TestUngradedLandingRunsDoNotStayPending(t *testing.T) {
 	for _, id := range []string{failing, stopped} {
 		h.ticket(id, ticket.StatusReady, 2)
 	}
-	// A worktree with no gitfile fails the sandbox preflight.
-	if err := os.MkdirAll(h.worktree(failing), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// A Claude credential that cannot be read fails the preflight.
+	findKey := h.service.segments.findKey
+	h.service.segments.findKey = func(item string) (string, error) { return "", fmt.Errorf("keychain item %q: not found", item) }
 	failed := h.waitReaped(h.waitDispatched(entryOf(h.launch(failing, "preflight"))["entry_id"].(string)))
-	if failed.Segments[0].Failure.String != ledger.ClassSandbox || failed.SettlementState != ledger.WeftSettlementNone ||
+	h.service.segments.findKey = findKey
+	if failed.Segments[0].Failure.String != ledger.ClassPreflight || failed.SettlementState != ledger.WeftSettlementNone ||
 		failed.SettlementDetail.String != "the run ended before it was graded, so nothing lands" {
 		t.Fatalf("preflight-failed run = %+v", failed)
 	}
@@ -1295,7 +1296,7 @@ func TestUngradedLandingRunsDoNotStayPending(t *testing.T) {
 }
 
 // A cleanup or archive acts only on the worktree the operator authorized: a
-// run retained under one weft_root, dismissed or freshed after the daemon
+// run retained under one shared root, dismissed or freshed after the daemon
 // restarts under another, is refused with nothing launched.
 func TestMaintenanceRefusedWhenWeftRootMoved(t *testing.T) {
 	h := newLandingHost(t)
@@ -1307,12 +1308,13 @@ func TestMaintenanceRefusedWhenWeftRootMoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := *h.service.cfg
-	cfg.Weft.Root = filepath.Join(h.root, "weft-moved")
 	restarted, err := New(&cfg, h.store, "secret-token", h.root, h.service.log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	restarted.segments.findKey = h.service.segments.findKey
+	restarted.segments.killUser = h.service.segments.killUser
+	restarted.segments.sharedRoot = filepath.Join(h.root, "shared-moved")
 	restarted.segments.refreshWorker()
 	h.service = restarted
 
@@ -1321,7 +1323,7 @@ func TestMaintenanceRefusedWhenWeftRootMoved(t *testing.T) {
 		return h.entry(dismissed["entry_id"].(string))["state"] == "invalidated" && h.reaped(h.run(run.ID))
 	})
 	if e := h.entry(dismissed["entry_id"].(string))["invalidated"].(map[string]any); e["reason"] != "cleanup_refused" ||
-		!strings.Contains(e["detail"].(string), "weft_root "+cfg.Weft.Root) {
+		!strings.Contains(e["detail"].(string), "under "+cfg.Weft.Root+" ") {
 		t.Fatalf("cleanup under a moved weft_root = %v", e)
 	}
 	run = h.run(run.ID)
@@ -1330,7 +1332,7 @@ func TestMaintenanceRefusedWhenWeftRootMoved(t *testing.T) {
 		return h.entry(freshed["entry_id"].(string))["state"] == "invalidated" && h.reaped(h.run(run.ID))
 	})
 	if e := h.entry(freshed["entry_id"].(string))["invalidated"].(map[string]any); e["reason"] != "archive_refused" ||
-		!strings.Contains(e["detail"].(string), "weft_root "+cfg.Weft.Root) {
+		!strings.Contains(e["detail"].(string), "under "+cfg.Weft.Root+" ") {
 		t.Fatalf("archive under a moved weft_root = %v", e)
 	}
 	if after := h.run(run.ID); after.Disposition != ledger.WeftDispositionRetained || after.SupersededBy.Valid {

@@ -15,7 +15,8 @@ package ledger
 // §6.9's columns, and the process identity the restart pass checks (§9).
 // schemaVersion 7: the catalog's host digest — what a ticket's eligibility
 // reads from the host, so catalog_revision moves when it does (§5.2).
-const schemaVersion = 7
+// schemaVersion 8: the agent user each hosted pipeline segment runs as.
+const schemaVersion = 8
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -331,4 +332,13 @@ ALTER TABLE weft_terminals ADD COLUMN group_unresolved TEXT;
 // row SyncWeftCatalog has just inserted, digested before that commits.
 const weftCatalogHostSQL = `
 ALTER TABLE weft_catalog ADD COLUMN host_digest TEXT;
+`
+
+// weftAgentUserSQL is schema 8: weft_segments.agent_user, the agent user a
+// pipeline segment was claimed with (docs/agent-users.md). It is held while
+// the segment's phase-1 row is claimed or running, and only one such segment
+// holds a user at a time. NULL is a maintenance segment, which runs as the
+// operator, or a segment claimed before hosted segments ran as agent users.
+const weftAgentUserSQL = `
+ALTER TABLE weft_segments ADD COLUMN agent_user TEXT;
 `

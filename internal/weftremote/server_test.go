@@ -64,11 +64,11 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	t.Cleanup(func() { store.Close() })
 	cfg := &config.Config{
 		Timezone: "UTC",
-		Paths:    config.Paths{TKConfig: tkConfig, SRTBin: "/usr/bin/true"},
+		Paths:    config.Paths{TKConfig: tkConfig},
 		Weft: config.Weft{
 			Listen: "127.0.0.1:0", WorkerBin: "/usr/bin/true",
 			Root: filepath.Join(root, "weft"), SegmentTimeoutSeconds: 10,
-			Repositories: map[string]string{"demo": projectPath},
+			Repositories: map[string]string{"demo": projectPath}, AgentUsers: fixtureAgentUsers,
 		},
 	}
 	service, err := New(cfg, store, "secret-token", root, log.New(io.Discard, "", 0))

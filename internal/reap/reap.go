@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,12 +39,12 @@ var sendSignal = syscall.Kill
 // being reused between two probes.
 var listGroup = groupMembers
 
-// lookupStart and lookupIsRun are the kernel identity lookups identify runs
+// lookupStart and lookupArgv are the kernel identity lookups identify runs
 // against a live pid. Vars so a test can drive the lookup-error path, which no
 // process this daemon can start produces on demand.
 var (
 	lookupStart = processStart
-	lookupIsRun = processIsRun
+	lookupArgv  = processArgv
 )
 
 // The runtime argument pair that carries the run directory into the launched
@@ -53,6 +55,14 @@ const (
 	settingsFile       = "settings.json"
 	sandboxProfileFlag = "--sandbox-profile"
 	sandboxProfileFile = "srt.json"
+)
+
+// The worker argument pairs that name a hosted segment (weft-service/v2
+// §11.1): a segment launched as an agent user carries no sandbox profile, and
+// these two together are its identity.
+const (
+	weftRunFlag     = "--run"
+	weftSegmentFlag = "--segment"
 )
 
 // lookupFailed prefixes the detail of a lookup that errored on a live pid, so
@@ -132,11 +142,16 @@ type Ledger interface {
 	InFlight() ([]*ledger.Run, error)
 	MarkUnknown(id string) error
 	WeftCodingWorktree(ledgerRunID string) (string, bool, error)
+	WeftSegmentAgent(ledgerRunID string) (ledger.WeftAgentSegment, bool, error)
 }
 
 // contain is the sweep Restart runs for a hosted coding segment. A var so a
 // test can drive a boundary that will not empty.
 var contain = Contain
+
+// killUser is the kill Restart runs for a hosted segment's agent user. A var
+// so a test can substitute the kill command and process table.
+var killUser = KillUser
 
 var _ Ledger = (*ledger.Store)(nil)
 
@@ -164,12 +179,15 @@ var _ Ledger = (*ledger.Store)(nil)
 //
 // A hosted coding segment's row is held the same way until containRow's sweep
 // establishes that no detached descendant still holds the segment's sandbox
-// grant: the group being empty is not the segment being gone.
+// grant: the group being empty is not the segment being gone. A hosted
+// segment that runs as an agent user is held until every process of that
+// user is gone, killed before its worker's group and again after it.
 //
 // It returns one Outcome per row, in ledger order. A MarkUnknown failure, or a
-// ledger read that cannot say whether a row is a coding segment, stops the
-// pass and is returned with the outcomes recorded so far: the daemon must not
-// go on to tick over a row it could not close.
+// ledger read that cannot say whether a row is a coding segment or which
+// agent user it holds, stops the pass and is returned with the outcomes
+// recorded so far: the daemon must not go on to tick over a row it could not
+// close.
 func Restart(l Ledger) ([]Outcome, error) {
 	runs, err := l.InFlight()
 	if err != nil {
@@ -178,20 +196,46 @@ func Restart(l Ledger) ([]Outcome, error) {
 	outcomes := make([]Outcome, 0, len(runs))
 	for _, run := range runs {
 		out := Outcome{RunID: run.ID, Agent: run.Agent, PID: int(run.PID.Int64)}
-		action, leader, detail := identify(run)
+		var agent *ledger.WeftAgentSegment
+		a, holds, err := l.WeftSegmentAgent(run.ID)
+		if err != nil {
+			out.Action, out.Detail = ActionUnresolved, "agent user: "+err.Error()
+			return append(outcomes, out), fmt.Errorf("run %s: %w", run.ID, err)
+		}
+		if holds {
+			agent = &a
+		}
+		swept := ""
+		if agent != nil && run.PID.Valid && run.PID.Int64 > 0 {
+			// The agent's processes share the worker's process group and
+			// session, where the operator's signals do not reach them, so they
+			// go first: the group kill below would otherwise outlast its
+			// SIGKILL. The user is this row's alone, so nothing of it is
+			// foreign. A row with no pid never released its worker's start
+			// gate, and nothing ran as its user.
+			found, err := killUser(agent.AgentUser)
+			if err != nil {
+				out.Action, out.Detail = ActionKillFailed, "agent user: "+err.Error()
+				outcomes = append(outcomes, out)
+				continue
+			}
+			swept = killedDetail(agent.AgentUser, found)
+		}
+		action, leader, detail := identify(run, agent)
 		if action == actionOwned {
 			out.Action, out.Detail = kill(leader)
 		} else {
 			out.Action, out.Detail = action, detail
 		}
 		if out.Action != ActionKillFailed && out.Action != ActionUnresolved && out.Action != ActionNoPID {
-			if out.Action, out.Detail, err = containRow(l, run, out.Action, out.Detail); err != nil {
+			if out.Action, out.Detail, err = containRow(l, run, agent, out.Action, out.Detail); err != nil {
 				// No sweep ran, so the row is held: an outcome left closing would
 				// let the daemon's reconcile release the repository unswept.
 				out.Action, out.Detail = ActionUnresolved, "containment: "+err.Error()
 				return append(outcomes, out), fmt.Errorf("run %s: %w", run.ID, err)
 			}
 		}
+		out.Detail = joinDetail(out.Detail, swept)
 		outcomes = append(outcomes, out)
 		if out.Action == ActionKillFailed || out.Action == ActionUnresolved {
 			continue
@@ -203,13 +247,25 @@ func Restart(l Ledger) ([]Outcome, error) {
 	return outcomes, nil
 }
 
-// containRow sweeps a hosted coding segment's boundary once its process group
-// is accounted for: a descendant that called setsid left the group with the
-// segment's write grant, and the row may close only once no process holds it.
-// A sweep that fails holds the row in flight — kill_failed when it stopped a
-// holder, unresolved otherwise — so its repository stays reserved. A row with no pid never released its worker's start gate, so no
-// sandboxed process of it ever ran, and the caller skips it.
-func containRow(l Ledger, run *ledger.Run, action Action, detail string) (Action, string, error) {
+// containRow finishes a hosted segment's containment once its process group
+// is accounted for. A segment that runs as an agent user has every process of
+// that user killed, which reaches a descendant that called setsid, and the
+// row may close only once none is left; a failure holds the row kill_failed.
+// A coding segment launched before agent users has its sandbox boundary
+// swept: a descendant that called setsid left the group with the segment's
+// write grant, and the row may close only once no process holds it. A sweep
+// that fails holds the row in flight — kill_failed when it stopped a holder,
+// unresolved otherwise — so its repository stays reserved. A row with no pid
+// never released its worker's start gate, so nothing of it ever ran, and the
+// caller skips it.
+func containRow(l Ledger, run *ledger.Run, agent *ledger.WeftAgentSegment, action Action, detail string) (Action, string, error) {
+	if agent != nil {
+		found, err := killUser(agent.AgentUser)
+		if err != nil {
+			return ActionKillFailed, joinDetail(detail, "agent user: "+err.Error()), nil
+		}
+		return action, joinDetail(detail, killedDetail(agent.AgentUser, found)), nil
+	}
 	_, coding, err := l.WeftCodingWorktree(run.ID)
 	if err != nil || !coding {
 		return action, detail, err
@@ -221,12 +277,31 @@ func containRow(l Ledger, run *ledger.Run, action Action, detail string) (Action
 	case err != nil:
 		return ActionUnresolved, "containment: " + err.Error(), nil
 	case c.Found():
-		if detail != "" {
-			detail += "; "
-		}
-		return action, detail + "containment " + c.String(), nil
+		return action, joinDetail(detail, "containment "+c.String()), nil
 	}
 	return action, detail, nil
+}
+
+// killedDetail names what a kill of user found, "" when it found nothing.
+func killedDetail(user string, found []UserProcess) string {
+	if len(found) == 0 {
+		return ""
+	}
+	names := make([]string, len(found))
+	for i, p := range found {
+		names[i] = p.String()
+	}
+	return fmt.Sprintf("agent user %s: killed %d process(es) %s", user, len(found), strings.Join(names, " "))
+}
+
+func joinDetail(detail, more string) string {
+	switch {
+	case more == "":
+		return detail
+	case detail == "":
+		return more
+	}
+	return detail + "; " + more
 }
 
 // identify answers actionOwned when the row's recorded pid is established as
@@ -241,8 +316,10 @@ func containRow(l Ledger, run *ledger.Run, action Action, detail string) (Action
 // reused the recorded pid for an unrelated process by the time the daemon came
 // back, and a group SIGKILL aimed at that is unrecoverable. A lookup that errors
 // on a live pid establishes nothing either way, so it answers ActionUnresolved
-// and the row is held rather than closed (Restart).
-func identify(run *ledger.Run) (Action, member, string) {
+// and the row is held rather than closed (Restart). agent is the hosted
+// segment the row is when it runs as an agent user, whose worker carries no
+// sandbox profile and is established by its run and segment instead.
+func identify(run *ledger.Run, agent *ledger.WeftAgentSegment) (Action, member, string) {
 	if !run.PID.Valid || run.PID.Int64 <= 0 {
 		return ActionNoPID, member{}, ""
 	}
@@ -292,16 +369,44 @@ func identify(run *ledger.Run) (Action, member, string) {
 	// The identity condition, as against the heuristics above it: the window
 	// only narrows which reused pid is plausible, while the settings argument
 	// carries the run id, which no unrelated process can be carrying.
-	isRun, err := lookupIsRun(pid, dir)
+	argv, err := lookupArgv(pid)
 	if err != nil {
 		return ActionUnresolved, member{}, lookupFailed + err.Error()
 	}
-	if !isRun {
+	if agent != nil {
+		segment := strconv.Itoa(agent.Segment)
+		if !carries(argv, weftRunFlag, agent.RunID) || !carries(argv, weftSegmentFlag, segment) {
+			return ActionForeign, member{}, fmt.Sprintf("process argv does not carry %s %s and %s %s",
+				weftRunFlag, agent.RunID, weftSegmentFlag, segment)
+		}
+		return actionOwned, member{PID: pid, Start: started}, ""
+	}
+	if !runArgv(argv, dir) {
 		return ActionForeign, member{}, fmt.Sprintf("process argv does not carry %s %s or %s %s",
 			settingsFlag, filepath.Join(dir, settingsFile),
 			sandboxProfileFlag, filepath.Join(dir, sandboxProfileFile))
 	}
 	return actionOwned, member{PID: pid, Start: started}, ""
+}
+
+// runArgv reports whether argv carries the settings argument or sandbox
+// profile beneath dir.
+func runArgv(argv []string, dir string) bool {
+	return carries(argv, settingsFlag, filepath.Join(dir, settingsFile)) ||
+		carries(argv, sandboxProfileFlag, filepath.Join(dir, sandboxProfileFile))
+}
+
+// carries reports whether argv holds flag immediately followed by value. The
+// two elements must be adjacent and the value must match exactly — a process
+// that merely mentions it, in its exec path, in some other argument or in its
+// environment, is not the run and must never be signalled.
+func carries(argv []string, flag, value string) bool {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == flag && argv[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 // leaderGone is the answer for a recorded pid the kernel no longer knows. The

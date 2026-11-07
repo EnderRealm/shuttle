@@ -857,6 +857,6 @@ func claimMaintenanceSegmentTx(tx *sql.Tx, runID, kind, runDirRoot string, now t
 	if segment > WeftSegmentLimit {
 		return 0, ErrWeftSegmentLimit
 	}
-	_, err = insertWeftSegmentTx(tx, runID, segment, kind, "", runDirRoot, now)
+	_, err = insertWeftSegmentTx(tx, runID, segment, kind, "", "", runDirRoot, now)
 	return segment, err
 }

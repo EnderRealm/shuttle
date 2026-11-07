@@ -86,22 +86,14 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 		return nil, fmt.Errorf("weft.segment_timeout_seconds must be positive")
 	}
 	for name, path := range map[string]string{
-		"weft.worker_bin": cfg.Weft.WorkerBin, "weft.weft_root": cfg.Weft.Root,
-		"paths.srt_bin": cfg.Paths.SRTBin, "paths.tk_config": cfg.Paths.TKConfig,
+		"weft.worker_bin": cfg.Weft.WorkerBin, "weft.weft_root": cfg.Weft.Root, "paths.tk_config": cfg.Paths.TKConfig,
 	} {
 		if !filepath.IsAbs(path) || path != filepath.Clean(path) {
 			return nil, fmt.Errorf("%s %q is not a clean absolute path", name, path)
 		}
 	}
-	for _, path := range cfg.Weft.Sandbox.AllowWrite {
-		if !filepath.IsAbs(path) || path != filepath.Clean(path) {
-			return nil, fmt.Errorf("weft.sandbox.allow_write %q is not a clean absolute path", path)
-		}
-	}
-	for _, domain := range cfg.Weft.Sandbox.AllowedDomains {
-		if domain == "" || domain == "*" || strings.ContainsAny(domain, " \t\r\n") {
-			return nil, fmt.Errorf("weft.sandbox.allowed_domains contains invalid domain %q", domain)
-		}
+	if len(cfg.Weft.AgentUsers) == 0 {
+		return nil, fmt.Errorf("weft.agent_users names no agent user: every hosted segment runs as one of its own (docs/agent-users.md)")
 	}
 	if logger == nil {
 		logger = log.Default()
@@ -109,6 +101,9 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	hostID, err := store.WeftHostID()
 	if err != nil {
 		return nil, fmt.Errorf("weft host_id: %w", err)
+	}
+	if err := store.ConfigureWeftAgentUsers(len(cfg.Weft.AgentUsers)); err != nil {
+		return nil, err
 	}
 	s := &Service{
 		cfg: cfg, store: store, token: token, tokenID: ledger.TokenID(token), hostID: hostID,

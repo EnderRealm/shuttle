@@ -36,7 +36,7 @@ func TestSettingsArgumentIsTheRuntimeArgvs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("argv: %v", err)
 	}
-	// Adjacent, which is how processIsRun matches it: a flag and its value.
+	// Adjacent, which is how runArgv matches it: a flag and its value.
 	for i := 0; i+1 < len(argv); i++ {
 		if argv[i] == settingsFlag && argv[i+1] == o.SettingsPath() {
 			return

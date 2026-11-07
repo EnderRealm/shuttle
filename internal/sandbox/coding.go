@@ -44,6 +44,10 @@ func (o CodingOptions) tmpDir() string      { return SegmentTmpDir(o.RunDir) }
 // it is granted to none of them.
 func SegmentTmpDir(runDir string) string { return filepath.Join(runDir, "tmp") }
 
+// WorktreesDir is the directory under a root that WorktreePath derives every
+// worktree beneath.
+const WorktreesDir = "worktrees"
+
 // WorktreePath mirrors WeftKit's hosted WorktreeProvider derivation.
 func WorktreePath(root, repo, ticket string) (string, error) {
 	if !filepath.IsAbs(root) {
@@ -55,7 +59,7 @@ func WorktreePath(root, repo, ticket string) (string, error) {
 	}
 	sum := sha256.Sum256([]byte(canonical))
 	repoDir := filepath.Base(canonical) + "-" + hex.EncodeToString(sum[:4])
-	return filepath.Join(filepath.Clean(root), "worktrees", repoDir, strings.ReplaceAll(ticket, "/", "-")), nil
+	return filepath.Join(filepath.Clean(root), WorktreesDir, repoDir, strings.ReplaceAll(ticket, "/", "-")), nil
 }
 
 // RepositoryID is weft-service/v2 §4.1's repository_id for a canonical path:
@@ -357,6 +361,10 @@ func requireCoding(o CodingOptions) error {
 	}
 	return nil
 }
+
+// Covers reports whether tree equals or contains path, by spelling or by file
+// identity, for a caller outside a coding preflight.
+func Covers(tree, path string) (bool, error) { return coversWorktree(tree, path) }
 
 // coversWorktree reports whether entry equals or contains worktree, by
 // spelling or, since Seatbelt judges the real path, by file identity.

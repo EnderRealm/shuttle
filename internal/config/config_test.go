@@ -1,8 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,10 +40,7 @@ const sampleConfig = `{
     "worker_bin": "/Users/steve/.local/bin/weft-worker",
     "weft_root": "/Users/steve/.shuttle/weft",
     "segment_timeout_seconds": 21600,
-    "sandbox": {
-      "allowed_domains": ["github.com"],
-      "allow_write": ["/Users/steve/Library/Caches/org.swift.swiftpm"]
-    }
+    "agent_users": ["weftagent1", "weftagent2"]
   }
 }`
 
@@ -54,6 +54,30 @@ func writeConfig(t *testing.T, body string) {
 	// Cleared so an exported override in the ambient environment cannot decide
 	// what AgentsDir resolves to.
 	t.Setenv(EnvAgentsDir, "")
+	accounts(t, map[string]account{
+		"weftagent1": {uid: "9001", groups: []string{"weftagents"}},
+		"weftagent2": {uid: "9002", groups: []string{"weftagents"}},
+	})
+}
+
+type account struct {
+	uid    string
+	groups []string
+}
+
+// accounts stands in for the directory: a name it does not hold does not
+// exist.
+func accounts(t *testing.T, known map[string]account) {
+	t.Helper()
+	prior := lookupAccount
+	lookupAccount = func(name string) (string, []string, error) {
+		a, ok := known[name]
+		if !ok {
+			return "", nil, fmt.Errorf("user: unknown user %s", name)
+		}
+		return a.uid, a.groups, nil
+	}
+	t.Cleanup(func() { lookupAccount = prior })
 }
 
 func TestLoad(t *testing.T) {
@@ -92,7 +116,7 @@ func TestLoad(t *testing.T) {
 	}
 	if c.Weft.Listen != "100.101.102.103:7431" || c.Weft.KeychainItem != "weft-remote-token" ||
 		c.Weft.OAuthKeychainItem != "weft-claude-oauth-token" ||
-		c.Weft.SegmentTimeoutSeconds != 21600 || len(c.Weft.Sandbox.AllowWrite) != 1 {
+		c.Weft.SegmentTimeoutSeconds != 21600 || !slices.Equal(c.Weft.AgentUsers, []string{"weftagent1", "weftagent2"}) {
 		t.Errorf("weft = %+v", c.Weft)
 	}
 }
@@ -237,5 +261,138 @@ func TestValidateRepositoriesIsLexical(t *testing.T) {
 	repos := map[string]string{"real": filepath.Join(root, "real"), "missing": filepath.Join(root, "missing"), "linked": link}
 	if err := validateRepositories(root, repos); err != nil {
 		t.Errorf("bindings directly under the root, whatever is on disk there: %v", err)
+	}
+}
+
+func agentUsersConfig(users string) string {
+	return strings.Replace(sampleConfig, `"agent_users": ["weftagent1", "weftagent2"]`, `"agent_users": `+users, 1)
+}
+
+// An agent user that would not bound its segment refuses the load, naming
+// the entry and why.
+func TestLoadRefusesAgentUsersThatBoundNothing(t *testing.T) {
+	operator := strconv.Itoa(os.Getuid())
+	cases := []struct {
+		name, users string
+		want        []string
+	}{
+		{"duplicate", `["weftagent1", "weftagent2", "weftagent1"]`, []string{"weft.agent_users[2]", "weftagent1", "weft.agent_users[0]"}},
+		{"operator", `["weftagent1", "steve"]`, []string{"weft.agent_users[1]", "steve", "is the operator"}},
+		{"admin", `["weftagent1", "admin1"]`, []string{"weft.agent_users[1]", "admin1", "member of admin"}},
+		{"staff", `["staff1"]`, []string{"weft.agent_users[0]", "staff1", "member of staff"}},
+		{"unknown", `["weftagent9"]`, []string{"weft.agent_users[0]", "weftagent9", "cannot be read"}},
+		{"flag", `["-x"]`, []string{"weft.agent_users[0]", `"-x"`, "not an account name"}},
+		{"uid", `["#501"]`, []string{"weft.agent_users[0]", `"#501"`, "not an account name"}},
+		{"empty", `[""]`, []string{"weft.agent_users[0]", "not an account name"}},
+		{"same uid", `["weftagent1", "weftalias"]`, []string{"weft.agent_users[1]", "weftalias", "uid 9001", "weft.agent_users[0] weftagent1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfig(t, agentUsersConfig(tc.users))
+			accounts(t, map[string]account{
+				"weftagent1": {uid: "9001", groups: []string{"weftagents"}},
+				"weftagent2": {uid: "9002", groups: []string{"weftagents"}},
+				"steve":      {uid: operator, groups: []string{"staff", "admin"}},
+				"admin1":     {uid: "9003", groups: []string{"weftagents", "admin"}},
+				"staff1":     {uid: "9004", groups: []string{"weftagents", "staff"}},
+				"weftalias":  {uid: "9001", groups: []string{"weftagents"}},
+			})
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load succeeded, want an error")
+			}
+			for _, want := range append(tc.want, configFile) {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// Agent users can write both hosted trees, so weft_root, which holds what
+// grades and resumes a run, may not be at or inside either.
+func TestLoadRefusesAWeftRootAgentsCanWrite(t *testing.T) {
+	for _, tree := range []string{HostedWorktreeRoot, hostedRepositoriesRoot} {
+		for _, root := range []string{tree, tree + "/state", tree + "/"} {
+			t.Run(root, func(t *testing.T) {
+				writeConfig(t, strings.Replace(sampleConfig, `"/Users/steve/.shuttle/weft"`, strconv.Quote(root), 1))
+				_, err := Load()
+				if err == nil || !strings.Contains(err.Error(), "weft.weft_root") || !strings.Contains(err.Error(), "inside "+tree+",") {
+					t.Fatalf("Load = %v, want weft.weft_root refused naming %s", err, tree)
+				}
+			})
+		}
+		writeConfig(t, strings.Replace(sampleConfig, `"/Users/steve/.shuttle/weft"`, strconv.Quote(tree+"-state"), 1))
+		if _, err := Load(); err != nil {
+			t.Fatalf("a sibling of %s: %v", tree, err)
+		}
+	}
+}
+
+// An alias of a shared tree is the tree: a symlink to it or to an ancestor,
+// and a case alias on a case-insensitive volume, are refused as its own
+// spelling is, while a sibling is not.
+func TestValidateWeftRootJudgesByIdentity(t *testing.T) {
+	base := t.TempDir()
+	trees := []string{filepath.Join(base, "shared", "worktrees"), filepath.Join(base, "shared", "repos")}
+	for _, tree := range trees {
+		if err := os.MkdirAll(tree, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links := t.TempDir()
+	for i, tree := range trees {
+		name := filepath.Base(tree)
+		link := filepath.Join(links, name)
+		if err := os.Symlink(tree, link); err != nil {
+			t.Fatal(err)
+		}
+		shared := filepath.Join(links, "shared-"+name)
+		if err := os.Symlink(filepath.Dir(tree), shared); err != nil {
+			t.Fatal(err)
+		}
+		refused := []string{link, filepath.Join(link, "state"), filepath.Join(shared, name, "state")}
+		upper := filepath.Join(filepath.Dir(tree), strings.ToUpper(name))
+		if _, err := os.Stat(upper); err == nil {
+			refused = append(refused, upper, filepath.Join(upper, "state"))
+		} else {
+			t.Logf("%s: the volume is case-sensitive; no case alias to test", upper)
+		}
+		for _, root := range refused {
+			err := validateWeftRoot(root, trees)
+			if err == nil || !strings.Contains(err.Error(), "inside "+trees[i]+",") {
+				t.Errorf("validateWeftRoot(%s) = %v, want it refused as inside %s", root, err, trees[i])
+			}
+		}
+	}
+	for _, root := range []string{filepath.Join(base, "shared", "state"), filepath.Join(base, "shared", "repos-state"), filepath.Join(links, "elsewhere")} {
+		if err := validateWeftRoot(root, trees); err != nil {
+			t.Errorf("validateWeftRoot(%s) = %v, want it accepted", root, err)
+		}
+	}
+	// A tree not on disk refuses its own spelling.
+	missing := filepath.Join(base, "missing", "worktrees")
+	if err := validateWeftRoot(filepath.Join(missing, "state"), []string{missing}); err == nil {
+		t.Errorf("a root inside a tree not on disk was accepted")
+	}
+}
+
+// The real directory answers for the operator and for an account with no
+// supplementary groups to hide.
+func TestLookupAccountReadsTheDirectory(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, groups, err := lookupAccount(me.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid != strconv.Itoa(os.Getuid()) || len(groups) == 0 {
+		t.Fatalf("lookupAccount(%s) = %s %v", me.Username, uid, groups)
+	}
+	if _, _, err := lookupAccount("no-such-agent-user-0"); err == nil {
+		t.Fatal("an unknown account was read")
 	}
 }

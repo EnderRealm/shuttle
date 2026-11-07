@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -54,40 +53,20 @@ func groupMembers(pgid int) ([]member, error) {
 	return members, nil
 }
 
-// processIsRun reports whether the process's argv carries the run's settings
-// argument or hosted worker sandbox profile. Both paths are beneath run_dir
-// and carry the run id. The two argv elements must be adjacent and the path must
-// match exactly — a process that merely mentions a file under the directory,
-// in its exec path, in some other argument or in its environment, is not the
-// run and must never be signalled.
-//
-// The assumption is that §11's sandbox launcher (Options.Launcher, not built
-// yet) wraps the argv rather than replacing it, so the settings argument stays
-// on the leader. A launcher that scrubbed the argv answers (false, nil), which
-// is an established answer: the row is closed as foreign and never signalled. An
-// argv that cannot be read answers with the error instead, which establishes
-// nothing and leaves the row in flight.
-func processIsRun(pid int, dir string) (bool, error) {
-	// kern.procargs2 answers for a process of the same uid only. Another user's
-	// process is already foreign by identify's kill 0, so an EPERM here is a
-	// lookup that establishes nothing and the row is held rather than closed.
+// processArgv is the process's argv as kern.procargs2 answers it.
+// kern.procargs2 answers for a process of the same uid only. Another user's
+// process is already foreign by identify's kill 0, so an EPERM here is a
+// lookup that establishes nothing and the row is held rather than closed.
+func processArgv(pid int) ([]string, error) {
 	buf, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil {
-		return false, fmt.Errorf("kern.procargs2 %d: %w", pid, err)
+		return nil, fmt.Errorf("kern.procargs2 %d: %w", pid, err)
 	}
 	argv, err := parseProcArgs(buf)
 	if err != nil {
-		return false, fmt.Errorf("kern.procargs2 %d: %w", pid, err)
+		return nil, fmt.Errorf("kern.procargs2 %d: %w", pid, err)
 	}
-	settings := filepath.Join(dir, settingsFile)
-	profile := filepath.Join(dir, sandboxProfileFile)
-	for i := 0; i+1 < len(argv); i++ {
-		if (argv[i] == settingsFlag && argv[i+1] == settings) ||
-			(argv[i] == sandboxProfileFlag && argv[i+1] == profile) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return argv, nil
 }
 
 // parseProcArgs reads the argv out of a kern.procargs2 answer. The layout is a
@@ -177,6 +156,43 @@ func userProcesses() ([]member, error) {
 		})
 	}
 	return members, nil
+}
+
+// uidProcesses is every live process whose real uid is uid, with its parent
+// and exec path. The path is read after the listing, so a process whose start
+// time no longer matches the listing's once it is read keeps no path: it is
+// then a survivor rather than an exempt service, and the caller lists again.
+func uidProcesses(uid int) ([]UserProcess, error) {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.ruid", uid)
+	if err != nil {
+		return nil, fmt.Errorf("kern.proc.ruid %d: %w", uid, err)
+	}
+	out := make([]UserProcess, 0, len(procs))
+	for _, kp := range procs {
+		if kp.Proc.P_stat == szomb {
+			continue
+		}
+		sec, nsec := kp.Proc.P_starttime.Unix()
+		p := UserProcess{
+			PID: int(kp.Proc.P_pid), PPID: int(kp.Eproc.Ppid), Start: time.Unix(sec, nsec),
+			Comm: unix.ByteSliceToString(kp.Proc.P_comm[:]),
+		}
+		path, err := execPath(p.PID)
+		if errors.Is(err, errProcessGone) {
+			continue
+		}
+		now, _, stateErr := readState(p.PID)
+		switch {
+		case errors.Is(stateErr, errProcessGone):
+			continue
+		case stateErr != nil:
+			return nil, stateErr
+		case err == nil && now.Start.Equal(p.Start):
+			p.Path = path
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // processState is the kernel's current answer for pid: the process holding

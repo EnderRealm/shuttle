@@ -8,11 +8,14 @@ import (
 	"io"
 	"maps"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"shuttle/internal/keychain"
+	"shuttle/internal/sandbox"
 )
 
 const (
@@ -25,10 +28,15 @@ const (
 	ledgerFile = "runs.db"
 	reportsDir = "reports"
 
-	// hostedRepositoriesRoot is where every hosted checkout lives. It mirrors
-	// SHARED_ROOT/repos in scripts/agent-users/common.sh, the tree setup.sh
-	// makes agent-writable.
-	hostedRepositoriesRoot = "/Users/Shared/weft/repos"
+	// HostedSharedRoot is SHARED_ROOT in scripts/agent-users/common.sh, the
+	// root of the two trees setup.sh makes agent-writable.
+	HostedSharedRoot = "/Users/Shared/weft"
+	// HostedWorktreeRoot is SHARED_ROOT/worktrees, where every hosted run's
+	// worktree lives: the --worktree-root a segment's worker is launched with.
+	HostedWorktreeRoot = HostedSharedRoot + "/" + sandbox.WorktreesDir
+	// hostedRepositoriesRoot is SHARED_ROOT/repos, where every hosted checkout
+	// lives.
+	hostedRepositoriesRoot = HostedSharedRoot + "/repos"
 )
 
 // Config is config.json, the §4.2 shape. Credentials are Keychain item names
@@ -91,13 +99,16 @@ type Output struct {
 // An empty Listen disables the service, which keeps phase-1 installations
 // unchanged until the block is configured.
 type Weft struct {
-	Listen                string      `json:"listen"`
-	KeychainItem          string      `json:"keychain_item"`
-	OAuthKeychainItem     string      `json:"oauth_keychain_item"`
-	WorkerBin             string      `json:"worker_bin"`
-	Root                  string      `json:"weft_root"`
-	SegmentTimeoutSeconds int         `json:"segment_timeout_seconds"`
-	Sandbox               WeftSandbox `json:"sandbox"`
+	Listen                string `json:"listen"`
+	KeychainItem          string `json:"keychain_item"`
+	OAuthKeychainItem     string `json:"oauth_keychain_item"`
+	WorkerBin             string `json:"worker_bin"`
+	Root                  string `json:"weft_root"`
+	SegmentTimeoutSeconds int    `json:"segment_timeout_seconds"`
+	// AgentUsers are the hosted slots' macOS users (docs/agent-users.md).
+	// Each live segment runs as one of them, never shared, so capacity is
+	// never more than there are.
+	AgentUsers []string `json:"agent_users,omitempty"`
 	// Repositories binds each hosted tk project to its checkout, a directory
 	// directly under /Users/Shared/weft/repos. tk's config.yaml decides which
 	// projects exist; only this map decides where their work runs, so a
@@ -109,11 +120,6 @@ type Weft struct {
 // holds the long-lived `claude setup-token` token a hosted segment inherits as
 // CLAUDE_CODE_OAUTH_TOKEN, when weft.oauth_keychain_item is unset.
 const DefaultWeftOAuthKeychainItem = "weft-claude-oauth-token"
-
-type WeftSandbox struct {
-	AllowedDomains []string `json:"allowed_domains"`
-	AllowWrite     []string `json:"allow_write"`
-}
 
 // Observer is one operator-owned domain integration. Commands are argv arrays
 // so they are executed directly, never through a shell, and WorkingDir is
@@ -201,7 +207,120 @@ func Load() (*Config, error) {
 	if err := validateRepositories(hostedRepositoriesRoot, c.Weft.Repositories); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	if err := validateAgentUsers(c.Weft.AgentUsers); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	// Both trees carry the inheritable agent-write ACL (docs/agent-users.md).
+	if err := validateWeftRoot(c.Weft.Root, []string{HostedWorktreeRoot, hostedRepositoriesRoot}); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	return &c, nil
+}
+
+// validateWeftRoot refuses a weft_root at or inside any of trees, which agent
+// users can write. Containment is judged by spelling and by file identity,
+// through the deepest existing ancestor of each, so a symlink, firmlink or
+// case alias into a tree is refused as the tree itself is, and a tree not on
+// disk yet still refuses its own spelling. A containment that cannot be
+// established refuses the load.
+func validateWeftRoot(root string, trees []string) error {
+	if root == "" {
+		return nil
+	}
+	clean := filepath.Clean(root)
+	for _, tree := range trees {
+		inside, err := sandbox.Covers(tree, clean)
+		if err != nil {
+			return fmt.Errorf("weft.weft_root: %s: whether it is inside %s, which agent users can write, cannot be established: %v", root, tree, err)
+		}
+		if inside {
+			return fmt.Errorf("weft.weft_root: %s is at or inside %s, which agent users can write; the run logs, summaries and base records under it must be the operator's alone",
+				root, tree)
+		}
+	}
+	return nil
+}
+
+// refusedAgentGroups are the groups an agent user may not be in: staff can
+// read the operator's 0750 home and admin is one sudo away from everything,
+// so either undoes the boundary (docs/agent-users.md). weft-worker refuses
+// the same two at launch.
+var refusedAgentGroups = []string{"admin", "staff"}
+
+// lookupAccount answers a user's uid and the name of every group it is in,
+// primary and supplementary. A var so a test can stand in for the directory.
+var lookupAccount = func(name string) (string, []string, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return "", nil, err
+	}
+	gids, err := u.GroupIds()
+	if err != nil {
+		return "", nil, err
+	}
+	groups := make([]string, 0, len(gids))
+	for _, gid := range gids {
+		g, err := user.LookupGroupId(gid)
+		if err != nil {
+			return "", nil, err
+		}
+		groups = append(groups, g.Name)
+	}
+	return u.Uid, groups, nil
+}
+
+// validateAgentUsers refuses an agent user list that would not bound a
+// segment: a name sudo could read as something else, a duplicate name or
+// uid, which two live segments would share as one containment domain, the
+// operator, and a member of a refused group. An account whose groups cannot be read is refused rather than
+// assumed outside them.
+func validateAgentUsers(names []string) error {
+	operator := strconv.Itoa(os.Getuid())
+	uids := map[string]int{}
+	for i, name := range names {
+		key := fmt.Sprintf("weft.agent_users[%d]", i)
+		if !WellFormedAgentUser(name) {
+			return fmt.Errorf("%s: %q is not an account name: letters, digits, _, - and ., starting with a letter or _", key, name)
+		}
+		if j := slices.Index(names, name); j < i {
+			return fmt.Errorf("%s: %s is also weft.agent_users[%d]; each live segment holds its own agent user", key, name, j)
+		}
+		uid, groups, err := lookupAccount(name)
+		if err != nil {
+			return fmt.Errorf("%s: %s: its account and groups cannot be read: %v", key, name, err)
+		}
+		if uid == operator {
+			return fmt.Errorf("%s: %s is the operator; a segment run as the operator is bounded by nothing", key, name)
+		}
+		if j, ok := uids[uid]; ok {
+			return fmt.Errorf("%s: %s has uid %s, as weft.agent_users[%d] %s does; each live segment holds its own uid, which is what its containment kills",
+				key, name, uid, j, names[j])
+		}
+		uids[uid] = i
+		for _, group := range refusedAgentGroups {
+			if slices.Contains(groups, group) {
+				return fmt.Errorf("%s: %s is a member of %s, which undoes the agent user boundary", key, name, group)
+			}
+		}
+	}
+	return nil
+}
+
+// WellFormedAgentUser reports whether name is one weft-worker takes as
+// --agent-user: an account name's own characters, starting with a letter or
+// _. sudo reads -u -x as a flag and -u #501 as a uid, so the first character
+// matters as much as the rest.
+func WellFormedAgentUser(name string) bool {
+	for i, r := range name {
+		letter := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+		if i == 0 && !letter && r != '_' {
+			return false
+		}
+		if !letter && !(r >= '0' && r <= '9') && r != '_' && r != '-' && r != '.' {
+			return false
+		}
+	}
+	return name != ""
 }
 
 // validateRepositories refuses a hosted checkout binding agent users could not

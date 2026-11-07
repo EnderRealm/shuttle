@@ -221,10 +221,10 @@ func newStudio(t *testing.T) *studio {
 	s.projects["docs-site"] = filepath.Join(s.code, "docs-site")
 	s.cfg = &config.Config{
 		Timezone: "UTC",
-		Paths:    config.Paths{TKConfig: s.tkConfig, SRTBin: "/usr/bin/true"},
+		Paths:    config.Paths{TKConfig: s.tkConfig},
 		Weft: config.Weft{
 			Listen: "127.0.0.1:0", WorkerBin: "/usr/bin/true",
-			Root: filepath.Join(root, "weft"), SegmentTimeoutSeconds: 10,
+			Root: filepath.Join(root, "weft"), SegmentTimeoutSeconds: 10, AgentUsers: fixtureAgentUsers,
 		},
 	}
 	s.writeConfig()

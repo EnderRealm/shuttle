@@ -40,6 +40,8 @@ type queueHost struct {
 	logs     *syncBuffer
 	// capabilities are what a weft-worker/v2 fixture worker's probe lists.
 	capabilities []any
+	// users is the agent users' process table the supervisor kills against.
+	users *userTable
 }
 
 type syncBuffer struct {
@@ -59,42 +61,49 @@ func (b *syncBuffer) String() string {
 	return b.b.String()
 }
 
+// queueWorkerScript is a weft-worker/v2 worker: its version is the control
+// directory's version.json, and its hello repeats CAPABILITIES.
 const queueWorkerScript = `#!/bin/sh
-case "$1" in version|allowance-probe) exit 64 ;; esac
-run= segment= ticket= repo= weftroot= resume= answerfile=
+control=CONTROL
+case "$1" in
+  version) cat "$control/version.json"; exit 0 ;;
+  allowance-probe) exit 64 ;;
+esac
+run= segment= ticket= repo= worktreeroot= resume= answerfile=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --run) run="$2"; shift 2 ;;
     --segment) segment="$2"; shift 2 ;;
     --ticket) ticket="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
-    --weft-root) weftroot="$2"; shift 2 ;;
+    --worktree-root) worktreeroot="$2"; shift 2 ;;
     --resume) resume="$2"; shift 2 ;;
     --answer-file) answerfile="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
-control=CONTROL
 slug=$(printf '%s' "$ticket" | tr / -)
 printf '%s %s\n' "$run" "$segment" >> "$control/$slug.log"
 mode=park
 if [ -f "$control/$slug" ]; then mode=$(cat "$control/$slug"); fi
 project=${ticket%%/*}
 hash=$(printf '%s' "$repo" | /usr/bin/shasum -a 256 | cut -c1-8)
-worktree="$weftroot/worktrees/$(basename "$repo")-$hash/$slug"
+worktree="$worktreeroot/$(basename "$repo")-$hash/$slug"
 worker="20261011T12000${segment}Z-0000000${segment}"
 resumed=null
 if [ -n "$resume" ]; then resumed="\"$resume\""; fi
 answer=null
 if [ -n "$answerfile" ]; then answer="\"$(sed -n 's/.*"question_id":"\([^"]*\)".*/\1/p' "$answerfile")\""; fi
-env="\"contract_version\":\"weft-remote/v1\",\"run_id\":\"$run\",\"segment\":$segment"
+env="\"contract_version\":\"weft-worker/v2\",\"run_id\":\"$run\",\"segment\":$segment"
+landing='{"state":"not_applicable","step":null,"reason":null,"detail":"landing is not served by this host","branch":null,"commit":null}'
+summary='{"state":"unavailable","reason":"fixture worker"}'
 if [ "$mode" = stale ]; then
-  printf '{%s,"worker_run_id":null,"seq":1,"ts":"2026-10-11T12:00:00.000Z","event":"ended","outcome":"failed","stopped":false,"halt":null,"failure":"stale_base","detail":"main in %s moved past the base this run recorded; nothing was relaunched and the answer was not consumed","head":"","summary":null}\n' "$env" "$repo"
+  printf '{%s,"worker_run_id":null,"seq":1,"ts":"2026-10-11T12:00:00.000Z","event":"ended","outcome":"failed","failure":"stale_base","detail":"main in %s moved past the base this run recorded; nothing was relaunched and the answer was not consumed","landing":%s}\n' "$env" "$repo" "$landing"
   exit 0
 fi
 mkdir -p "$worktree" "$repo/.git/worktrees/$slug"
 printf 'gitdir: %s\n' "$repo/.git/worktrees/$slug" > "$worktree/.git"
-printf '{%s,"worker_run_id":"%s","seq":1,"ts":"2026-10-11T12:00:00.000Z","event":"hello","worker_version":"fixture","ticket":"%s","project":"%s","branch":"%s","worktree":"%s","base":"base","criteria":"criteria","resumed":%s,"inherited":[],"answer":%s,"stages":[]}\n' "$env" "$worker" "$ticket" "$project" "$ticket" "$worktree" "$resumed" "$answer"
+printf '{%s,"worker_run_id":"%s","seq":1,"ts":"2026-10-11T12:00:00.000Z","event":"hello","worker_version":"weft-worker 0.2.0 (weft@dev)","capabilities":CAPABILITIES,"land":false,"environment":{"tk_store_root":null,"work_evidence_dir":null},"registered":true,"ticket":"%s","project":"%s","branch":"%s","worktree":"%s","base":"base","criteria":"criteria","resumed":%s,"inherited":[],"answer":%s,"stages":[]}\n' "$env" "$worker" "$ticket" "$project" "$ticket" "$worktree" "$resumed" "$answer"
 if [ "$mode" = hold ]; then
   while [ ! -f "$control/$slug.release" ]; do sleep 0.02; done
   rm -f "$control/$slug.release"
@@ -105,23 +114,21 @@ if [ "$mode" = die ]; then
 fi
 if [ "$mode" = stopstage ]; then
   printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"stage","stage":"work","backend":"claude","occurrence":1,"attempt":1,"state":"stopped","session":null,"detail":null,"exit_code":null,"turns":1,"spend":null,"processing_ms":100,"tokens":null}\n' "$env" "$worker"
-  printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:01.000Z","event":"ended","outcome":"stopped","stopped":true,"halt":null,"failure":null,"detail":null,"head":"head","summary":{"state":"unavailable","reason":"fixture worker"}}\n' "$env" "$worker"
+  printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:01.000Z","event":"graded","outcome":"stopped","stopped":true,"halt":null,"detail":null,"head":"head","summary":%s}\n' "$env" "$worker" "$summary"
+  printf '{%s,"worker_run_id":"%s","seq":4,"ts":"2026-10-11T12:01:01.000Z","event":"ended","outcome":"stopped","failure":null,"detail":null,"landing":%s}\n' "$env" "$worker" "$landing"
   exit 0
 fi
 if [ "$mode" = finish ]; then
-  printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"ended","outcome":"finished","stopped":false,"halt":null,"failure":null,"detail":null,"head":"head","summary":{"state":"unavailable","reason":"fixture worker"}}\n' "$env" "$worker"
+  printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"graded","outcome":"finished","stopped":false,"halt":null,"detail":null,"head":"head","summary":%s}\n' "$env" "$worker" "$summary"
+  printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:00.000Z","event":"ended","outcome":"finished","failure":null,"detail":null,"landing":%s}\n' "$env" "$worker" "$landing"
   exit 0
 fi
 printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"stage","stage":"work","backend":"claude","occurrence":1,"attempt":1,"state":"needs_input","session":null,"detail":null,"exit_code":null,"turns":1,"spend":null,"processing_ms":100,"tokens":null}\n' "$env" "$worker"
-printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:01.000Z","event":"parked","stage":"work","occurrence":1,"attempt":1,"worker_outcome":"blocked","question":"Which shape?","head":"head","summary":{"state":"unavailable","reason":"fixture worker"}}\n' "$env" "$worker"
+printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:01.000Z","event":"parked","stage":"work","occurrence":1,"attempt":1,"worker_outcome":"blocked","question":"Which shape?","head":"head","summary":%s}\n' "$env" "$worker" "$summary"
 `
 
 func newQueueHost(t *testing.T) *queueHost {
 	t.Helper()
-	// Short: the sandbox preflight's socket path under each run directory
-	// must fit the platform's limit. That is /tmp, not os.TempDir(): srt's mux
-	// socket has to fit 103 bytes, which the preflight enforces even against a
-	// stand-in srt, and on macOS os.TempDir() alone is 49–57.
 	root, err := os.MkdirTemp("/tmp", "wq-")
 	if err != nil {
 		t.Fatal(err)
@@ -141,21 +148,24 @@ func newQueueHost(t *testing.T) *queueHost {
 		h.checkout(name)
 		h.projects[name] = filepath.Join(h.code, name)
 	}
-	srt := filepath.Join(root, "srt")
 	worker := filepath.Join(root, "weft-worker")
 	h.cfg = &config.Config{
 		Timezone: "UTC",
-		Paths:    config.Paths{TKConfig: h.tkConfig, SRTBin: srt, LoomHome: filepath.Join(root, "loom")},
+		Paths:    config.Paths{TKConfig: h.tkConfig, LoomHome: filepath.Join(root, "loom")},
 		Weft: config.Weft{
 			Listen: "127.0.0.1:0", WorkerBin: worker, Root: fixtureWeftRoot(t),
-			OAuthKeychainItem: fixtureOAuthItem, SegmentTimeoutSeconds: 30,
+			OAuthKeychainItem: fixtureOAuthItem, SegmentTimeoutSeconds: 30, AgentUsers: fixtureAgentUsers,
 		},
 	}
 	h.writeConfig()
-	if err := os.WriteFile(srt, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	// worker-version.json less land and reconcile: landing is not served.
+	h.capabilities = h.writeVersion("land", "reconcile")
+	caps, err := json.Marshal(h.capabilities)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(worker, []byte(strings.Replace(queueWorkerScript, "CONTROL", h.control, 1)), 0o700); err != nil {
+	script := strings.Replace(strings.Replace(queueWorkerScript, "CONTROL", h.control, 1), "CAPABILITIES", string(caps), 1)
+	if err := os.WriteFile(worker, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	store, err := ledger.Open(filepath.Join(root, "runs.db"))
@@ -173,6 +183,9 @@ func newQueueHost(t *testing.T) *queueHost {
 		}
 		return fixtureOAuthToken, nil
 	}
+	h.users = newUserTable()
+	service.segments.sharedRoot = filepath.Join(root, "shared")
+	service.segments.killUser = h.users.killer().KillUser
 	h.serviceFixture = &serviceFixture{root: root, store: store, service: service}
 	// Every worker this host spawned has exited and been reaped before the
 	// temporary root goes.
@@ -570,7 +583,7 @@ func TestIndependentRepositoriesProgressPastABlockedEntry(t *testing.T) {
 	}
 	h.send(http.MethodPut, "/v2/queue/capacity", "cap-0", fmt.Sprintf(
 		`{"contract_version":"weft-service/v2","cap":0,"revision":%d}`, h.queueRevision())).refused(t, http.StatusBadRequest, "malformed")
-	h.send(http.MethodPut, "/v2/queue/capacity", "cap-stale", `{"contract_version":"weft-service/v2","cap":4,"revision":1}`).
+	h.send(http.MethodPut, "/v2/queue/capacity", "cap-stale", `{"contract_version":"weft-service/v2","cap":3,"revision":1}`).
 		refused(t, http.StatusConflict, "revision_conflict")
 	raised := h.send(http.MethodPut, "/v2/queue/capacity", "cap-3", fmt.Sprintf(
 		`{"contract_version":"weft-service/v2","cap":3,"revision":%d}`, h.queueRevision()))
@@ -857,12 +870,12 @@ func TestStaleBaseHoldsTheRunAndItsAnswer(t *testing.T) {
 	if question["state"] != "answered" || question["answer"].(map[string]any)["consumed_segment"] != nil {
 		t.Fatalf("question = %v", question)
 	}
-	// The v1 segment's answer file keeps weft-remote/v1's keys.
+	// The segment's answer file is weft-worker/v2's, naming the answer.
 	answerFile, err := os.ReadFile(filepath.Join(held.Segments[1].RunDir.String, "answer.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if file := decode(t, answerFile).(map[string]any); file["contract_version"] != ContractVersion || file["answer_id"] != nil {
+	if file := decode(t, answerFile).(map[string]any); file["contract_version"] != WorkerContractV2 || file["answer_id"] != held.Segments[1].AnswerID.String {
 		t.Fatalf("answer file = %s", answerFile)
 	}
 	h.send(http.MethodPost, "/v2/runs/"+runID+"/resume", "r1", revisionBody(held.Revision)).refused(t, http.StatusConflict, "stale_base")

@@ -194,6 +194,20 @@ only those two entries, scoped to a test root, the agent committed in a worktree
 `check.sh` injects no `safe.directory` of its own, so its git checks test what setup
 installed.
 
+**Hosted slots: `weft.agent_users`.** shuttle's `config.json` lists the users its hosted
+segments run as; the README gives the key's rules. Dispatch claims each launch, answer or resume
+segment with the first listed user no unsettled segment holds, records it on the segment, and
+launches the worker with `--agent-user <user> --worktree-root /Users/Shared/weft/worktrees`.
+Reconcile, cleanup and archive run as the operator and hold no user. The user is the segment's
+containment domain: once the worker has exited or been stopped, timed out or killed, and again
+after a daemon restart, shuttle repeats `sudo -n -u <user> /usr/bin/pkill -KILL -U <user>` until
+no process of the user's real uid is left, as `kill_agent` does, giving up after five seconds
+and naming each survivor. What it leaves is `distnoted`, `cfprefsd`, `lsd` and `secd`, each
+recognised by its exec path under `/usr/sbin` or `/usr/libexec` together with launchd as its
+parent, never by its short name. Until the kill succeeds the segment stays unsettled, holding its
+repository and its user. The worker's own children that run as the operator (git, tk, the
+security lens) are outside the uid and are swept by the worker's session as before.
+
 ## What it does not protect
 
 This is a uid boundary on a shared kernel. It makes the operator's files cost more to reach;

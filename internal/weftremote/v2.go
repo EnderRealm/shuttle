@@ -305,7 +305,7 @@ func (s *Service) handleService(w http.ResponseWriter) {
 		"conformance":     conformance(capabilities),
 		"capabilities":    listed,
 		"limits": map[string]any{
-			"capacity_default": ledger.WeftCapacityDefault, "segment_limit": 8, "settled_entry_hours": 12,
+			"capacity_default": min(ledger.WeftCapacityDefault, len(s.cfg.Weft.AgentUsers)), "segment_limit": 8, "settled_entry_hours": 12,
 			"idempotency_retention_days": int(idempotencyRetention / (24 * time.Hour)),
 			"event_retention_days":       int(eventRetention / (24 * time.Hour)),
 			"output_retention_bytes":     256 << 10, "terminal_retention_bytes": 4 << 20,

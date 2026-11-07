@@ -35,6 +35,9 @@ const (
 	WeftCapacityDefault = 3
 
 	weftCapacityKey = "capacity"
+	// weftAgentUsersKey is how many agent users the host was last started
+	// with, which an unset cap defaults to at most.
+	weftAgentUsersKey = "agent_users"
 	// weftEventFloorKey names the last seq allocated under weft-remote/v1, as
 	// the migration found it. Seqs continue across the migration (§14.2), so
 	// every event at or below it is a v1 payload and every one above a v2 one.
@@ -391,9 +394,10 @@ type WeftCounts struct {
 // WeftDashboardCounts reads every dashboard figure in one statement, so they
 // agree with each other. Capacity's running count is weftRunningSQL's.
 func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
-	c := WeftCounts{Capacity: WeftCapacityDefault}
-	var capacity sql.NullString
+	var c WeftCounts
+	var capacity, users sql.NullString
 	err := s.db.QueryRow(`SELECT
+		(SELECT value FROM weft_settings WHERE key=?),
 		(SELECT value FROM weft_settings WHERE key=?),
 		(SELECT count(*) FROM weft_runs WHERE phase IN (?,?,?)),
 		(SELECT count(*) FROM weft_runs WHERE phase=?),
@@ -403,18 +407,14 @@ func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
 		(`+weftRunningSQL+`),
 		(SELECT count(*) FROM weft_repositories WHERE dispatch='paused'),
 		(SELECT count(*) FROM weft_terminals WHERE state IN ('starting','live','detached'))`,
-		weftCapacityKey, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseSettling, WeftPhaseParked).
-		Scan(&capacity, &c.Active, &c.Blocked, &c.ActionRequired, &c.QuestionsPending, &c.Waiting,
+		weftCapacityKey, weftAgentUsersKey, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseSettling, WeftPhaseParked).
+		Scan(&capacity, &users, &c.Active, &c.Blocked, &c.ActionRequired, &c.QuestionsPending, &c.Waiting,
 			&c.Running, &c.RepositoriesPaused, &c.TerminalsOpen)
 	if err != nil {
 		return c, err
 	}
-	if capacity.Valid {
-		if c.Capacity, err = strconv.Atoi(capacity.String); err != nil {
-			return c, fmt.Errorf("weft capacity %q: %w", capacity.String, err)
-		}
-	}
-	return c, nil
+	c.Capacity, err = weftCap(capacity, users)
+	return c, err
 }
 
 // WeftEntryRef is the waiting or archiving entry a ticket has in the queue.
