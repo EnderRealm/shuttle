@@ -293,10 +293,11 @@ type fixtureTicket struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	} `json:"deps"`
-	Blocked     bool    `json:"blocked"`
-	Branch      *string `json:"branch"`
-	Question    *string `json:"question"`
-	Eligibility struct {
+	Blocked       bool    `json:"blocked"`
+	Branch        *string `json:"branch"`
+	Question      *string `json:"question"`
+	CriteriaCount int     `json:"criteria_count"`
+	Eligibility   struct {
 		State   string `json:"state"`
 		Reasons []struct {
 			Code   string `json:"code"`
@@ -326,6 +327,15 @@ func bare(id string) string {
 	return slug
 }
 
+// criteriaBody is a ticket body declaring n acceptance criteria, and no section
+// at all for none.
+func criteriaBody(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return "## Acceptance Criteria\n\n" + strings.Repeat("- It works.\n", n)
+}
+
 // seedFixtureCatalog writes tickets.json's weft tickets, the other projects'
 // tickets, and the runs and entry tickets.json shows.
 func (s *studio) seedFixtureCatalog() []fixtureTicket {
@@ -345,12 +355,7 @@ func (s *studio) seedFixtureCatalog() []fixtureTicket {
 		}
 		tk := &ticket.Ticket{
 			ID: bare(ft.ID), Title: ft.Title, Status: ticket.Status(ft.Status), Type: ticket.TicketType(ft.Type),
-			Created: updated.Add(-time.Hour), Updated: updated, Body: criterionBody,
-		}
-		for _, r := range ft.Eligibility.Reasons {
-			if r.Code == "no_acceptance_criteria" {
-				tk.Body = ""
-			}
+			Created: updated.Add(-time.Hour), Updated: updated, Body: criteriaBody(ft.CriteriaCount),
 		}
 		if ft.Priority != nil {
 			tk.Priority = *ft.Priority
@@ -783,6 +788,91 @@ func TestCatalogServesEveryProjectAndTicketWithEligibility(t *testing.T) {
 	s.errorBody(http.MethodGet, "/v2/tickets/nowhere/first-0001", http.StatusNotFound, "ticket_not_found")
 }
 
+// A board reads each card's count off the listing, so the listing and a
+// ticket's detail both carry what tk parses, 0 written out where there is
+// none: on a ticket another reason already refuses, and in a project with no
+// checkout, as much as on a launchable one.
+func TestV2TicketListingCriteriaCount(t *testing.T) {
+	s := newStudio(t)
+	tickets := s.seedFixtureCatalog()
+
+	listing := s.get("/v2/tickets?project=weft")
+	learn(decode(t, fixtureBytes(t, "tickets.json"))).check(t, "tickets", listing)
+	rows := map[string]map[string]any{}
+	for _, row := range listing["tickets"].([]any) {
+		rows[row.(map[string]any)["id"].(string)] = row.(map[string]any)
+	}
+	if len(rows) != len(tickets) {
+		t.Fatalf("weft tickets = %v, want every one of tickets.json", keysOf(rows))
+	}
+	zeros := 0
+	for _, ft := range tickets {
+		if ft.CriteriaCount == 0 {
+			zeros++
+		}
+		want := float64(ft.CriteriaCount)
+		if got := rows[ft.ID]["criteria_count"]; got != want {
+			t.Errorf("listing %s criteria_count = %v, want %v", ft.ID, got, want)
+		}
+		if got := s.get("/v2/tickets/" + ft.ID)["ticket"].(map[string]any)["criteria_count"]; got != want {
+			t.Errorf("detail %s criteria_count = %v, want %v", ft.ID, got, want)
+		}
+	}
+	if zeros == 0 {
+		t.Fatal("tickets.json shows no ticket with 0 criteria")
+	}
+
+	var detail struct {
+		Ticket fixtureTicket `json:"ticket"`
+	}
+	fixtureJSON(t, "ticket.json", &detail)
+	one := s.get("/v2/tickets/" + detail.Ticket.ID)
+	learn(decode(t, fixtureBytes(t, "ticket.json"))).check(t, "ticket", one)
+	if got := one["ticket"].(map[string]any)["criteria_count"]; got != float64(detail.Ticket.CriteriaCount) {
+		t.Errorf("ticket.json's %s criteria_count = %v, want %d", detail.Ticket.ID, got, detail.Ticket.CriteriaCount)
+	}
+
+	// What tk does and does not read as a criterion, spelled out rather than
+	// derived from the parser under test.
+	created := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		slug, body string
+		want       float64
+	}{
+		{"empty-0001", "", 0},
+		{"prose-0002", "Why.\n\n## Acceptance Criteria\n\nIt should work.\n", 0},
+		{"elsewhere-0003", "- A bullet in the description.\n\n## Design\n\n- A bullet in the design.\n", 0},
+		{"mixed-0004", "- A bullet in the description.\n\n## Acceptance Criteria\n\n" +
+			"- Checked.\n  verify: go test ./...\n- Read.\n  unverifiable: a human read-through.\n- Stated.\n  - A nested bullet.\n", 3},
+	} {
+		writeTicketIn(t, s.central, "loom", &ticket.Ticket{
+			ID: c.slug, Status: ticket.StatusReady, Type: ticket.TypeFeature, Priority: 1, Title: "Case",
+			Body: c.body, Created: created, Updated: created,
+		})
+		if got := s.get("/v2/tickets/loom/" + c.slug)["ticket"].(map[string]any)["criteria_count"]; got != c.want {
+			t.Errorf("detail %s criteria_count = %v, want %v", c.slug, got, c.want)
+		}
+		found := false
+		for _, row := range s.get("/v2/tickets?project=loom")["tickets"].([]any) {
+			if row := row.(map[string]any); row["id"] == "loom/"+c.slug {
+				found = true
+				if row["criteria_count"] != c.want {
+					t.Errorf("listing %s criteria_count = %v, want %v", c.slug, row["criteria_count"], c.want)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("loom/%s is not in the listing", c.slug)
+		}
+	}
+
+	for _, row := range s.get("/v2/tickets?project=docs-site")["tickets"].([]any) {
+		if row := row.(map[string]any); row["criteria_count"] != float64(1) {
+			t.Errorf("docs-site %s criteria_count = %v, want 1", row["id"], row["criteria_count"])
+		}
+	}
+}
+
 func reasonCode(project map[string]any) any {
 	if r, ok := project["reason"].(map[string]any); ok {
 		return r["code"]
@@ -815,7 +905,7 @@ func (s *studio) compareTicket(row map[string]any, want fixtureTicket) {
 	for key, value := range map[string]any{
 		"id": want.ID, "project": "weft", "title": want.Title, "status": want.Status, "type": want.Type,
 		"blocked": want.Blocked, "deps": deps, "parent": optional(want.Parent), "branch": optional(want.Branch),
-		"question": optional(want.Question),
+		"question": optional(want.Question), "criteria_count": float64(want.CriteriaCount),
 	} {
 		if !reflect.DeepEqual(row[key], value) {
 			t.Errorf("%s.%s = %v, want %v", want.ID, key, row[key], value)

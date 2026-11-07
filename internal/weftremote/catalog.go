@@ -458,8 +458,13 @@ func (v *catalogView) ticketRow(p *catalogProject, t *ticket.Ticket) map[string]
 		"type": string(t.Type), "priority": t.Priority, "updated": formatTime(t.Updated),
 		"parent": parent, "deps": deps, "blocked": v.snap.IsBlocked(t.ID), "branch": branch,
 		"question": question, "eligibility": map[string]any{"state": state, "reasons": reasons},
-		"run": runRef, "entry": entryRef,
+		"run": runRef, "entry": entryRef, "criteria_count": criteriaCount(t),
 	}
+}
+
+// criteriaCount is how many acceptance criteria tk parses from the ticket.
+func criteriaCount(t *ticket.Ticket) int {
+	return len(ticket.ParseCriteria(ticket.AcceptanceCriteria(t.Body)))
 }
 
 // ineligibility lists why the host would not launch the ticket. What tk says
@@ -524,7 +529,7 @@ func tkIneligibility(snap *ticket.Snapshot, t *ticket.Ticket) []map[string]any {
 	// A ticket with no criteria has no contract for a run to be held to. Its
 	// status or kind, where either already refuses it, is the reason to show;
 	// criteria that are all unverifiable are still a contract.
-	if len(reasons) == 0 && len(ticket.ParseCriteria(ticket.AcceptanceCriteria(t.Body))) == 0 {
+	if len(reasons) == 0 && criteriaCount(t) == 0 {
 		add("no_acceptance_criteria", "the ticket declares no acceptance criteria; add them before it can run")
 	}
 	if snap.IsBlocked(t.ID) {
