@@ -158,8 +158,12 @@ func bumpQueueRevisionTx(tx *sql.Tx) (int64, error) {
 }
 
 // WeftHostPausedDetail says why the host dispatches nothing: the operator's
-// (or the failure streak's) pause of the weft-worker agent.
+// (or the failure streak's) pause of the weft-worker agent, or the updater's,
+// which lifts itself and offers the reader nothing to do.
 func WeftHostPausedDetail(reason, since string) string {
+	if reason == PauseUpdate {
+		return fmt.Sprintf("shuttle is updating: dispatch paused since %s, and it resumes when the update finishes", since)
+	}
 	return fmt.Sprintf("%s is paused (%s) since %s; shuttle resume %s lifts it", WeftAgent, reason, since, WeftAgent)
 }
 
@@ -170,6 +174,57 @@ func weftHostPaused(q querier) (paused bool, reason, since string, err error) {
 		return false, "", "", nil
 	}
 	return paused, r.String, at.String, err
+}
+
+// WeftHost is the host-wide dispatch state (weft-service/v2 §5.3): dispatch,
+// open or paused, and the words a client shows for a pause.
+type WeftHost struct{ Dispatch, Reason string }
+
+// Resource is the state as the dashboard's host and the host event carry it.
+func (h WeftHost) Resource() map[string]any {
+	var reason any
+	if h.Dispatch == WeftDispatchPaused {
+		reason = h.Reason
+	}
+	return map[string]any{"dispatch": h.Dispatch, "reason": reason}
+}
+
+// WeftHost reads the host-wide dispatch state.
+func (s *Store) WeftHost() (WeftHost, error) { return weftHost(s.db) }
+
+func weftHost(q querier) (WeftHost, error) {
+	paused, reason, since, err := weftHostPaused(q)
+	if err != nil || !paused {
+		return WeftHost{Dispatch: WeftDispatchOpen}, err
+	}
+	return WeftHost{Dispatch: WeftDispatchPaused, Reason: WeftHostPausedDetail(reason, since)}, nil
+}
+
+// weftHostStepTx runs change, a write to agent's pause, and writes the host
+// event (§10) in the same transaction when it moved the host-wide state or
+// its reason. Every write to a pause goes through here, whichever process
+// makes it: the state stream reads the ledger, so another process's event
+// reaches a connected client as the daemon's own do.
+func weftHostStepTx(tx *sql.Tx, agent, stamp string, change func() error) error {
+	if agent != WeftAgent {
+		return change()
+	}
+	before, err := weftHost(tx)
+	if err != nil {
+		return err
+	}
+	if err := change(); err != nil {
+		return err
+	}
+	after, err := weftHost(tx)
+	if err != nil || after == before {
+		return err
+	}
+	return appendWeftEventTx(tx, "", "host", stamp, func(seq int64) any {
+		doc := after.Resource()
+		doc["contract_version"], doc["seq"], doc["ts"] = WeftServiceVersion, seq, stamp
+		return doc
+	})
 }
 
 // weftWaitingDetail says why a waiting entry waits.

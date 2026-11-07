@@ -146,8 +146,18 @@ type WeftTerminalOpen struct {
 // landing and still have its worktree, and a session in a repository takes
 // its terminal reservation — sharing the row other sessions there hold —
 // or is refused repository_reserved while a run, settlement or maintenance
-// holds it. A session in no registered repository reserves nothing.
+// holds it. A session in no registered repository reserves nothing. A restart
+// would end any session, so none opens under the restart barrier: the refusal
+// is repository_reserved because clients decode strictly and that is the code
+// this route already answers with for work that holds it off.
 func (t *WeftTx) OpenTerminal(o WeftTerminalOpen) (*WeftTerminal, error) {
+	held, err := t.store.restartBarrier(t.tx)
+	if err != nil {
+		return nil, err
+	}
+	if held {
+		return nil, refuse("repository_reserved", "shuttle is restarting for an update, and a terminal opens once the update finishes")
+	}
 	if o.RunID != "" {
 		if err := t.terminalRun(o.RunID); err != nil {
 			return nil, err

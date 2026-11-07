@@ -19,3 +19,6 @@ Thumbs.db
 # Test fixture worktree roots under package directories
 .cw-*/
 .weft-*/
+
+# GoReleaser output
+/dist/

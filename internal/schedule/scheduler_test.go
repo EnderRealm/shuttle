@@ -437,6 +437,31 @@ func TestGatedSlotsAreRecordedOncePerSlot(t *testing.T) {
 	}
 }
 
+// A slot the restart barrier refuses is neither run nor recorded, so the cursor
+// stays behind it and the first tick after the update claims that same slot.
+func TestSlotUnderTheRestartBarrierKeepsItsPlace(t *testing.T) {
+	def := agent("daily", cronTrigger("0 9 * * *", "America/Los_Angeles"))
+	h := newHarness(t, "2026-09-02T08:00:00-07:00", def)
+	h.fire(t, "daily", "2026-09-01T09:00:00-07:00", ledger.Result{})
+	if claimed, _, err := h.store.ClaimUpdatePause(); err != nil || !claimed {
+		t.Fatalf("pause = %t/%v", claimed, err)
+	}
+	if err := h.store.ArmRestartBarrier(24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	h.tickAt(t, "2026-09-02T09:06:00-07:00")
+	h.tickAt(t, "2026-09-02T09:07:00-07:00")
+	h.assertLedger(t, "daily completed@2026-09-01T09:00:00-07:00")
+	if !strings.Contains(h.logs.String(), "action=hold reason=restarting") {
+		t.Fatalf("logs:\n%s", h.logs.String())
+	}
+	if _, _, err := h.store.ReleaseUpdatePause(); err != nil {
+		t.Fatal(err)
+	}
+	h.tickAt(t, "2026-09-02T09:08:00-07:00")
+	h.assertLedger(t, "daily completed@2026-09-01T09:00:00-07:00", "daily claimed@2026-09-02T09:00:00-07:00")
+}
+
 // A manual run bypasses the schedule (§5), so a manual claim for a future day
 // must not move the scheduler's cursor past that day and silence the agent.
 func TestManualClaimForAFutureDayDoesNotSuppressTheNextSlot(t *testing.T) {

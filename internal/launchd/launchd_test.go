@@ -100,17 +100,49 @@ func TestDaemonSpecsShareTheSecretFreeEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(specs) != 2 {
-		t.Fatalf("spec count = %d, want 2", len(specs))
+	if len(specs) != 3 {
+		t.Fatalf("spec count = %d, want 3", len(specs))
 	}
-	if specs[0].Label != DaemonLabel || specs[1].Label != WatchdogLabel {
-		t.Fatalf("labels = (%q, %q)", specs[0].Label, specs[1].Label)
+	if specs[0].Label != DaemonLabel || specs[1].Label != WatchdogLabel || specs[2].Label != UpdaterLabel {
+		t.Fatalf("labels = (%q, %q, %q)", specs[0].Label, specs[1].Label, specs[2].Label)
 	}
-	if !reflect.DeepEqual(specs[0].Args, []string{"daemon"}) || !reflect.DeepEqual(specs[1].Args, []string{"watchdog"}) {
-		t.Fatalf("args = (%v, %v)", specs[0].Args, specs[1].Args)
+	if !reflect.DeepEqual(specs[0].Args, []string{"daemon"}) || !reflect.DeepEqual(specs[1].Args, []string{"watchdog"}) ||
+		!reflect.DeepEqual(specs[2].Args, []string{"updater", "daemon"}) {
+		t.Fatalf("args = (%v, %v, %v)", specs[0].Args, specs[1].Args, specs[2].Args)
 	}
 	if !reflect.DeepEqual(specs[0].Env, specs[1].Env) {
 		t.Fatalf("environments differ: %#v != %#v", specs[0].Env, specs[1].Env)
+	}
+	updater := specs[2]
+	if updater.LogPath != filepath.Join(home, "updater.log") || !updater.KeepAlive || !updater.RunAtLoad ||
+		updater.ThrottleIntervalSeconds != 30 {
+		t.Fatalf("updater spec = %+v", updater)
+	}
+	if updater.Env[EnvUpdaterInterval] != "5" {
+		t.Fatalf("updater interval = %q, want the default", updater.Env[EnvUpdaterInterval])
+	}
+	delete(updater.Env, EnvUpdaterInterval)
+	if !reflect.DeepEqual(specs[0].Env, updater.Env) {
+		t.Fatalf("updater environment = %#v, want the daemon's and the interval", updater.Env)
+	}
+}
+
+// The updater re-installs its own job from its own environment, so a tuned
+// interval has to survive that.
+func TestUpdaterSpecKeepsATunedInterval(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvAgentsDir, filepath.Join(home, "agents"))
+	t.Setenv(EnvUpdaterInterval, "15")
+	specs, err := DaemonSpecs("/bin/shuttle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if specs[2].Env[EnvUpdaterInterval] != "15" {
+		t.Fatalf("interval = %q", specs[2].Env[EnvUpdaterInterval])
+	}
+	if _, leaked := specs[0].Env[EnvUpdaterInterval]; leaked {
+		t.Fatal("the interval reached the daemon's environment")
 	}
 }
 

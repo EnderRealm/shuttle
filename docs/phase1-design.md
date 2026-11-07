@@ -160,7 +160,7 @@ email"; `config.json` says to whom. A prompt cannot change where mail goes.
     "provider": "cloudflare",
     "account_id": "…",
     "from": "shuttle@<your-domain>",
-    "to": ["steve_macbeth@hotmail.com"],
+    "to": ["you@example.com"],
     "keychain_item": "shuttle-cloudflare-token"
   },
   "anthropic": {
@@ -763,7 +763,7 @@ report keeps us far under.
 
 Setup on the Mac, by hand, before the first delivery: onboard a domain you control
 in Compute → Email Service → Email Sending (Cloudflare writes the SPF, DKIM and
-bounce MX records), add `steve_macbeth@hotmail.com` as a verified destination
+bounce MX records), add `you@example.com` as a verified destination
 address, create an API token with the Email Sending permission, and store it in
 Keychain as `shuttle-cloudflare-token`. Sending to a verified destination address
 is free on every plan; sending to unverified addresses needs the Workers Paid plan,
@@ -868,8 +868,13 @@ indefinitely as `pended nondemand spawn = inefficient`. `shuttle uninstall`
 removes the watchdog first, then the daemon, so the watchdog cannot revive a job
 being intentionally removed. Tunables are persisted to `~/.shuttle/daemon-env`
 first, loom's pattern, so a later updater can re-install from a daemon environment
-carrying none of them. The binary is installed to `~/.local/bin/shuttle` by
-`make install`; releases and the updater come in phase 2.
+carrying none of them. The binary reaches `~/.local/bin/shuttle` by `make install`
+once, and by release from then on: `shuttle install daemon` also installs
+`com.shuttle.updater`, a third job running `Args: ["updater", "daemon"]` with the same
+environment plus `SHUTTLE_UPDATER_INTERVAL_MINUTES`, logging to
+`~/.shuttle/updater.log`, and `shuttle uninstall` removes it first.
+[`releasing.md`](releasing.md) has the release, and the drain the updater does before
+it restarts anything.
 
 ## 14. Tests
 

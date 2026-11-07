@@ -144,6 +144,15 @@ func (s *Store) insertSlot(agent string, slot time.Time, triggerKind, status, sk
 // insertSlotTx writes one slot row inside the caller's transaction, so a gate
 // and its claim can share one (ClaimGated).
 func (s *Store) insertSlotTx(tx *sql.Tx, agent string, slot time.Time, triggerKind, status, skipReason string) (*Run, bool, error) {
+	if status == StatusClaimed {
+		held, err := s.restartBarrier(tx)
+		if err != nil {
+			return nil, false, err
+		}
+		if held {
+			return nil, false, ErrRestarting
+		}
+	}
 	id, err := NewRunID(agent, slot)
 	if err != nil {
 		return nil, false, err
@@ -373,8 +382,10 @@ func finishRun(tx *sql.Tx, id, status, now string, res Result, class, signature 
 // InFlight lists every run still claimed or running: the rows a daemon start
 // finds left behind by its predecessor (§5). The order is deterministic so the
 // restart pass reports them in the order they were claimed.
-func (s *Store) InFlight() ([]*Run, error) {
-	return s.queryRuns(
+func (s *Store) InFlight() ([]*Run, error) { return inFlightRuns(s.db) }
+
+func inFlightRuns(q querier) ([]*Run, error) {
+	return queryRuns(q,
 		`SELECT `+runColumns+` FROM runs WHERE status IN (?, ?) ORDER BY claimed_at, id`,
 		StatusClaimed, StatusRunning,
 	)
@@ -446,7 +457,11 @@ func (s *Store) Runs(agent string, limit int) ([]*Run, error) {
 
 // queryRuns runs a runColumns select and scans every row it returns.
 func (s *Store) queryRuns(query string, args ...any) ([]*Run, error) {
-	rows, err := s.db.Query(query, args...)
+	return queryRuns(s.db, query, args...)
+}
+
+func queryRuns(q querier, query string, args ...any) ([]*Run, error) {
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

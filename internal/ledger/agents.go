@@ -11,6 +11,11 @@ const (
 	PauseStreak = "streak"
 	PauseAuth   = "auth"
 	PauseManual = "operator"
+	// PauseUpdate is the updater's hold on weft-worker while it replaces the
+	// binary. ClaimUpdatePause sets it, and Resume under the restart barrier
+	// hands a pause back to it; only ReleaseUpdatePause lifts it on the
+	// updater's behalf.
+	PauseUpdate = "update"
 )
 
 // maxFailureStreak is the §6.3 auto-pause threshold. The alternative is a
@@ -31,12 +36,16 @@ type Agent struct {
 
 // Pause prevents future claims for an agent until Resume clears it.
 func (s *Store) Pause(name string) error {
-	_, err := s.db.Exec(
-		`INSERT INTO agents(name,paused,paused_reason,paused_at) VALUES(?,1,?,?)
-		 ON CONFLICT(name) DO UPDATE SET paused=1,paused_reason=excluded.paused_reason,paused_at=excluded.paused_at`,
-		name, PauseManual, s.timestamp(),
-	)
-	return err
+	return s.withTx(func(tx *sql.Tx) error {
+		return weftHostStepTx(tx, name, weftTimestamp(s.now()), func() error {
+			_, err := tx.Exec(
+				`INSERT INTO agents(name,paused,paused_reason,paused_at) VALUES(?,1,?,?)
+				 ON CONFLICT(name) DO UPDATE SET paused=1,paused_reason=excluded.paused_reason,paused_at=excluded.paused_at`,
+				name, PauseManual, s.timestamp(),
+			)
+			return err
+		})
+	})
 }
 
 // Agent reads an agent's ledger row. An agent that has never fired has no row;
@@ -57,23 +66,36 @@ func (s *Store) Agent(name string) (*Agent, error) {
 	return a, nil
 }
 
-// Resume clears an auto-pause and the streak that caused it (§6.3).
+// Resume clears an auto-pause and the streak that caused it (§6.3). Under the
+// restart barrier weft-worker's pause is what shuts dispatch, so it cannot go:
+// it becomes the update's, which the update's end lifts, and the resume holds
+// from there. The streak clears now either way.
 func (s *Store) Resume(name string) error {
-	res, err := s.db.Exec(
-		`UPDATE agents SET paused = 0, paused_reason = NULL, paused_at = NULL, failure_streak = 0
-			WHERE name = ?`, name,
-	)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("agent %s: not in the ledger", name)
-	}
-	return nil
+	return s.withTx(func(tx *sql.Tx) error {
+		return weftHostStepTx(tx, name, weftTimestamp(s.now()), func() error {
+			held, err := s.restartBarrier(tx)
+			if err != nil {
+				return err
+			}
+			query, args := `UPDATE agents SET paused = 0, paused_reason = NULL, paused_at = NULL, failure_streak = 0
+					WHERE name = ?`, []any{name}
+			if held && name == WeftAgent {
+				query, args = `UPDATE agents SET paused_reason = ?, failure_streak = 0 WHERE name = ?`, []any{PauseUpdate, name}
+			}
+			res, err := tx.Exec(query, args...)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return fmt.Errorf("agent %s: not in the ledger", name)
+			}
+			return nil
+		})
+	})
 }
 
 // recordSuccess resets the streak and stamps last_success_at. The pause is not
@@ -113,9 +135,11 @@ func recordFailure(tx *sql.Tx, agent, class, now string) error {
 	}
 	// `AND paused = 0` keeps the first pause's reason and timestamp: that is
 	// the one that explains why the agent stopped.
-	_, err = tx.Exec(
-		`UPDATE agents SET paused = 1, paused_reason = ?, paused_at = ? WHERE name = ? AND paused = 0`,
-		reason, now, agent,
-	)
-	return err
+	return weftHostStepTx(tx, agent, now, func() error {
+		_, err := tx.Exec(
+			`UPDATE agents SET paused = 1, paused_reason = ?, paused_at = ? WHERE name = ? AND paused = 0`,
+			reason, now, agent,
+		)
+		return err
+	})
 }

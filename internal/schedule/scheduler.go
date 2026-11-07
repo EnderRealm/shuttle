@@ -86,6 +86,12 @@ func (s *Scheduler) tickAgent(def *agentdef.Definition) error {
 	}
 	newest := slots[len(slots)-1]
 	run, reason, err := s.Claim(def.Name, newest, ledger.TriggerCron)
+	if errors.Is(err, ledger.ErrRestarting) {
+		// No row was written, so the cursor has not moved past this slot and
+		// a later tick claims it.
+		s.logf("agent=%s slot=%s action=hold reason=restarting", def.Name, slotText(newest))
+		return nil
+	}
 	if err != nil {
 		return err
 	}

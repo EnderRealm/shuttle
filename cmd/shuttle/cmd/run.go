@@ -43,6 +43,7 @@ var runCmd = &cobra.Command{
 
 A manual run bypasses the schedule but not the overlap check, the daily limits
 or the ledger: a slot the checks refuse is recorded as skipped with its reason.
+While an update restarts shuttle the claim is refused and nothing is recorded.
 --slot resolves that day's slot in the agent's trigger zone, so a re-run reports
 the same day whatever the wall clock says.
 

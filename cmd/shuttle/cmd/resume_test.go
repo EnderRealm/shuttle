@@ -1,12 +1,87 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"shuttle/internal/ledger"
 	"shuttle/internal/schedule"
 )
+
+// Pause and resume write the ledger from their own process, so the host event
+// a connected client hears has to be written by the command itself.
+func TestPauseAndResumeCommandsWriteTheHostEvent(t *testing.T) {
+	shuttleEnv(t)
+	t.Cleanup(func() { rootCmd.SetArgs(nil) })
+	for _, verb := range []string{"pause", "resume"} {
+		rootCmd.SetArgs([]string{verb, ledger.WeftAgent})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("%s: %v", verb, err)
+		}
+	}
+	store, err := openLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	events, err := store.WeftEventsAfter(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dispatch []string
+	for _, e := range events {
+		if e.Type == "host" {
+			var doc struct {
+				Dispatch string `json:"dispatch"`
+			}
+			if err := json.Unmarshal(e.Payload, &doc); err != nil {
+				t.Fatal(err)
+			}
+			dispatch = append(dispatch, doc.Dispatch)
+		}
+	}
+	if !reflect.DeepEqual(dispatch, []string{"paused", "open"}) {
+		t.Fatalf("host events = %v", dispatch)
+	}
+}
+
+// Past the barrier the update cannot be abandoned, so the operator is told the
+// resume is taken and when it lands, rather than left reading a pause that did
+// not lift.
+func TestResumeCommandSaysWhenAnUpdateHoldsThePause(t *testing.T) {
+	shuttleEnv(t)
+	store, err := openLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if claimed, _, err := store.ClaimUpdatePause(); err != nil || !claimed {
+		t.Fatalf("pause = %t/%v", claimed, err)
+	}
+	if err := store.ArmRestartBarrier(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetArgs([]string{"resume", ledger.WeftAgent})
+	t.Cleanup(func() {
+		rootCmd.SetOut(nil)
+		rootCmd.SetArgs(nil)
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "resumes when the update ends") {
+		t.Fatalf("stdout = %q", out.String())
+	}
+	if a, err := store.Agent(ledger.WeftAgent); err != nil || !a.Paused || a.PausedReason.String != ledger.PauseUpdate {
+		t.Fatalf("agent = %+v/%v", a, err)
+	}
+}
 
 func TestResumeCommandAllowsNextSlotAfterFiveFailures(t *testing.T) {
 	shuttleEnv(t)

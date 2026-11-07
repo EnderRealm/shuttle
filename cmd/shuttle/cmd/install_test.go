@@ -111,18 +111,20 @@ func TestInstallDaemonPersistsAndInstallsTheLaunchAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(installed) != 2 ||
+	if len(installed) != 3 ||
 		installed[0].Label != launchd.DaemonLabel ||
 		installed[1].Label != launchd.WatchdogLabel ||
+		installed[2].Label != launchd.UpdaterLabel ||
 		installed[0].Program != resolvedBinary ||
-		installed[1].Program != resolvedBinary {
+		installed[1].Program != resolvedBinary ||
+		installed[2].Program != resolvedBinary {
 		t.Fatalf("installed specs = %+v", installed)
 	}
-	wantAwaited := [][2]string{{launchd.DaemonLabel, resolvedBinary}, {launchd.WatchdogLabel, resolvedBinary}}
+	wantAwaited := [][2]string{{launchd.DaemonLabel, resolvedBinary}, {launchd.WatchdogLabel, resolvedBinary}, {launchd.UpdaterLabel, resolvedBinary}}
 	if !reflect.DeepEqual(awaited, wantAwaited) {
 		t.Fatalf("awaited = %v", awaited)
 	}
-	for _, label := range []string{launchd.DaemonLabel, launchd.WatchdogLabel} {
+	for _, label := range []string{launchd.DaemonLabel, launchd.WatchdogLabel, launchd.UpdaterLabel} {
 		if !strings.Contains(out.String(), label) {
 			t.Fatalf("output = %q, want %s", out.String(), label)
 		}
@@ -139,6 +141,63 @@ func TestInstallDaemonPersistsAndInstallsTheLaunchAgent(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("daemon-env = %q, want %q", data, want)
 		}
+	}
+}
+
+// recordInstalls points the launchd seams at a recorder and returns the labels
+// installed so far, in order.
+func recordInstalls(t *testing.T) func() []string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "shuttle")
+	if err := os.WriteFile(binary, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	originalExecutable := currentExecutable
+	originalInstall, originalAwait := installLaunchAgent, awaitLaunchAgent
+	currentExecutable = func() (string, error) { return binary, nil }
+	var labels []string
+	installLaunchAgent = func(spec launchd.Spec) error {
+		labels = append(labels, spec.Label)
+		return nil
+	}
+	awaitLaunchAgent = func(string, string) error { return nil }
+	t.Cleanup(func() {
+		currentExecutable = originalExecutable
+		installLaunchAgent, awaitLaunchAgent = originalInstall, originalAwait
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+	})
+	return func() []string { return labels }
+}
+
+func TestInstallUpdaterInstallsOnlyTheUpdater(t *testing.T) {
+	shuttleEnv(t)
+	labels := recordInstalls(t)
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetArgs([]string{"install", "updater"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("install updater: %v", err)
+	}
+	if got := labels(); !reflect.DeepEqual(got, []string{launchd.UpdaterLabel}) {
+		t.Fatalf("installed = %v", got)
+	}
+	if !strings.Contains(out.String(), launchd.UpdaterLabel) {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+// The updater waits on this command, so it must leave the updater's own job
+// alone: replacing it would kill the cycle waiting for the answer.
+func TestUpdaterRebootstrapLeavesTheUpdatersJob(t *testing.T) {
+	shuttleEnv(t)
+	labels := recordInstalls(t)
+	rootCmd.SetArgs([]string{"updater", "rebootstrap"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("updater rebootstrap: %v", err)
+	}
+	if got := labels(); !reflect.DeepEqual(got, []string{launchd.DaemonLabel, launchd.WatchdogLabel}) {
+		t.Fatalf("installed = %v", got)
 	}
 }
 

@@ -312,9 +312,9 @@ func (s *Service) handleService(w http.ResponseWriter) {
 func (s *Service) handleDashboard(w http.ResponseWriter) {
 	s.stateMu.RLock()
 	counts, err := s.store.WeftDashboardCounts()
-	var agent *ledger.Agent
+	var host ledger.WeftHost
 	if err == nil {
-		agent, err = s.store.Agent(ledger.WeftAgent)
+		host, err = s.store.WeftHost()
 	}
 	var asOf int64
 	if err == nil {
@@ -330,12 +330,8 @@ func (s *Service) handleDashboard(w http.ResponseWriter) {
 		return
 	}
 	s.probeCodex(false)
-	host := map[string]any{"dispatch": "open", "reason": nil}
-	if agent.Paused {
-		host = map[string]any{"dispatch": "paused", "reason": ledger.WeftHostPausedDetail(agent.PausedReason.String, agent.PausedAt.String)}
-	}
 	s.read(w, asOf, map[string]any{"dashboard": map[string]any{
-		"host":      host,
+		"host":      host.Resource(),
 		"allowance": s.allowanceTiles(held),
 		"capacity":  map[string]any{"cap": counts.Capacity, "running": counts.Running, "waiting": counts.Waiting},
 		"runs": map[string]any{

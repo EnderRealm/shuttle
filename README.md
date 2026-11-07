@@ -35,9 +35,10 @@ back it up first, as `runs.db.v1-<stamp>`.
 
 Email delivery is still planned; a valid report remains pending for the sender
 ticket, while `--no-deliver` records an intentional skip without losing the
-retained output. `install daemon` installs the KeepAlive launchd job and a
-companion watchdog that recovers macOS 26's deferred respawns; `uninstall`
-removes both while preserving state. `preflight [agent]` checks declared local
+retained output. `install daemon` installs the KeepAlive launchd job, a
+companion watchdog that recovers macOS 26's deferred respawns, and the updater
+that installs new releases; `uninstall` removes all three while preserving
+state. `preflight [agent]` checks declared local
 requirements without a model call, and `resume <agent>` clears a pause and its
 failure counter. `pause` prevents new claims until that resume; `prune` and
 `deliver` appear in the design/help text but are not implemented.
@@ -58,6 +59,8 @@ go vet ./...
 
 `make dev` builds `./shuttle`. `make install` builds the binary into
 `~/.local/bin`; run `shuttle install daemon` separately to install the service.
+Once the updater runs, that binary is a dev build and the next poll replaces it
+with the latest release ([docs/releasing.md](docs/releasing.md)).
 The daemon environment is persisted to `~/.shuttle/daemon-env` and contains
 only `SHUTTLE_HOME`, `SHUTTLE_AGENTS_DIR`, and the baked `PATH`; credentials
 remain in Keychain. Default tests exercise local fixtures, temporary stores, and
@@ -181,7 +184,8 @@ before the failure. CLI errors and scheduler decisions go to stderr. A foregroun
 `daemon` does not create `daemon.log` itself; the installed launchd job redirects
 both stdout and stderr there.
 
-[The sandbox notes](docs/sandbox.md) describe the runtime boundary and its measured
+[The release notes](docs/releasing.md) describe how a release is cut and how the
+updater installs one without killing running work. [The sandbox notes](docs/sandbox.md) describe the runtime boundary and its measured
 behavior. [The agent-user notes](docs/agent-users.md) describe the macOS users hosted
 agents run as, how to provision them, and what that boundary does not protect.
 [The observer contract](docs/observer-contract.md) describes the shared

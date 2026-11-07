@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,9 +21,18 @@ const (
 	DaemonLabel = "com.shuttle.daemon"
 	// WatchdogLabel supplies demand when macOS defers a KeepAlive respawn.
 	WatchdogLabel = "com.shuttle.daemon-watchdog"
+	// UpdaterLabel installs new releases, its own job so that it outlives the
+	// daemon's restart.
+	UpdaterLabel = "com.shuttle.updater"
 
-	daemonEnvFile = "daemon-env"
-	daemonLogFile = "daemon.log"
+	// EnvUpdaterInterval tunes the updater's poll cadence, on its plist.
+	EnvUpdaterInterval = "SHUTTLE_UPDATER_INTERVAL_MINUTES"
+	// DefaultUpdaterIntervalMinutes matches loom's updater.
+	DefaultUpdaterIntervalMinutes = 5
+
+	daemonEnvFile  = "daemon-env"
+	daemonLogFile  = "daemon.log"
+	updaterLogFile = "updater.log"
 )
 
 // Spec describes one LaunchAgent.
@@ -128,9 +138,11 @@ func DaemonSpec(program string) (Spec, error) {
 	}, nil
 }
 
-// DaemonSpecs returns the scheduler first and its companion watchdog second.
-// The watchdog is a separate long-running job because macOS 26 may leave the
-// scheduler's KeepAlive respawn pended indefinitely after a process exit.
+// DaemonSpecs returns the scheduler, its companion watchdog, then the
+// updater. The watchdog is a separate long-running job because macOS 26 may
+// leave the scheduler's KeepAlive respawn pended indefinitely after a process
+// exit. The updater comes last because replacing its job ends whoever is
+// running it.
 func DaemonSpecs(program string) ([]Spec, error) {
 	daemon, err := DaemonSpec(program)
 	if err != nil {
@@ -139,7 +151,18 @@ func DaemonSpecs(program string) ([]Spec, error) {
 	watchdog := daemon
 	watchdog.Label = WatchdogLabel
 	watchdog.Args = []string{"watchdog"}
-	return []Spec{daemon, watchdog}, nil
+	updater := daemon
+	updater.Label = UpdaterLabel
+	updater.Args = []string{"updater", "daemon"}
+	updater.LogPath = filepath.Join(filepath.Dir(daemon.LogPath), updaterLogFile)
+	updater.Env = maps.Clone(daemon.Env)
+	// The updater re-installs its own job from this environment, so a
+	// configured interval outlives each update.
+	updater.Env[EnvUpdaterInterval] = strconv.Itoa(DefaultUpdaterIntervalMinutes)
+	if value := os.Getenv(EnvUpdaterInterval); value != "" {
+		updater.Env[EnvUpdaterInterval] = value
+	}
+	return []Spec{daemon, watchdog, updater}, nil
 }
 
 // daemonAgentsDir preserves a previously installed explicit override when an
@@ -291,9 +314,9 @@ func Kickstart(label string) error {
 	return nil
 }
 
-// Uninstall boots the job out and removes its plist. An absent job and plist
-// are both successful, making repeated uninstall calls idempotent.
-func Uninstall(label string) error {
+// Bootout stops the job and unloads it, keeping its plist. An absent job is
+// successful.
+func Bootout(label string) error {
 	out, err := runCommand("launchctl", "bootout", target(label))
 	if err != nil {
 		message := strings.TrimSpace(string(out))
@@ -305,6 +328,15 @@ func Uninstall(label string) error {
 		}
 	}
 	waitForBootout(label, 5*time.Second)
+	return nil
+}
+
+// Uninstall boots the job out and removes its plist. An absent job and plist
+// are both successful, making repeated uninstall calls idempotent.
+func Uninstall(label string) error {
+	if err := Bootout(label); err != nil {
+		return err
+	}
 	path, err := PlistPath(label)
 	if err != nil {
 		return err

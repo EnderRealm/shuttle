@@ -98,6 +98,31 @@ func TestRunWarnsWhenTheSandboxIsBypassed(t *testing.T) {
 	}
 }
 
+// The operator is told why and the ledger keeps nothing: a skipped row would
+// spend the slot on a refusal that lasts minutes.
+func TestRunDuringAnUpdateRestartIsRefusedAndRecordsNothing(t *testing.T) {
+	stubCompletedPipeline(t)
+	agents := shuttleEnv(t)
+	writeAgentDir(t, agents, "daily", dailyManifest)
+	store, err := openLedger()
+	if err != nil {
+		t.Fatalf("open ledger: %v", err)
+	}
+	defer store.Close()
+	if claimed, _, err := store.ClaimUpdatePause(); err != nil || !claimed {
+		t.Fatalf("pause = %t/%v", claimed, err)
+	}
+	if err := store.ArmRestartBarrier(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execRun(t); !errors.Is(err, ledger.ErrRestarting) || !strings.Contains(err.Error(), "update") {
+		t.Fatalf("run = %v", err)
+	}
+	if runs, err := store.Runs("daily", 1); err != nil || len(runs) != 0 {
+		t.Fatalf("runs = %+v/%v", runs, err)
+	}
+}
+
 // Without the flag there is nothing to warn about: the sandbox is the default
 // and no other input can turn it off.
 func TestRunIsSilentWithoutTheFlag(t *testing.T) {

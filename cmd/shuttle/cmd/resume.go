@@ -1,6 +1,12 @@
 package cmd
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+
+	"shuttle/internal/ledger"
+)
 
 var resumeCmd = &cobra.Command{
 	Use:           "resume <agent>",
@@ -14,7 +20,17 @@ var resumeCmd = &cobra.Command{
 			return err
 		}
 		defer store.Close()
-		return store.Resume(args[0])
+		if err := store.Resume(args[0]); err != nil {
+			return err
+		}
+		held, err := store.RestartBarrier()
+		if err != nil {
+			return err
+		}
+		if held && args[0] == ledger.WeftAgent {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s stays paused while an update restarts shuttle, and resumes when the update ends\n", args[0])
+		}
+		return nil
 	},
 }
 

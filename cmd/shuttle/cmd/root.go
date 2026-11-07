@@ -14,8 +14,8 @@ var helpText = `shuttle - scheduled, sandboxed, ledgered unattended agent runs
 Usage: shuttle <command> [args]
 
 Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack',
-'preflight', 'pause', 'resume', 'install', 'uninstall', 'deliver', 'reconcile'
-and 'run'.
+'preflight', 'pause', 'resume', 'install', 'uninstall', 'deliver', 'reconcile',
+'updater' and 'run'.
 Manual and daemon claims execute the same retained, sandboxed pipeline; --dry-run
 stops after inputs and prompt. The rest is the phase 1 surface (docs/phase1-design.md §12) that the
 remaining phase 1 tickets fill in.
@@ -41,9 +41,12 @@ Operations:
   deliver --test               One test email through the configured sender
 
 Lifecycle:
-  install [daemon]             Create the state root and the reports repo;
-                                 'daemon' also installs the launchd jobs
-  uninstall                    Remove the daemon and watchdog jobs
+  install [daemon|updater]     Create the state root and the reports repo;
+                                 'daemon' also installs the launchd jobs,
+                                 'updater' the updater's alone
+  uninstall                    Remove the updater, watchdog and daemon jobs
+  updater daemon | once        Install new releases: the launchd job, or one
+                                 check by hand (docs/releasing.md)
   version                      Print the version string
 
 Global flags:
