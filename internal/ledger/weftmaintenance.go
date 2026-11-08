@@ -5,10 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // WeftDispositionCleaned is a run whose worktree a cleanup removed (§6.8).
 const WeftDispositionCleaned = "cleaned"
+
+// WeftHostToken is the token_id of a cleanup entry the host admitted itself
+// (§6.8). It has no weft_requests row to name, so its request_key is its own
+// id.
+const WeftHostToken = "host"
 
 // WeftArchiveRef is the ref a fresh entry's archive step writes for the run
 // it supersedes (§6.7).
@@ -239,8 +245,11 @@ func (s *Store) WeftArchiveHead(runID string) (string, error) {
 }
 
 // revalidateMaintenance is dispatch's recheck of a reconcile, cleanup or
-// fresh entry against the run it acts on as that run is now.
-func (t *WeftTx) revalidateMaintenance(e *WeftEntry) (string, string, error) {
+// fresh entry against the run it acts on as that run is now. A host-started
+// cleanup also re-tests its trigger (§6.8): its ticket through finished, then
+// the rest of what made the run qualify. finished is nil on a host that does
+// not serve cleanup, where the ticket is not re-tested.
+func (t *WeftTx) revalidateMaintenance(e *WeftEntry, finished func(string) bool) (string, string, error) {
 	runID := e.RunID.String
 	if e.Kind == WeftEntryFresh {
 		runID = e.Supersedes.String
@@ -281,8 +290,151 @@ func (t *WeftTx) revalidateMaintenance(e *WeftEntry) (string, string, error) {
 		return WeftInvalidRun, fmt.Sprintf("run %s's worktree is already %s", run.ID, run.Disposition), nil
 	case e.Kind == WeftEntryFresh && run.Disposition == WeftDispositionArchived:
 		return WeftInvalidRun, fmt.Sprintf("run %s is already archived, superseded by %s", run.ID, run.SupersededBy.String), nil
+	case e.Kind != WeftEntryCleanup || finished == nil:
+		return "", "", nil
 	}
-	return "", "", nil
+	host, err := hostStarted(t.tx, e.ID)
+	if err != nil || !host {
+		return "", "", err
+	}
+	if !finished(run.Ticket) {
+		return WeftInvalidTicket, fmt.Sprintf("%s no longer reads done or closed in tk", run.Ticket), nil
+	}
+	blocked, err := t.hostCleanupBlocked(run, e.ID)
+	if err != nil || blocked == "" {
+		return "", "", err
+	}
+	return WeftInvalidRun, blocked, nil
+}
+
+// hostStarted is whether the entry is one the host admitted itself.
+func hostStarted(q querier, entryID string) (bool, error) {
+	var token string
+	err := q.QueryRow(`SELECT token_id FROM weft_entries WHERE id=?`, entryID).Scan(&token)
+	return token == WeftHostToken, err
+}
+
+// hostCleanupBlocked is why the run does not qualify for a host-started
+// cleanup (§6.8), its ticket aside, or "" when it does: a hosted run, still
+// retained, with no process, a settlement nothing will move — not_applicable
+// or landed, or pending on a parked run, which has no worker to intend a step
+// — no entry naming it waiting or archiving but except, and no hold.
+func (t *WeftTx) hostCleanupBlocked(run *WeftRun, except string) (string, error) {
+	var hold bool
+	if err := t.tx.QueryRow(`SELECT host_cleanup_hold FROM weft_runs WHERE id=?`, run.ID).Scan(&hold); err != nil {
+		return "", err
+	}
+	active, err := weftActiveTx(t.tx, run)
+	if err != nil {
+		return "", err
+	}
+	settled := run.SettlementState == WeftSettlementNone || run.SettlementState == WeftSettlementLanded ||
+		(run.SettlementState == WeftSettlementPending && run.Phase == WeftPhaseParked)
+	switch {
+	case run.Origin != WeftOriginHosted:
+		return fmt.Sprintf("run %s is %s history", run.ID, run.Origin), nil
+	case run.Disposition != WeftDispositionRetained:
+		return fmt.Sprintf("run %s's worktree is already %s", run.ID, run.Disposition), nil
+	case hold:
+		return fmt.Sprintf("a cleanup of run %s was refused or cancelled, so only a dismiss cleans it", run.ID), nil
+	case active:
+		return fmt.Sprintf("run %s is %s and has a process", run.ID, WeftV2Phase(run.Phase)), nil
+	case !settled:
+		return fmt.Sprintf("run %s's landing is %s%s", run.ID, run.SettlementState, reasonSuffix(run.SettlementReason)), nil
+	}
+	var entry, kind, state string
+	err = t.tx.QueryRow(`SELECT id,kind,state FROM weft_entries WHERE (run_id=? OR (kind=? AND supersedes=?))
+		AND state IN (?,?) AND id<>? ORDER BY position LIMIT 1`, run.ID, WeftEntryFresh, run.ID,
+		WeftEntryWaiting, WeftEntryArchiving, except).Scan(&entry, &kind, &state)
+	switch {
+	case err == nil:
+		return fmt.Sprintf("run %s has %s entry %s %s", run.ID, kind, entry, state), nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", err
+	}
+	return "", nil
+}
+
+// CleanFinished is §6.8's evaluation of every retained hosted run of
+// projects — of every project when projects is nil — for a host-started
+// cleanup: on a catalog change, after its revalidation, and at restart.
+func (t *WeftTx) CleanFinished(projects []string, d WeftDispatch) error {
+	if d.Finished == nil || (projects != nil && len(projects) == 0) {
+		return nil
+	}
+	query := `SELECT id FROM weft_runs WHERE origin=? AND disposition=? AND host_cleanup_hold=0`
+	args := []any{WeftOriginHosted, WeftDispositionRetained}
+	if projects != nil {
+		query += ` AND project IN (?` + strings.Repeat(`,?`, len(projects)-1) + `)`
+		for _, p := range projects {
+			args = append(args, p)
+		}
+	}
+	rows, err := t.tx.Query(query+` ORDER BY created_at,id`, args...)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return t.cleanFinished(ids, d)
+}
+
+// CleanFinishedRun evaluates one run for a host-started cleanup (§6.8), in a
+// commit that may have made it qualify: an entry naming it settled.
+func (t *WeftTx) CleanFinishedRun(runID string, d WeftDispatch) error {
+	return t.cleanFinished([]string{runID}, d)
+}
+
+// cleanFinished admits, for each of runs that qualifies and whose ticket
+// d.Finished reads done or closed, the cleanup entry a dismiss would — as
+// the host admits its own, with no request behind it — and dispatches it in
+// this transaction. A nil d.Finished is a host that does not serve cleanup,
+// which cleans nothing itself.
+func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
+	if d.Finished == nil {
+		return nil
+	}
+	for _, id := range runIDs {
+		run, err := getWeftRunTx(t.tx, id)
+		if err != nil {
+			return err
+		}
+		blocked, err := t.hostCleanupBlocked(run, "")
+		if err != nil {
+			return err
+		}
+		if blocked != "" || !d.Finished(run.Ticket) {
+			continue
+		}
+		a := WeftAdmission{Kind: WeftEntryCleanup, Ticket: run.Ticket, Project: run.Project, RunID: run.ID,
+			RepositoryID: run.RepositoryID, Repository: run.Repo, TokenID: WeftHostToken}
+		e, err := t.insertEntryNoting(a, "host-started: "+run.Ticket+" is done or closed in tk")
+		if err != nil {
+			return err
+		}
+		paused, _, _, err := weftHostPaused(t.tx)
+		if err != nil {
+			return err
+		}
+		c, err := weftCapacity(t.tx)
+		if err != nil {
+			return err
+		}
+		if _, err := t.dispatchEntry(e, d, paused, &c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dispatchMaintenance takes the repository as maintenance for the entry and
@@ -333,30 +485,38 @@ func (t *WeftTx) dispatchMaintenance(e *WeftEntry, d WeftDispatch, stamp string)
 }
 
 // refuseCleanupTx invalidates the run's dispatched cleanup entry
-// cleanup_refused: its worker removed nothing, and the run is unchanged.
-func refuseCleanupTx(tx *sql.Tx, runID, detail, stamp string) error {
+// cleanup_refused: its worker removed nothing, and the run is unchanged but
+// for its host cleanup hold, which no payload carries (§6.8). held is whether
+// there was an entry to refuse, and so a hold set.
+func refuseCleanupTx(tx *sql.Tx, runID, detail, stamp string) (held bool, err error) {
 	var id string
-	err := tx.QueryRow(`SELECT id FROM weft_entries WHERE run_id=? AND kind=? AND state=? ORDER BY position DESC LIMIT 1`,
+	err = tx.QueryRow(`SELECT id FROM weft_entries WHERE run_id=? AND kind=? AND state=? ORDER BY position DESC LIMIT 1`,
 		runID, WeftEntryCleanup, WeftEntryDispatched).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	if _, err := tx.Exec(`UPDATE weft_entries SET state=?,invalidated_reason=?,invalidated_detail=?,updated_at=?,
 		revision=revision+1 WHERE id=?`, WeftEntryInvalidated, WeftInvalidCleanup, detail, stamp, id); err != nil {
-		return err
+		return false, err
 	}
-	return queueStepTx(tx, stamp, false, id)
+	if _, err := tx.Exec(`UPDATE weft_runs SET host_cleanup_hold=1 WHERE id=?`, runID); err != nil {
+		return false, err
+	}
+	return true, queueStepTx(tx, stamp, false, id)
 }
 
 // RecordWeftMaintained records a cleanup or archive worker's terminal event
 // (§11.3). A cleanup done leaves the run cleaned — its history and branch
-// stay; one refused invalidates its entry and changes nothing else. An
-// archive's result is settled at reap, by SettleWeftArchive.
-func (s *Store) RecordWeftMaintained(runID string, segment int, op, result, detail string) error {
-	return s.withTx(func(tx *sql.Tx) error {
+// stay; one refused invalidates its entry and holds the run from host
+// cleanup, changing nothing else. A parked run the host cleaned is ended as
+// a stop ends one, its pending question withdrawn: nothing can answer it once
+// its worktree is gone (§6.8). An archive's result is settled at reap, by
+// SettleWeftArchive. held is whether a refusal set the run's hold.
+func (s *Store) RecordWeftMaintained(runID string, segment int, op, result, detail string) (held bool, err error) {
+	err = s.withTx(func(tx *sql.Tx) error {
 		stamp := weftTimestamp(s.now())
 		if _, err := tx.Exec(`UPDATE weft_segments SET terminal='maintained' WHERE run_id=? AND segment=?`, runID, segment); err != nil {
 			return err
@@ -365,7 +525,23 @@ func (s *Store) RecordWeftMaintained(runID string, segment int, op, result, deta
 			return nil
 		}
 		if result != "done" {
-			return refuseCleanupTx(tx, runID, detail, stamp)
+			held, err = refuseCleanupTx(tx, runID, detail, stamp)
+			return err
+		}
+		var token string
+		err := tx.QueryRow(`SELECT token_id FROM weft_entries WHERE run_id=? AND kind=? AND state=? ORDER BY position DESC LIMIT 1`,
+			runID, WeftEntryCleanup, WeftEntryDispatched).Scan(&token)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		run, err := getWeftRunTx(tx, runID)
+		if err != nil {
+			return err
+		}
+		if token == WeftHostToken && run.Phase == WeftPhaseParked {
+			if err := stopWeftParkedTx(tx, runID, stamp); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(`UPDATE weft_runs SET disposition=?,updated_at=?,revision=revision+1 WHERE id=?`,
 			WeftDispositionCleaned, stamp, runID); err != nil {
@@ -373,6 +549,7 @@ func (s *Store) RecordWeftMaintained(runID string, segment int, op, result, deta
 		}
 		return appendRunEventTx(tx, runID, stamp)
 	})
+	return held, err
 }
 
 // WeftArchiveReport is an archive worker's maintained event: done at head,
@@ -426,7 +603,12 @@ func (t *WeftTx) settleArchive(runID string, segment int, report *WeftArchiveRep
 	e := archiving[0]
 	switch {
 	case report != nil && !report.Done:
-		return t.refuseArchive(e, report.Detail, stamp)
+		// The refused fresh entry was the run's to settle: the run is
+		// retained as it was, and may now qualify for host cleanup (§6.8).
+		if err := t.refuseArchive(e, report.Detail, stamp); err != nil {
+			return err
+		}
+		return t.CleanFinishedRun(runID, d)
 	case report != nil:
 		return t.settleArchiving(e, d, report.Head)
 	}
@@ -443,9 +625,10 @@ func (t *WeftTx) settleArchive(runID string, segment int, report *WeftArchiveRep
 // the operator authorized. It is a refusal, not a failure: its phase-1 row
 // closes skipped, counting toward no failure streak and opening no
 // incident; its entry is invalidated cleanup_refused or archive_refused and
-// its row, and an archive's slot, released. Nothing else changes.
-func (s *Store) RefuseWeftMaintenance(runID string, segment int, detail string) error {
-	return s.WeftTx(func(t *WeftTx) error {
+// its row, and an archive's slot, released. Nothing else changes but a
+// cleanup's run's hold, and held says whether it was set.
+func (s *Store) RefuseWeftMaintenance(runID string, segment int, detail string) (held bool, err error) {
+	err = s.WeftTx(func(t *WeftTx) error {
 		stamp := t.Stamp()
 		seg, err := segmentStateTx(t.tx, runID, segment)
 		if err != nil {
@@ -460,7 +643,7 @@ func (s *Store) RefuseWeftMaintenance(runID string, segment int, detail string) 
 		}
 		switch seg.kind {
 		case WeftSegmentCleanup:
-			if err := refuseCleanupTx(t.tx, runID, detail, stamp); err != nil {
+			if held, err = refuseCleanupTx(t.tx, runID, detail, stamp); err != nil {
 				return err
 			}
 			return releaseMaintenanceTx(t.tx, runID, stamp)
@@ -473,6 +656,7 @@ func (s *Store) RefuseWeftMaintenance(runID string, segment int, detail string) 
 		}
 		return fmt.Errorf("run %s segment %d: a %s segment is not refused before launch", runID, segment, seg.kind)
 	})
+	return held, err
 }
 
 // refuseArchive is a refused archive (§6.7): the fresh entry is invalidated

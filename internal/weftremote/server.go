@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
@@ -62,6 +63,9 @@ type Service struct {
 	codex   codexProbe
 	// probes counts the provider probes in flight.
 	probes sync.WaitGroup
+	// cleanupServed is whether cleanup was served at the last probe dispatch
+	// read, so a re-probe that turns it served is seen once (§6.8).
+	cleanupServed atomic.Bool
 	// folders are the folder handles this process minted (§9.2), and terms
 	// the terminal sessions it owns (§9).
 	folders *folderHandles
@@ -115,6 +119,7 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	// reservation a waiting entry needs.
 	s.segments = NewSupervisor(cfg, store, home, logger, &s.stateMu)
 	s.segments.settled = s.dispatch
+	s.segments.reapDispatch = func() ledger.WeftDispatch { return s.cleanupDispatch("reap") }
 	s.segments.hostID = hostID
 	return s, nil
 }

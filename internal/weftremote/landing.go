@@ -297,15 +297,17 @@ func (r *segmentStream) maintained(line []byte) error {
 		return fmt.Errorf("maintained result is not done or refused")
 	case !done && text(event.Detail) == "":
 		return fmt.Errorf("a refused %s carries its reason", event.Op)
-	case done && event.Op == ledger.WeftSegmentCleanup && (!event.WorktreeRemoved || event.ArchiveRef != nil):
-		return fmt.Errorf("a cleanup done removed the worktree and wrote no archive ref")
+	case done && event.Op == ledger.WeftSegmentCleanup && event.ArchiveRef != nil:
+		// A worktree already gone is done with worktree_removed false, and
+		// settles the run cleaned all the same (§6.8).
+		return fmt.Errorf("a cleanup done wrote no archive ref")
 	case done && event.Op == ledger.WeftSegmentArchive &&
 		(text(event.ArchiveRef) != ledger.WeftArchiveRef(r.run.ID) || text(event.Head) != archiveHead ||
 			(!event.WorktreeRemoved && r.run.Disposition != ledger.WeftDispositionCleaned)):
 		return fmt.Errorf("an archive done names the run's archive ref at the head its fresh entry archives and removed the worktree")
 	}
 	r.s.stateMu.Lock()
-	err := r.s.store.RecordWeftMaintained(r.run.ID, r.segment.Segment, event.Op, event.Result, text(event.Detail))
+	held, err := r.s.store.RecordWeftMaintained(r.run.ID, r.segment.Segment, event.Op, event.Result, text(event.Detail))
 	r.s.stateMu.Unlock()
 	if err != nil {
 		return err
@@ -315,5 +317,8 @@ func (r *segmentStream) maintained(line []byte) error {
 	}
 	r.terminal = true
 	r.s.log.Printf("weft %s %s: %s", event.Op, r.ids(), event.Result)
+	if held {
+		r.s.log.Printf("weft %s %s: host cleanup hold set, the host will not queue a cleanup of this run again", event.Op, r.ids())
+	}
 	return nil
 }

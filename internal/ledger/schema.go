@@ -16,7 +16,8 @@ package ledger
 // schemaVersion 7: the catalog's host digest — what a ticket's eligibility
 // reads from the host, so catalog_revision moves when it does (§5.2).
 // schemaVersion 8: the agent user each hosted pipeline segment runs as.
-const schemaVersion = 8
+// schemaVersion 9: the host cleanup hold of each run (weft-service/v2 §6.8).
+const schemaVersion = 9
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -341,4 +342,12 @@ ALTER TABLE weft_catalog ADD COLUMN host_digest TEXT;
 // operator, or a segment claimed before hosted segments ran as agent users.
 const weftAgentUserSQL = `
 ALTER TABLE weft_segments ADD COLUMN agent_user TEXT;
+`
+
+// weftHostCleanupSQL is schema 9: weft_runs.host_cleanup_hold, set when a
+// cleanup entry of the run is refused or cancelled, so the host never queues
+// a cleanup of that run itself again (§6.8). It is host-internal: no payload
+// carries it, and nothing lifts it.
+const weftHostCleanupSQL = `
+ALTER TABLE weft_runs ADD COLUMN host_cleanup_hold INTEGER NOT NULL DEFAULT 0;
 `

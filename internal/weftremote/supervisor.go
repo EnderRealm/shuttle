@@ -79,6 +79,10 @@ type Supervisor struct {
 	// settled runs once a segment is settled — reaped, failed or cancelled
 	// before spawn — which is when its slot and reservation are free.
 	settled func()
+	// reapDispatch is what a reap commit is settled under: dispatch over a
+	// fresh tk read, so the reaped run is evaluated for host cleanup in that
+	// commit (§6.8). Nil settles under dispatchBase, which cleans nothing.
+	reapDispatch func() ledger.WeftDispatch
 	// hostID joins every line logged about a segment (weft-service/v2 §4.2).
 	hostID string
 	// worker is the last probe of worker_bin (§2.6); probeMu serializes
@@ -234,8 +238,12 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		// streak.
 		s.log.Printf("weft segment %s: refused before spawn: %s", segmentIDs(s.hostID, run.ID, segment, ""), refusal)
 		s.stateMu.Lock()
-		err := s.store.RefuseWeftMaintenance(run.ID, segment.Segment, refusal)
+		held, err := s.store.RefuseWeftMaintenance(run.ID, segment.Segment, refusal)
 		s.stateMu.Unlock()
+		if held {
+			s.log.Printf("weft segment %s: host cleanup hold set, the host will not queue a cleanup of this run again",
+				segmentIDs(s.hostID, run.ID, segment, ""))
+		}
 		return nil, err
 	}
 	var l *launch
@@ -626,8 +634,11 @@ func reconcileCommit(run *ledger.WeftRun) (commit, base string) {
 // run a fresh entry's archive minted.
 func (s *Supervisor) settle(run *ledger.WeftRun, segment ledger.WeftSegment, class, detail string, archive *ledger.WeftArchiveReport) ([]string, error) {
 	ids := segmentIDs(s.hostID, run.ID, segment, "")
+	d := s.dispatchBase()
+	if s.reapDispatch != nil {
+		d = s.reapDispatch()
+	}
 	if segment.Kind == ledger.WeftSegmentArchive {
-		d := s.dispatchBase()
 		s.stateMu.Lock()
 		spawn, changes, err := s.store.SettleWeftArchive(run.ID, segment.Segment, archive, class, detail, d, archiveHead)
 		s.stateMu.Unlock()
@@ -637,16 +648,20 @@ func (s *Supervisor) settle(run *ledger.WeftRun, segment ledger.WeftSegment, cla
 		return spawn, err
 	}
 	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	if class == "" {
-		return nil, s.store.CompleteWeftSegment(run.ID, segment.Segment)
+	reconcile, spawn, changes, err := s.store.SettleWeftSegment(run.ID, segment.Segment, class, detail, d)
+	s.stateMu.Unlock()
+	for _, c := range changes {
+		line := fmt.Sprintf("weft queue %s entry=%s: %s %s %s", ids, c.EntryID, c.Action, c.Kind, c.Ticket)
+		if c.Detail != "" {
+			line += " (" + c.Detail + ")"
+		}
+		s.log.Print(line)
 	}
-	reconcile, err := s.store.FailWeftSegment(run.ID, segment.Segment, class, detail)
 	if err != nil || !reconcile {
-		return nil, err
+		return spawn, err
 	}
 	s.log.Printf("weft landing %s: the landing segment ended without its terminal event; reconcile dispatched under its row", ids)
-	return []string{run.ID}, nil
+	return append(spawn, run.ID), nil
 }
 
 // ensureProcessGroupGone closes the same lifecycle boundary the repository

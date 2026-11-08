@@ -701,6 +701,11 @@ func (t *WeftTx) EditGuard(ticket string) error {
 }
 
 func (t *WeftTx) insertEntry(a WeftAdmission) (*WeftEntry, error) {
+	return t.insertEntryNoting(a, "")
+}
+
+// insertEntryNoting is insertEntry with detail on its admission's log line.
+func (t *WeftTx) insertEntryNoting(a WeftAdmission, detail string) (*WeftEntry, error) {
 	id, err := insertEntryTx(t.tx, a, WeftEntryWaiting, t.store.now())
 	if err != nil {
 		return nil, err
@@ -710,7 +715,7 @@ func (t *WeftTx) insertEntry(a WeftAdmission) (*WeftEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	t.change("admitted", e, a.RunID, "")
+	t.change("admitted", e, a.RunID, detail)
 	return e, nil
 }
 
@@ -797,13 +802,17 @@ func (t *WeftTx) RecordAnswer(runID, questionID, text string, a WeftAdmission) (
 }
 
 // insertEntryTx inserts an entry in state at the next global position. An
-// entry the host admits itself has no request behind it, and empty token and
-// key say so.
+// entry the host admits itself has no request behind it: a reconcile's empty
+// token and key say so, and a host-started cleanup's WeftHostToken with its
+// own id as key (§6.8).
 func insertEntryTx(tx *sql.Tx, a WeftAdmission, state string, now time.Time) (string, error) {
 	stamp := weftTimestamp(now)
 	id, err := newRemoteID("e", now)
 	if err != nil {
 		return "", err
+	}
+	if a.TokenID == WeftHostToken {
+		a.RequestKey = id
 	}
 	_, err = tx.Exec(`INSERT INTO weft_entries(id,kind,ticket,project,repository_id,repository,selection_id,
 		position,state,run_id,supersedes,answer_id,token_id,request_key,created_at,updated_at,revision)
@@ -992,6 +1001,14 @@ func (t *WeftTx) CancelEntry(id string, revision int64) (*WeftEntry, error) {
 		return nil, err
 	}
 	t.change("cancelled", e, e.RunID.String, "")
+	// A cancelled cleanup is a human's refusal of it: the host never queues
+	// one for the run again (§6.8).
+	if e.Kind == WeftEntryCleanup {
+		if _, err := t.tx.Exec(`UPDATE weft_runs SET host_cleanup_hold=1 WHERE id=?`, e.RunID.String); err != nil {
+			return nil, err
+		}
+		t.change("held", e, e.RunID.String, "host cleanup hold set: the host will not queue a cleanup of this run again")
+	}
 	return t.Entry(id)
 }
 
@@ -1058,6 +1075,10 @@ type WeftDispatch struct {
 	// are now, answering an invalidation reason and detail, or "" when the
 	// entry may still dispatch.
 	Check func(*WeftEntry) (reason, detail string)
+	// Finished is whether a ticket reads done or closed through pkg/ticket as
+	// Check's read has it: the trigger of a host-started cleanup (§6.8). Nil
+	// on a host that does not serve cleanup, which cleans no run itself.
+	Finished func(ticket string) bool
 }
 
 // Dispatch walks the waiting entries in position order (§6.3). One whose
@@ -1066,7 +1087,9 @@ type WeftDispatch struct {
 // strict order within one repository. One that could dispatch is revalidated
 // and invalidated visibly if it no longer holds; otherwise its reservation and
 // slot are taken, its run minted or continued and its segment claimed, here,
-// and its run named in Spawn. Nothing here waits on anything.
+// and its run named in Spawn. Nothing here waits on anything. A run an
+// invalidated entry named is then evaluated for a host-started cleanup
+// (§6.8) — but not for a cleanup's own, whose run it would only queue again.
 func (t *WeftTx) Dispatch(d WeftDispatch) error {
 	paused, _, _, err := weftHostPaused(t.tx)
 	if err != nil {
@@ -1080,36 +1103,48 @@ func (t *WeftTx) Dispatch(d WeftDispatch) error {
 	if err != nil {
 		return err
 	}
+	var settled []string
 	for _, e := range entries {
-		reason, holderKind, holderID, err := t.blocking(e, paused, c, d.AgentUsers)
+		invalid, err := t.dispatchEntry(e, d, paused, &c)
 		if err != nil {
 			return err
 		}
-		if reason != "" {
-			if err := t.wait(e, reason, holderKind, holderID); err != nil {
-				return err
-			}
-			continue
-		}
-		invalid, detail, err := t.revalidate(e, d.Check)
-		if err != nil {
-			return err
-		}
-		if invalid != "" {
-			if err := t.invalidate(e, invalid, detail); err != nil {
-				return err
-			}
-			continue
-		}
-		slot, err := t.dispatch(e, d)
-		if err != nil {
-			return err
-		}
-		if slot {
-			c.Running++
+		switch {
+		case !invalid || e.Kind == WeftEntryCleanup:
+		case e.Kind == WeftEntryFresh:
+			settled = append(settled, e.Supersedes.String)
+		case e.RunID.Valid:
+			settled = append(settled, e.RunID.String)
 		}
 	}
-	return nil
+	return t.cleanFinished(settled, d)
+}
+
+// dispatchEntry is one waiting entry's turn (§6.3): it waits, is
+// invalidated — invalid is true — or is dispatched, its slot counted in c.
+func (t *WeftTx) dispatchEntry(e *WeftEntry, d WeftDispatch, paused bool, c *WeftCapacity) (invalid bool, err error) {
+	reason, holderKind, holderID, err := t.blocking(e, paused, *c, d.AgentUsers)
+	if err != nil {
+		return false, err
+	}
+	if reason != "" {
+		return false, t.wait(e, reason, holderKind, holderID)
+	}
+	invalidated, detail, err := t.revalidate(e, d)
+	if err != nil {
+		return false, err
+	}
+	if invalidated != "" {
+		return true, t.invalidate(e, invalidated, detail)
+	}
+	slot, err := t.dispatch(e, d)
+	if err != nil {
+		return false, err
+	}
+	if slot {
+		c.Running++
+	}
+	return false, nil
 }
 
 // blocking is the first wait that applies to the entry (§6.3). Reconcile and
@@ -1172,15 +1207,15 @@ func (t *WeftTx) wait(e *WeftEntry, reason, holderKind, holderID string) error {
 }
 
 // revalidate is dispatch's recheck (§6.3): tk and the binding through
-// check, then the run an answer or resume continues still in the state the
+// d.Check, then the run an answer or resume continues still in the state the
 // entry assumed.
-func (t *WeftTx) revalidate(e *WeftEntry, check func(*WeftEntry) (string, string)) (string, string, error) {
-	if reason, detail := check(e); reason != "" {
+func (t *WeftTx) revalidate(e *WeftEntry, d WeftDispatch) (string, string, error) {
+	if reason, detail := d.Check(e); reason != "" {
 		return reason, detail, nil
 	}
 	switch e.Kind {
 	case WeftEntryReconcile, WeftEntryCleanup, WeftEntryFresh:
-		return t.revalidateMaintenance(e)
+		return t.revalidateMaintenance(e, d.Finished)
 	case WeftEntryAnswer, WeftEntryResume:
 	default:
 		return "", "", nil
@@ -1369,15 +1404,16 @@ func (s *Store) DispatchWeft(d WeftDispatch) (spawn []string, changes []WeftChan
 }
 
 // RevalidateEntries rechecks the waiting entries of projects whose catalog
-// changed (§6.3), invalidating visibly those that no longer hold.
-func (t *WeftTx) RevalidateEntries(projects []string, check func(*WeftEntry) (string, string)) error {
+// changed (§6.3) against d's read, invalidating visibly those that no longer
+// hold.
+func (t *WeftTx) RevalidateEntries(projects []string, d WeftDispatch) error {
 	for _, project := range projects {
 		entries, err := loadWeftEntries(t.tx, `state=? AND project=?`, WeftEntryWaiting, project)
 		if err != nil {
 			return err
 		}
 		for _, e := range entries {
-			reason, detail, err := t.revalidate(e, check)
+			reason, detail, err := t.revalidate(e, d)
 			if err != nil {
 				return err
 			}

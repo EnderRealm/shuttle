@@ -259,11 +259,33 @@ func decodeV2(body []byte, dst any, keys ...string) error {
 }
 
 // dispatchConfig is dispatch against one tk read: entries are revalidated
-// against it, and runs are minted pending their landing while it is served.
+// against it, runs are minted pending their landing while it is served, and
+// while cleanup is served a retained run whose ticket it reads finished is
+// cleaned by the host (§6.8).
 func (s *Service) dispatchConfig(c *catalog) ledger.WeftDispatch {
 	d := s.segments.dispatchBase()
 	d.Check = s.entryCheck(c)
+	if s.served("cleanup") {
+		d.Finished = c.finished
+	}
 	return d
+}
+
+// cleanupDispatch is dispatchConfig over a fresh tk read, for a commit that
+// may make a retained run qualify for host-started cleanup (§6.8) and has no
+// read of its own. While cleanup is not served nothing is read; a read that
+// fails is no trigger. Either way the dispatch base, which cleans nothing, is
+// answered, and a failed read logged against what.
+func (s *Service) cleanupDispatch(what string) ledger.WeftDispatch {
+	if !s.served("cleanup") {
+		return s.segments.dispatchBase()
+	}
+	c, err := s.readCatalog()
+	if err != nil {
+		s.log.Printf("weft cleanup host=%s: %s evaluated no run for host cleanup, tk could not be read: %v", s.hostID, what, err)
+		return s.segments.dispatchBase()
+	}
+	return s.dispatchConfig(c)
 }
 
 // entryCheck is dispatch's and the catalog event's revalidation (§6.3): the
@@ -327,12 +349,34 @@ func (s *Service) dispatch() {
 
 func (s *Service) dispatchWith(c *catalog) {
 	// worker_bin is re-probed when it changed (§2.6), so the capabilities a
-	// client reads follow the installed worker.
+	// client reads follow the installed worker. A re-probe that turns cleanup
+	// served evaluates every retained run, as a restart does (§6.8).
 	s.segments.refreshWorker()
+	served := s.served("cleanup")
+	prev := s.cleanupServed.Swap(served)
+	turned := served && !prev
+	d := s.dispatchConfig(c)
+	var spawn []string
+	var changes []ledger.WeftChange
 	s.stateMu.Lock()
-	spawn, changes, err := s.store.DispatchWeft(s.dispatchConfig(c))
+	err := s.store.WeftTx(func(t *ledger.WeftTx) error {
+		if turned {
+			if err := t.CleanFinished(nil, d); err != nil {
+				return err
+			}
+		}
+		if err := t.Dispatch(d); err != nil {
+			return err
+		}
+		spawn, changes = t.Spawn, t.Changes
+		return nil
+	})
 	s.stateMu.Unlock()
 	if err != nil {
+		// The pass the turn owed is retried by the next dispatch.
+		if turned {
+			s.cleanupServed.Store(false)
+		}
 		s.log.Printf("weft dispatch host=%s: %v", s.hostID, err)
 		return
 	}
@@ -344,7 +388,10 @@ func (s *Service) dispatchWith(c *catalog) {
 // daemon has already run (steps 1 and 2) and precede the listener and any
 // dispatch; then the worker probe (§2.6), the retention prune (§8.1) and the
 // Codex allowance probe, which runs in the background (§5.3). The reconciles
-// step 2 claimed start here, with the runs step 5 minted, before dispatch.
+// step 2 claimed start here, with the runs step 5 minted; then every retained
+// run of every project is evaluated for host-started cleanup (§6.8), which
+// picks up runs retained before it shipped and changes missed while the
+// daemon was down, all before dispatch.
 func (s *Service) Restart() error {
 	if err := s.interruptTerminals(); err != nil {
 		return err
@@ -368,6 +415,32 @@ func (s *Service) Restart() error {
 	}
 	s.segments.refreshWorker()
 	s.probeCodex(true)
+	s.spawn(spawn)
+	// Cleanup counts as served from here only once this pass has run over a
+	// tk read: until then the first dispatch that reads tk sees a turn and
+	// runs it (§6.8).
+	s.cleanupServed.Store(false)
+	if !s.served("cleanup") {
+		return nil
+	}
+	d := s.cleanupDispatch("restart")
+	if d.Finished == nil {
+		return nil
+	}
+	s.stateMu.Lock()
+	err = s.store.WeftTx(func(t *ledger.WeftTx) error {
+		if err := t.CleanFinished(nil, d); err != nil {
+			return err
+		}
+		spawn, changes = t.Spawn, t.Changes
+		return nil
+	})
+	s.stateMu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.cleanupServed.Store(true)
+	s.logChanges("", changes)
 	s.spawn(spawn)
 	return nil
 }
@@ -566,10 +639,22 @@ func (s *Service) handleCancel(w http.ResponseWriter, r *http.Request, entryID s
 		if !validProtocolID(entryID) {
 			return refused("entry_not_found", "%s is not a queue entry on host %s", entryID, s.hostID), nil
 		}
+		d := s.cleanupDispatch("cancel")
 		return func(tx *ledger.WeftTx) (v2Outcome, error) {
 			entry, err := tx.CancelEntry(entryID, req.Revision)
 			if err != nil {
 				return v2Outcome{}, err
+			}
+			// An entry naming a run no longer waits on it: the run may now
+			// qualify for host cleanup (§6.8). A cancelled cleanup held it.
+			run := entry.RunID.String
+			if entry.Kind == ledger.WeftEntryFresh {
+				run = entry.Supersedes.String
+			}
+			if run != "" && entry.Kind != ledger.WeftEntryCleanup {
+				if err := tx.CleanFinishedRun(run, d); err != nil {
+					return v2Outcome{}, err
+				}
 			}
 			return v2Outcome{status: http.StatusOK, fields: map[string]any{"entry": entry.Resource()}}, nil
 		}, nil
@@ -651,10 +736,18 @@ func (s *Service) handleRunCommand(w http.ResponseWriter, r *http.Request, runID
 			return refused("run_not_found", "%s is not a run on host %s", runID, s.hostID), nil
 		}
 		if command == "stop" {
+			d := s.cleanupDispatch("stop")
 			return func(tx *ledger.WeftTx) (v2Outcome, error) {
 				live, err := tx.StopRun(runID, req.Revision)
 				if err != nil {
 					return v2Outcome{}, err
+				}
+				// A parked run stopped here invalidated the entries waiting
+				// on it and has no process: it may now qualify (§6.8).
+				if !live {
+					if err := tx.CleanFinishedRun(runID, d); err != nil {
+						return v2Outcome{}, err
+					}
 				}
 				run, err := tx.GetWeftRun(runID)
 				if err != nil {

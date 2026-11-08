@@ -186,6 +186,9 @@ func TestOpenMigratesSchemaFiveToSix(t *testing.T) {
 	if _, err := s.db.Exec(`ALTER TABLE weft_segments DROP COLUMN agent_user`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`ALTER TABLE weft_runs DROP COLUMN host_cleanup_hold`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec(`UPDATE schema_meta SET value='5' WHERE key='schema_version'`); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +199,7 @@ func TestOpenMigratesSchemaFiveToSix(t *testing.T) {
 	}
 	defer s.Close()
 	var version string
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "8" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "9" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	if _, err := s.WeftTerminals(testClock); err != nil {

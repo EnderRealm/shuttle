@@ -153,12 +153,12 @@ func migrate(db *sql.DB) error {
 		current = n
 	}
 	// Must precede both the schema apply and the marker write: on an unknown
-	// old or too-new database neither may run. Versions 2 to 7 are the
+	// old or too-new database neither may run. Versions 2 to 8 are the
 	// supported migration sources, and a fresh database takes the same path so
 	// they cannot drift: schemaSQL lays down (or finds) the schema-2 tables,
 	// migrateWeftV2 carries them to 3, weftVisibilitySQL to 4,
-	// weftLandingSQL to 5, weftTerminalSQL to 6, weftCatalogHostSQL to 7 and
-	// weftAgentUserSQL to 8.
+	// weftLandingSQL to 5, weftTerminalSQL to 6, weftCatalogHostSQL to 7,
+	// weftAgentUserSQL to 8 and weftHostCleanupSQL to 9.
 	if err := checkVersion(current); err != nil {
 		return err
 	}
@@ -207,8 +207,13 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("migrate to schema 7: %w", err)
 		}
 	}
-	if _, err := tx.Exec(weftAgentUserSQL); err != nil {
-		return fmt.Errorf("migrate to schema 8: %w", err)
+	if current < 8 {
+		if _, err := tx.Exec(weftAgentUserSQL); err != nil {
+			return fmt.Errorf("migrate to schema 8: %w", err)
+		}
+	}
+	if _, err := tx.Exec(weftHostCleanupSQL); err != nil {
+		return fmt.Errorf("migrate to schema 9: %w", err)
 	}
 	if _, err := tx.Exec(
 		`INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)`,
@@ -220,7 +225,7 @@ func migrate(db *sql.DB) error {
 }
 
 // checkVersion is the two-way guard. A current of 0 is a fresh database and
-// versions 2 to 7 are the supported migration sources.
+// versions 2 to 8 are the supported migration sources.
 func checkVersion(current int) error {
 	if current != 0 && current < 2 {
 		return fmt.Errorf("%w: on disk %d, this binary writes %d", ErrSchemaOutdated, current, schemaVersion)

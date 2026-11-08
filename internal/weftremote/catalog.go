@@ -247,25 +247,30 @@ func projectDigest(p *catalogProject, snap *ticket.Snapshot) (string, error) {
 }
 
 // recordCatalog raises catalog_revision for every project whose digest moved,
-// with its catalog event, and revalidates those projects' waiting entries
-// against the read (§5.2, §6.3). The caller holds stateMu for writing.
+// with its catalog event, revalidates those projects' waiting entries against
+// the read (§5.2, §6.3), then evaluates their retained runs for host-started
+// cleanup (§6.8), starting the cleanups that dispatched once it commits. The
+// caller holds stateMu for writing.
 func (s *Service) recordCatalog(c *catalog) error {
 	var changes []ledger.WeftChange
+	var spawn []string
 	err := s.store.WeftTx(func(tx *ledger.WeftTx) error {
 		if err := s.recordCatalogTx(tx, c); err != nil {
 			return err
 		}
-		changes = tx.Changes
+		changes, spawn = tx.Changes, tx.Spawn
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	s.logChanges("", changes)
+	s.spawn(spawn)
 	return nil
 }
 
-// recordCatalogTx is recordCatalog inside a transaction the caller commits.
+// recordCatalogTx is recordCatalog inside a transaction the caller commits;
+// the caller starts what it names in Spawn after the commit.
 func (s *Service) recordCatalogTx(tx *ledger.WeftTx, c *catalog) error {
 	bindings := make(map[string]ledger.WeftBinding, len(c.projects))
 	for _, p := range c.projects {
@@ -281,7 +286,20 @@ func (s *Service) recordCatalogTx(tx *ledger.WeftTx, c *catalog) error {
 	if len(changed) == 0 {
 		return nil
 	}
-	return tx.RevalidateEntries(changed, s.entryCheck(c))
+	d := s.dispatchConfig(c)
+	if err := tx.RevalidateEntries(changed, d); err != nil {
+		return err
+	}
+	return tx.CleanFinished(changed, d)
+}
+
+// finished is §6.8's trigger as this read has it: the ticket done or closed
+// through pkg/ticket. A ticket not found, or one of a project tk does not
+// register, is no trigger.
+func (c *catalog) finished(id string) bool {
+	project, _ := ticket.ParseNamespacedID(id)
+	t, ok := c.snap.Get(id)
+	return c.byName[project] != nil && ok && (t.Status == ticket.StatusDone || t.Status == ticket.StatusClosed)
 }
 
 // syncCatalog is one pass of the host watching tk.

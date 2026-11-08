@@ -626,19 +626,13 @@ func settleReapedTx(tx *sql.Tx, runID string, seg *segmentState, stamp string) e
 }
 
 // settleLostMaintenanceTx settles a reconcile or cleanup segment the host
-// lost: one gone without its terminal event is unreconciled, or its cleanup
-// refused, and either way its row is released.
+// lost: a reconcile gone without its terminal event is unreconciled; a
+// cleanup leaves the run as it was and its entry dispatched, a worker that
+// could not report being no refusal (§6.8). Either way its row is released.
 func settleLostMaintenanceTx(tx *sql.Tx, runID string, seg *segmentState, detail, stamp string) error {
-	if !seg.terminal.Valid {
-		switch seg.kind {
-		case WeftSegmentReconcile:
-			if err := lostReconcileTx(tx, runID, seg.observedOutcome, detail, stamp); err != nil {
-				return err
-			}
-		case WeftSegmentCleanup:
-			if err := refuseCleanupTx(tx, runID, detail, stamp); err != nil {
-				return err
-			}
+	if !seg.terminal.Valid && seg.kind == WeftSegmentReconcile {
+		if err := lostReconcileTx(tx, runID, seg.observedOutcome, detail, stamp); err != nil {
+			return err
 		}
 	}
 	return settleReapedTx(tx, runID, seg, stamp)
