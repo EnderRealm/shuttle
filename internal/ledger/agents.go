@@ -109,9 +109,10 @@ func recordSuccess(tx *sql.Tx, agent, now string) error {
 	return err
 }
 
-// recordFailure advances the streak and applies the §6.3 auto-pause rules.
+// recordFailure advances the streak and applies the §6.3 auto-pause rules,
+// returning the reason of the pause it applied, or "" when it applied none.
 // Only a failed run reaches here: unknown and skipped leave the streak alone.
-func recordFailure(tx *sql.Tx, agent, class, now string) error {
+func recordFailure(tx *sql.Tx, agent, class, now string) (string, error) {
 	var streak int
 	err := tx.QueryRow(
 		`INSERT INTO agents(name, failure_streak) VALUES (?, 1)
@@ -119,7 +120,7 @@ func recordFailure(tx *sql.Tx, agent, class, now string) error {
 			RETURNING failure_streak`, agent,
 	).Scan(&streak)
 	if err != nil {
-		return err
+		return "", err
 	}
 	reason := ""
 	switch {
@@ -131,15 +132,29 @@ func recordFailure(tx *sql.Tx, agent, class, now string) error {
 		reason = PauseStreak
 	}
 	if reason == "" {
-		return nil
+		return "", nil
 	}
-	// `AND paused = 0` keeps the first pause's reason and timestamp: that is
-	// the one that explains why the agent stopped.
-	return weftHostStepTx(tx, agent, now, func() error {
-		_, err := tx.Exec(
-			`UPDATE agents SET paused = 1, paused_reason = ?, paused_at = ? WHERE name = ? AND paused = 0`,
-			reason, now, agent,
+	// A standing pause keeps its reason and timestamp: that is the one that
+	// explains why the agent stopped. The update's pause is the exception. It
+	// is a hold the updater lifts when its attempt ends, so a failure pause
+	// left behind it would be lifted with it and reopen dispatch on a fault
+	// that needs the operator. Taking its place fails the updater's next
+	// RequireUpdatePause, and ReleaseUpdatePause then leaves this one standing.
+	applied := false
+	err = weftHostStepTx(tx, agent, now, func() error {
+		res, err := tx.Exec(
+			`UPDATE agents SET paused = 1, paused_reason = ?, paused_at = ? WHERE name = ? AND (paused = 0 OR paused_reason = ?)`,
+			reason, now, agent, PauseUpdate,
 		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		applied = n == 1
 		return err
 	})
+	if err != nil || !applied {
+		return "", err
+	}
+	return reason, nil
 }

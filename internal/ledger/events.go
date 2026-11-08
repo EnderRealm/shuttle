@@ -62,15 +62,11 @@ func (s *Store) FailEvent(id, class, errText string, res Result) (Event, error) 
 			return err
 		}
 		event = Event{Agent: agent, RunID: id, Class: class, Signature: Signature(class, errText)}
-		var paused bool
-		if err := tx.QueryRow(`SELECT COALESCE((SELECT paused FROM agents WHERE name = ?), 0)`, agent).Scan(&paused); err != nil {
-			return err
-		}
 		now := s.timestamp()
 		if err := finishRun(tx, id, StatusFailed, now, res, class, event.Signature); err != nil {
 			return err
 		}
-		if err := recordFailure(tx, agent, class, now); err != nil {
+		if event.PausedReason, err = recordFailure(tx, agent, class, now); err != nil {
 			return err
 		}
 		if err := upsertIncident(tx, agent, event.Signature, id, now); err != nil {
@@ -81,13 +77,6 @@ func (s *Store) FailEvent(id, class, errText string, res Result) (Event, error) 
 			return err
 		}
 		event.NewIncident = count == 1
-		if !paused {
-			var reason sql.NullString
-			if err := tx.QueryRow(`SELECT paused_reason FROM agents WHERE name = ?`, agent).Scan(&reason); err != nil {
-				return err
-			}
-			event.PausedReason = reason.String
-		}
 		return nil
 	})
 	if err != nil {

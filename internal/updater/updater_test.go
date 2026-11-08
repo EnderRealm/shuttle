@@ -955,6 +955,37 @@ func TestUpdaterDrainsBeforeInstall(t *testing.T) {
 	})
 }
 
+// The failing segment is what the drain waits on, so an auth pause that only
+// sat behind the update's would be lifted with it as the attempt ends.
+func TestAuthPauseOutlivesAnUpdateDrain(t *testing.T) {
+	h := newHost(t)
+	var events []ledger.Event
+	h.store.OnTerminal = func(event ledger.Event) { events = append(events, event) }
+	pid, _ := process(t)
+	hosted := h.segment("weft/auth-0001", pid)
+	done := make(chan error, 1)
+	go func() { done <- h.u.Tick(context.Background()) }()
+	waitUntil(t, "the update pause", func() bool { return h.agent().Paused })
+
+	if _, err := h.store.FailWeftSegment(hosted.ID, 1, ledger.ClassAuth, "credential rejected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "no longer stands") {
+		t.Fatalf("tick = %v\n%s", err, h.log())
+	}
+	if a := h.agent(); !a.Paused || a.PausedReason.String != ledger.PauseAuth {
+		t.Fatalf("agent = %+v", a)
+	}
+	if len(events) != 1 || events[0].PausedReason != ledger.PauseAuth {
+		t.Fatalf("events = %+v", events)
+	}
+	h.wantOldBinary()
+	h.wantBarrier(false)
+	if got := h.daemon.restarted(); len(got) != 0 {
+		t.Fatalf("daemon restarted: %v", got)
+	}
+}
+
 func TestUpdaterFailsBackToRunningBinary(t *testing.T) {
 	t.Run("a checksum mismatch never reaches dispatch", func(t *testing.T) {
 		h := newHost(t)

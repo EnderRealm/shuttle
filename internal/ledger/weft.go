@@ -890,15 +890,11 @@ func failSegmentRowTx(tx *sql.Tx, runID string, seg *segmentState, class, detail
 	}
 	signature := Signature(class, detail)
 	event := Event{Agent: agent, RunID: seg.ledgerID, Class: class, Signature: signature}
-	var paused bool
-	if err := tx.QueryRow(`SELECT COALESCE((SELECT paused FROM agents WHERE name=?),0)`, agent).Scan(&paused); err != nil {
-		return event, err
-	}
 	if _, err := tx.Exec(`UPDATE runs SET status=?,ended_at=?,failure_class=?,error_signature=? WHERE id=?`,
 		StatusFailed, stamp, class, signature, seg.ledgerID); err != nil {
 		return event, err
 	}
-	if err := recordFailure(tx, agent, class, stamp); err != nil {
+	if event.PausedReason, err = recordFailure(tx, agent, class, stamp); err != nil {
 		return event, err
 	}
 	if err := upsertIncident(tx, agent, signature, seg.ledgerID, stamp); err != nil {
@@ -910,13 +906,6 @@ func failSegmentRowTx(tx *sql.Tx, runID string, seg *segmentState, class, detail
 		return event, err
 	}
 	event.NewIncident = count == 1
-	if !paused {
-		var reason sql.NullString
-		if err := tx.QueryRow(`SELECT paused_reason FROM agents WHERE name=?`, agent).Scan(&reason); err != nil {
-			return event, err
-		}
-		event.PausedReason = reason.String
-	}
 	if _, err := tx.Exec(`UPDATE weft_segments SET failure=? WHERE run_id=? AND segment=?`, class, runID, seg.segment); err != nil {
 		return event, err
 	}
