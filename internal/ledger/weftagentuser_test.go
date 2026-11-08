@@ -151,6 +151,46 @@ func TestMaintenanceSegmentsHoldNoAgentUser(t *testing.T) {
 	if !ok || err != nil || a != (WeftAgentSegment{RunID: runID, Segment: 1, AgentUser: "weftagent1"}) {
 		t.Fatalf("launch row = %+v %v %v", a, ok, err)
 	}
+	for _, seg := range run.Segments {
+		if _, ok, err := s.WeftLegacyCodingWorktree(seg.LedgerRunID); ok || err != nil {
+			t.Fatalf("segment %d (%s) reads as a pre-agent-user coding segment: %v %v", seg.Segment, seg.Kind, ok, err)
+		}
+	}
+}
+
+// A segment that launches a model and holds no agent user was launched before
+// agent users, and reads with its run's worktree; a maintenance segment holds
+// no user either but launches no model, and does not.
+func TestWeftLegacyCodingWorktreeNamesOnlyAModelSegmentWithNoUser(t *testing.T) {
+	s := newStore(t)
+	root := t.TempDir()
+	for i, kind := range []string{WeftSegmentReconcile, WeftSegmentCleanup, WeftSegmentArchive} {
+		repo := filepath.Join(root, kind)
+		run, err := s.ClaimWeft(WeftLaunch{Ticket: fmt.Sprintf("demo/t-%d", i), Project: "demo", Repo: repo,
+			Branch: kind, Worktree: filepath.Join(root, "worktrees", kind), RunDirRoot: filepath.Join(root, "runs")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		worktree, ok, err := s.WeftLegacyCodingWorktree(run.Segments[0].LedgerRunID)
+		if !ok || err != nil || worktree != run.Worktree {
+			t.Fatalf("launch with no agent user = %q %v %v, want %q", worktree, ok, err, run.Worktree)
+		}
+		if err := s.withTx(func(tx *sql.Tx) error {
+			_, err := claimMaintenanceSegmentTx(tx, run.ID, kind, filepath.Join(root, "runs"), testClock)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if run, err = s.GetWeftRun(run.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := s.WeftLegacyCodingWorktree(run.Segments[1].LedgerRunID); ok || err != nil {
+			t.Fatalf("%s segment reads as a pre-agent-user coding segment: %v %v", kind, ok, err)
+		}
+	}
+	if _, ok, err := s.WeftLegacyCodingWorktree("no-such-row"); ok || err != nil {
+		t.Fatalf("unknown row = %v %v", ok, err)
+	}
 }
 
 // An unset cap is the default bounded by the agent users the host was

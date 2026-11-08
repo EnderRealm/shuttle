@@ -1105,6 +1105,24 @@ func (s *Store) WeftSegmentAgent(ledgerRunID string) (WeftAgentSegment, bool, er
 	return a, true, nil
 }
 
+// WeftLegacyCodingWorktree answers, for a phase-1 row that is a hosted weft
+// segment launched before agent users — one holding no agent user, of any
+// kind but the maintenance kinds, which launch no model and never hold one —
+// its run's worktree, and ok false for any other row.
+func (s *Store) WeftLegacyCodingWorktree(ledgerRunID string) (string, bool, error) {
+	var worktree string
+	err := s.db.QueryRow(`SELECT w.worktree FROM weft_segments s JOIN weft_runs w ON w.id=s.run_id
+		WHERE s.ledger_run_id=? AND s.agent_user IS NULL AND s.kind NOT IN (?,?,?)`, ledgerRunID,
+		WeftSegmentReconcile, WeftSegmentCleanup, WeftSegmentArchive).Scan(&worktree)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return worktree, true, nil
+}
+
 // ReconcileWeftUnknown projects a phase-1 restart closure into the API ledger
 // and releases the reservation only after reap established the process gone.
 // It is §12 steps 1 and 2: a landing segment the pass closed without its

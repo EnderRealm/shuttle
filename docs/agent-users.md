@@ -206,7 +206,12 @@ and naming each survivor. What it leaves is `distnoted`, `cfprefsd`, `lsd` and `
 recognised by its exec path under `/usr/sbin` or `/usr/libexec` together with launchd as its
 parent, never by its short name. Until the kill succeeds the segment stays unsettled, holding its
 repository and its user. The worker's own children that run as the operator (git, tk, the
-security lens) are outside the uid and are swept by the worker's session as before.
+security lens) are outside the uid and are swept by the worker's session as before. A segment
+launched before agent users, left in flight by a daemon crash across the upgrade, has no user
+to kill: the restart pass kills its worker's group and then holds the row with its repository
+reserved, naming the worktree. Once no process writes that worktree, create
+`<run_dir>/release-held` and restart the daemon, which closes the row and releases the
+repository.
 
 ## What it does not protect
 

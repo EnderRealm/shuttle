@@ -256,7 +256,13 @@ that cannot race the send it is part of, so the row closes and nothing further i
 sent at that id. The one row closed on the ledger's contents rather than the
 process's is one whose data can establish nothing — no `run_dir`, or one that is not
 absolute — since no later pass could do better and holding it would wedge the agent
-forever.
+forever. A hosted segment launched before agent users (its worker carried
+`--sandbox-profile <run_dir>/srt.json`) is the exception to closing at all: it has no
+user to kill, so a descendant that called setsid can outlive the group still writing the
+worktree. Its group is killed as above, and the row is then held, its repository
+reserved, until the operator has confirmed nothing writes the worktree and created
+`<run_dir>/release-held`; the next daemon start closes it. One with no absolute
+`run_dir` has nowhere to carry that marker and stays held.
 
 ## 6. Ledger
 

@@ -56,9 +56,9 @@ func resolved(t *testing.T, dir string) string {
 	return out
 }
 
-// weftRow is a hosted segment launched before agent users, left running by a
-// previous daemon: it holds no agent user, and its recorded pid is gone.
-func weftRow(t *testing.T, s *ledger.Store, ticket, repo string) *ledger.WeftRun {
+// legacyClaim claims a hosted segment as one launched before agent users
+// was: it holds no agent user.
+func legacyClaim(t *testing.T, s *ledger.Store, ticket, repo string) *ledger.WeftRun {
 	t.Helper()
 	root := resolved(t, t.TempDir())
 	run, err := s.ClaimWeft(ledger.WeftLaunch{
@@ -68,6 +68,17 @@ func weftRow(t *testing.T, s *ledger.Store, ticket, repo string) *ledger.WeftRun
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(run.Segments[0].RunDir.String, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+// weftRow is a hosted segment launched before agent users, left running by a
+// previous daemon: it holds no agent user, and its recorded pid is gone.
+func weftRow(t *testing.T, s *ledger.Store, ticket, repo string) *ledger.WeftRun {
+	t.Helper()
+	run := legacyClaim(t, s, ticket, repo)
 	gone := exec.Command("/usr/bin/true")
 	if err := gone.Run(); err != nil {
 		t.Fatal(err)
@@ -78,20 +89,56 @@ func weftRow(t *testing.T, s *ledger.Store, ticket, repo string) *ledger.WeftRun
 	return run
 }
 
-// A segment launched before agent users holds no user, so the pass closes it
-// on its process group alone, as any other row, and only the closed row lets
-// the repository go.
-func TestRestartClosesAPreAgentUserSegmentOnItsGroup(t *testing.T) {
+// assertRepositoryHeld checks the queue's restart step releases nothing and a
+// new claim on repo is refused while run holds it.
+func assertRepositoryHeld(t *testing.T, s *ledger.Store, run *ledger.WeftRun, repo string) {
+	t.Helper()
+	released, _, _, err := s.RestartWeftQueue(ledger.WeftDispatch{}, func(string, string) (string, error) { return "", nil })
+	if err != nil || len(released) != 0 {
+		t.Fatalf("queue restart released %+v, %v", released, err)
+	}
+	_, err = s.ClaimWeft(ledger.WeftLaunch{
+		Ticket: "demo/after", Project: "demo", Repo: repo, Branch: "demo/after",
+		Worktree: filepath.Join(t.TempDir(), "after"), RunDirRoot: t.TempDir(),
+	})
+	var busy *ledger.RepositoryBusyError
+	if !errors.As(err, &busy) || busy.HeldBy != run.ID {
+		t.Fatalf("claim behind a held pre-agent-user segment = %v, want the repository busy", err)
+	}
+}
+
+// A segment launched before agent users holds no user to kill, so a detached
+// descendant of it can outlive its group: the pass holds the row, naming the
+// worktree and the marker that releases it, and the repository stays
+// reserved. Once the operator creates the marker, the next pass closes the
+// row and the reconcile lets the repository go.
+func TestRestartHoldsAPreAgentUserSegmentUntilItsReleaseMarker(t *testing.T) {
 	s := newStore(t)
 	repo := "/tmp/shuttle-contain-repo"
 	run := weftRow(t, s, "demo/restart", repo)
-	outcomes, err := Restart(s)
-	if err != nil {
+	ledgerRun := run.Segments[0].LedgerRunID
+	marker := filepath.Join(run.Segments[0].RunDir.String, releaseMarker)
+	outcomes := restart(t, s)
+	if len(outcomes) != 1 || outcomes[0].RunID != ledgerRun || outcomes[0].Action != ActionUnresolved ||
+		!strings.Contains(outcomes[0].Detail, "worktree "+run.Worktree+" stays reserved") ||
+		!strings.Contains(outcomes[0].Detail, "create "+marker+" and restart the daemon") {
+		t.Fatalf("outcomes = %+v", outcomes)
+	}
+	assertInFlight(t, s, ledgerRun)
+	assertRepositoryHeld(t, s, run, repo)
+
+	if again := restart(t, s); len(again) != 1 || again[0].Action != ActionUnresolved {
+		t.Fatalf("second pass without the marker = %+v", again)
+	}
+	assertInFlight(t, s, ledgerRun)
+
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ledgerRun := run.Segments[0].LedgerRunID
-	if len(outcomes) != 1 || outcomes[0].RunID != ledgerRun || outcomes[0].Action != ActionDead {
-		t.Fatalf("outcomes = %+v", outcomes)
+	outcomes = restart(t, s)
+	if len(outcomes) != 1 || outcomes[0].RunID != ledgerRun || outcomes[0].Action != ActionDead ||
+		!strings.Contains(outcomes[0].Detail, "closed on the operator's release marker "+marker) {
+		t.Fatalf("outcomes with the marker = %+v", outcomes)
 	}
 	assertUnknown(t, s, ledgerRun)
 	if err := s.ReconcileWeftUnknown(ledgerRun); err != nil {
@@ -101,8 +148,90 @@ func TestRestartClosesAPreAgentUserSegmentOnItsGroup(t *testing.T) {
 		Ticket: "demo/after", Project: "demo", Repo: repo, Branch: "demo/after",
 		Worktree: filepath.Join(t.TempDir(), "after"), RunDirRoot: t.TempDir(),
 	}); err != nil {
-		t.Fatalf("repository not released once the row closed: %v", err)
+		t.Fatalf("repository not released once the row closed on its marker: %v", err)
 	}
+}
+
+// A live pre-agent-user worker, established by its --sandbox-profile, is
+// still killed by process group; the row is held after the kill all the same,
+// since the group being empty is not the segment being gone.
+func TestRestartKillsALivePreAgentUserWorkerAndHoldsItsRow(t *testing.T) {
+	requireIdentity(t)
+	shortGrace(t)
+	s := newStore(t)
+	repo := "/tmp/shuttle-contain-repo"
+	run := legacyClaim(t, s, "demo/restart", repo)
+	profile := filepath.Join(run.Segments[0].RunDir.String, sandboxProfileFile)
+	cmd := spawn(t, []string{"sh", "-c", "sleep 300 & wait", "weft-worker", sandboxProfileFlag, profile}, true)
+	pid := cmd.Process.Pid
+	waitUntil(t, func() bool {
+		got, err := processArgv(pid)
+		return err == nil && carries(got, sandboxProfileFlag, profile)
+	})
+	if err := s.MarkWeftRunning(run.ID, 1, pid, "weft-worker/v2"); err != nil {
+		t.Fatal(err)
+	}
+	sent := recordSignals(t)
+	outcomes := restart(t, s)
+	ledgerRun := run.Segments[0].LedgerRunID
+	if len(outcomes) != 1 || outcomes[0].Action != ActionUnresolved ||
+		!strings.Contains(outcomes[0].Detail, "create "+filepath.Join(run.Segments[0].RunDir.String, releaseMarker)) {
+		t.Fatalf("outcomes = %+v", outcomes)
+	}
+	assertSignals(t, sent, signal(-pid, syscall.SIGTERM))
+	waitGone(t, "worker", pid)
+	assertInFlight(t, s, ledgerRun)
+	assertRepositoryHeld(t, s, run, repo)
+}
+
+// A ledger read that cannot say whether a row is a pre-agent-user segment
+// stops the pass with the row held, nothing signalled and nothing closed.
+func TestRestartHoldsARowWhoseLegacyLookupFails(t *testing.T) {
+	s := newStore(t)
+	run := weftRow(t, s, "demo/restart", "/tmp/shuttle-contain-repo")
+	ledgerRun := run.Segments[0].LedgerRunID
+	l := &failingLegacyLedger{Store: s}
+	outcomes, err := Restart(l)
+	if err == nil || !strings.Contains(err.Error(), "database is locked") {
+		t.Fatalf("restart error = %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Action != ActionUnresolved ||
+		!strings.Contains(outcomes[0].Detail, "pre-agent-user segment: database is locked") {
+		t.Fatalf("outcomes = %+v", outcomes)
+	}
+	if len(l.marked) != 0 {
+		t.Fatalf("MarkUnknown closed %v", l.marked)
+	}
+	assertInFlight(t, s, ledgerRun)
+}
+
+// A pre-agent-user row with no absolute run_dir has nowhere to carry the
+// marker, and is held rather than closed as identify would close any other.
+func TestLegacyRowWithNoRunDirIsHeld(t *testing.T) {
+	for _, dir := range []string{"", "runs/r1"} {
+		run := &ledger.Run{ID: "r1"}
+		run.RunDir.String, run.RunDir.Valid = dir, dir != ""
+		action, detail := legacyRow(run, "/w", ActionForeign, "no run_dir recorded")
+		if action != ActionUnresolved || !strings.Contains(detail, "worktree /w stays reserved") {
+			t.Fatalf("run_dir %q: %s %q", dir, action, detail)
+		}
+	}
+}
+
+// failingLegacyLedger is the real ledger with WeftLegacyCodingWorktree
+// failing, and a record of every row MarkUnknown was asked to close.
+type failingLegacyLedger struct {
+	*ledger.Store
+	marked []string
+}
+
+func (l *failingLegacyLedger) WeftLegacyCodingWorktree(string) (string, bool, error) {
+	return "", false, errors.New("database is locked")
+}
+
+func (l *failingLegacyLedger) MarkUnknown(id string) error {
+	l.marked = append(l.marked, id)
+	return l.Store.MarkUnknown(id)
 }
 
 func waitUntil(t *testing.T, ok func() bool) {
