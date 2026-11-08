@@ -666,7 +666,7 @@ func (s *Supervisor) settle(run *ledger.WeftRun, segment ledger.WeftSegment, cla
 
 // ensureProcessGroupGone closes the same lifecycle boundary the repository
 // reservation protects. The leader being reaped is not enough: a model or
-// anchor child may still hold the worker's process group and sandbox access.
+// anchor child may still hold the worker's process group.
 func ensureProcessGroupGone(pgid int) error {
 	live, err := processGroupLive(pgid)
 	if err != nil {
@@ -723,7 +723,7 @@ func (s *Supervisor) containUser(run *ledger.WeftRun, segment ledger.WeftSegment
 }
 
 // containSession is the rest of that boundary for every segment kind: the
-// git and tk a worker runs unsandboxed lead process groups of their own in
+// git and tk a worker runs lead process groups of their own in
 // the session the worker leads, so a worker that dies leaves them running — a
 // landing step's push still moving the remote a reconcile would observe. sid
 // is the worker's pid, not reaped yet. Until the session holds nothing the

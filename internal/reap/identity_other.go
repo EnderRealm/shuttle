@@ -20,8 +20,6 @@ func groupMembers(int) ([]member, error) { return nil, errNoIdentity }
 
 func sessionMembers(int) ([]sessionMember, error) { return nil, errNoIdentity }
 
-func userProcesses() ([]member, error) { return nil, errNoIdentity }
-
 func processState(int) (member, bool, error) { return member{}, false, errNoIdentity }
 
 func uidProcesses(int) ([]UserProcess, error) { return nil, errNoIdentity }

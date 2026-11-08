@@ -30,10 +30,11 @@ goreleaser release --snapshot --clean --skip=publish   # full dry-run into ./dis
 
 ## cgo is required
 
-`internal/reap/seatbelt_darwin.go` is `//go:build cgo`: it reaches `sandbox_check`, which is
-how containment shows a process holds no grant of a segment's. `CGO_ENABLED=0` builds
-cleanly and silently selects `seatbelt_other.go`, whose checks return `errNoSeatbelt`, so
-containment fails closed and reservations stay held forever. loom's recipe, cross-compiled
+`internal/reap/procpath_darwin.go` is `//go:build cgo`: it reaches libproc's `proc_pidpath`,
+which is how an agent user's kill tells the launchd services that respawn in the user's session
+from a survivor. `CGO_ENABLED=0` builds cleanly and silently selects `procpath_other.go`, which
+reads no exec path, so no process is exempt, an agent user whose services launchd respawns is
+never established empty, and its segment and reservation stay held. loom's recipe, cross-compiled
 from ubuntu with cgo off, would ship exactly that. So the release is built on a macOS runner,
 for one target, and two things fail rather than ship a no-cgo binary:
 

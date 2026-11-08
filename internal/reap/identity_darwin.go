@@ -137,27 +137,6 @@ func sessionMembers(sid int) ([]sessionMember, error) {
 // sstop is a process the kernel has stopped (SSTOP in sys/proc.h).
 const sstop = 4
 
-// userProcesses is every live process of this user but the daemon itself,
-// each with the start time that tells it from the same pid reused.
-func userProcesses() ([]member, error) {
-	procs, err := unix.SysctlKinfoProcSlice("kern.proc.uid", unix.Geteuid())
-	if err != nil {
-		return nil, fmt.Errorf("kern.proc.uid %d: %w", unix.Geteuid(), err)
-	}
-	self := unix.Getpid()
-	members := make([]member, 0, len(procs))
-	for _, kp := range procs {
-		if kp.Proc.P_stat == szomb || int(kp.Proc.P_pid) == self {
-			continue
-		}
-		sec, nsec := kp.Proc.P_starttime.Unix()
-		members = append(members, member{
-			PID: int(kp.Proc.P_pid), Start: time.Unix(sec, nsec), Comm: unix.ByteSliceToString(kp.Proc.P_comm[:]),
-		})
-	}
-	return members, nil
-}
-
 // uidProcesses is every live process whose real uid is uid, with its parent
 // and exec path. The path is read after the listing, so a process whose start
 // time no longer matches the listing's once it is read keeps no path: it is

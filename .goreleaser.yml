@@ -5,7 +5,7 @@ project_name: shuttle
 builds:
   - binary: shuttle
     main: ./cmd/shuttle
-    # cgo reaches sandbox_check in internal/reap, so a release is built on the
+    # cgo reaches proc_pidpath in internal/reap, so a release is built on the
     # platform it runs on and never cross-compiled. Dropping cgo would still
     # build; the release tag and the post hook are what fail instead.
     env:

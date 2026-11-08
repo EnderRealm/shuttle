@@ -10,4 +10,8 @@
 // preflight — is what turns that refusal into a §7.6 sandbox class before any
 // model spend. docs/sandbox.md records what was measured on the host, and the
 // residuals the profile does not close.
+//
+// Hosted weft segments do not run under srt; their boundary is the agent user
+// (docs/agent-users.md). What they take from this package is worktree.go's
+// path derivation and repository identity.
 package sandbox

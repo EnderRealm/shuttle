@@ -17,7 +17,6 @@ Thumbs.db
 /shuttle
 
 # Test fixture worktree roots under package directories
-.cw-*/
 .weft-*/
 
 # GoReleaser output

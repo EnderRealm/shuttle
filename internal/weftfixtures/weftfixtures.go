@@ -18,8 +18,8 @@ import (
 // $WEFT_CONTRACT_DIR, a relative value resolved against that checkout's root,
 // else the weft checkout beside the main checkout. The main checkout is the
 // parent of the repository's common git directory, so a linked worktree (a
-// hosted run's, under ~/.shuttle/weft/worktrees) resolves to the same weft as
-// the main checkout it was added from. A missing manifest.json is an error.
+// hosted run's, under /Users/Shared/weft/worktrees) resolves to the same weft
+// as the main checkout it was added from. A missing manifest.json is an error.
 func Resolve(start string) (string, error) {
 	dir := os.Getenv("WEFT_CONTRACT_DIR")
 	if dir == "" {

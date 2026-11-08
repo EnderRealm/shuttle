@@ -11,6 +11,9 @@ import (
 	"testing"
 )
 
+// sampleConfig's weft_root is outside every home: Load judges it against the
+// shared trees by file identity, which stats it, and an agent user running
+// this suite cannot search the operator's home.
 const sampleConfig = `{
   "agents_dir": "/Users/steve/code/shuttle/agents",
   "timezone": "America/Los_Angeles",
@@ -38,7 +41,7 @@ const sampleConfig = `{
     "keychain_item": "weft-remote-token",
     "oauth_keychain_item": "weft-claude-oauth-token",
     "worker_bin": "/Users/steve/.local/bin/weft-worker",
-    "weft_root": "/Users/steve/.shuttle/weft",
+    "weft_root": "/opt/shuttle/weft",
     "segment_timeout_seconds": 21600,
     "agent_users": ["weftagent1", "weftagent2"]
   }
@@ -316,14 +319,14 @@ func TestLoadRefusesAWeftRootAgentsCanWrite(t *testing.T) {
 	for _, tree := range []string{HostedWorktreeRoot, hostedRepositoriesRoot} {
 		for _, root := range []string{tree, tree + "/state", tree + "/"} {
 			t.Run(root, func(t *testing.T) {
-				writeConfig(t, strings.Replace(sampleConfig, `"/Users/steve/.shuttle/weft"`, strconv.Quote(root), 1))
+				writeConfig(t, strings.Replace(sampleConfig, `"/opt/shuttle/weft"`, strconv.Quote(root), 1))
 				_, err := Load()
 				if err == nil || !strings.Contains(err.Error(), "weft.weft_root") || !strings.Contains(err.Error(), "inside "+tree+",") {
 					t.Fatalf("Load = %v, want weft.weft_root refused naming %s", err, tree)
 				}
 			})
 		}
-		writeConfig(t, strings.Replace(sampleConfig, `"/Users/steve/.shuttle/weft"`, strconv.Quote(tree+"-state"), 1))
+		writeConfig(t, strings.Replace(sampleConfig, `"/opt/shuttle/weft"`, strconv.Quote(tree+"-state"), 1))
 		if _, err := Load(); err != nil {
 			t.Fatalf("a sibling of %s: %v", tree, err)
 		}

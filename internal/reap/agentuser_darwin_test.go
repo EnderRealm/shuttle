@@ -45,6 +45,66 @@ func TestUIDProcessesReadsParentAndExecPath(t *testing.T) {
 	}
 }
 
+// resolved is dir with its symlinks resolved: the test temp dir sits under
+// /var, an alias of /private/var.
+func resolved(t *testing.T, dir string) string {
+	t.Helper()
+	out, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// weftRow is a hosted segment launched before agent users, left running by a
+// previous daemon: it holds no agent user, and its recorded pid is gone.
+func weftRow(t *testing.T, s *ledger.Store, ticket, repo string) *ledger.WeftRun {
+	t.Helper()
+	root := resolved(t, t.TempDir())
+	run, err := s.ClaimWeft(ledger.WeftLaunch{
+		Ticket: ticket, Project: "demo", Repo: repo, Branch: ticket,
+		Worktree: filepath.Join(root, "worktree"), RunDirRoot: filepath.Join(root, "runs"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := exec.Command("/usr/bin/true")
+	if err := gone.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkWeftRunning(run.ID, 1, gone.Process.Pid, "weft-worker/v2"); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+// A segment launched before agent users holds no user, so the pass closes it
+// on its process group alone, as any other row, and only the closed row lets
+// the repository go.
+func TestRestartClosesAPreAgentUserSegmentOnItsGroup(t *testing.T) {
+	s := newStore(t)
+	repo := "/tmp/shuttle-contain-repo"
+	run := weftRow(t, s, "demo/restart", repo)
+	outcomes, err := Restart(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerRun := run.Segments[0].LedgerRunID
+	if len(outcomes) != 1 || outcomes[0].RunID != ledgerRun || outcomes[0].Action != ActionDead {
+		t.Fatalf("outcomes = %+v", outcomes)
+	}
+	assertUnknown(t, s, ledgerRun)
+	if err := s.ReconcileWeftUnknown(ledgerRun); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimWeft(ledger.WeftLaunch{
+		Ticket: "demo/after", Project: "demo", Repo: repo, Branch: "demo/after",
+		Worktree: filepath.Join(t.TempDir(), "after"), RunDirRoot: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("repository not released once the row closed: %v", err)
+	}
+}
+
 func waitUntil(t *testing.T, ok func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -176,7 +236,7 @@ func TestRestartNeverSignalsAWorkerOfAnotherSegment(t *testing.T) {
 // with the row held and nothing killed.
 func TestRestartHoldsARowWhoseAgentLookupFails(t *testing.T) {
 	s := newStore(t)
-	run, _ := weftRow(t, s, "demo/restart", "/tmp/shuttle-contain-repo")
+	run := weftRow(t, s, "demo/restart", "/tmp/shuttle-contain-repo")
 	ledgerRun := run.Segments[0].LedgerRunID
 	l := &failingAgentLedger{Store: s}
 	outcomes, err := Restart(l)

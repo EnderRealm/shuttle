@@ -93,10 +93,9 @@ func killTree(tree map[int]time.Time) {
 	}
 }
 
-// A worker that dies without a terminal event leaves the unsandboxed children
-// it started — a git push and the remote helper under it — running outside its
-// process group and outside any sandbox grant, but still in the session the
-// worker led. Settlement sweeps that session while the worker's zombie still
+// A worker that dies without a terminal event leaves the children it started
+// — a git push and the remote helper under it — running outside its process
+// group, but still in the session the worker led. Settlement sweeps that session while the worker's zombie still
 // holds its id, and waits for it to be empty before it settles the segment and
 // frees its repository. A child the sweep cannot stop is reported, and the segment
 // stays unsettled while it lives: its lost landing's reconcile is never
@@ -239,7 +238,7 @@ func TestDeadSegmentChildrenContained(t *testing.T) {
 
 // The Studio's lost landing: the worker dies at its push intent while the
 // push it started — a child leading a process group of its own in the
-// worker's session, holding no sandbox grant — is still running. Reconcile is
+// worker's session — is still running. Reconcile is
 // dispatched only once the sweep has killed that child, so what it observes is
 // the state the dead segment left once it stopped acting: push not done, which
 // it takes under a fresh intent and lands.

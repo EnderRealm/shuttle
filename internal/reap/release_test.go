@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-// A no-cgo binary builds and runs, and containment then fails closed on the
-// host forever, so the release tag has to turn that build into a failure.
+// A no-cgo binary builds and runs, and an agent user's kill then never
+// establishes the user empty on the host, so the release tag has to turn that
+// build into a failure.
 func TestReleaseBuildRefusesNoCgo(t *testing.T) {
 	build := func(cgo string) ([]byte, error) {
 		cmd := exec.Command("go", "build", "-tags", "release", "-o", os.DevNull, ".")

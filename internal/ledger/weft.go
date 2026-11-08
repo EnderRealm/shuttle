@@ -1092,24 +1092,6 @@ func (s *Store) ReleaseWeftRepository(runID string) error {
 	})
 }
 
-// WeftCodingWorktree answers, for a phase-1 row that is a hosted weft segment
-// launched under the coding sandbox profile — any kind but the maintenance
-// kinds, which launch no model — its run's worktree, and ok false for any
-// other row.
-func (s *Store) WeftCodingWorktree(ledgerRunID string) (string, bool, error) {
-	var worktree string
-	err := s.db.QueryRow(`SELECT w.worktree FROM weft_segments s JOIN weft_runs w ON w.id=s.run_id
-		WHERE s.ledger_run_id=? AND s.kind NOT IN (?,?,?)`, ledgerRunID,
-		WeftSegmentReconcile, WeftSegmentCleanup, WeftSegmentArchive).Scan(&worktree)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return worktree, true, nil
-}
-
 // WeftAgentSegment is the hosted weft segment a phase-1 row is, when that
 // segment holds an agent user.
 type WeftAgentSegment struct {

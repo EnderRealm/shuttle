@@ -4,13 +4,14 @@ Status: measured 2026-09-07 on the Mac Studio against srt 1.0.0
 (`/opt/homebrew/bin/srt`, the Homebrew symlink into npm's
 `@anthropic-ai/sandbox-runtime`) and claude CLI 2.1.263
 (`/opt/homebrew/bin/claude`), macOS. This is the record behind
-`docs/phase1-design.md` §11: what the generated profile is, what was measured
-rather than assumed, and what the profile does not close. Re-measure and re-date
-this document when either binary moves.
+`docs/phase1-design.md` §11: what the generated profile around a scheduled
+agent's run is, what was measured rather than assumed, and what the profile does
+not close. Re-measure and re-date this document when either binary moves.
 
 ## What is wrapped, and how
 
-Every model run is launched behind an argv prefix from `internal/sandbox`:
+Every scheduled model run is launched behind an argv prefix from
+`internal/sandbox`:
 
 ```
 /opt/homebrew/bin/srt -s <run>/srt.json -- /opt/homebrew/bin/claude -p …
@@ -286,168 +287,28 @@ agent. Inside the sandbox with the real `SSH_AUTH_SOCK` inherited, `ssh-add -l`
 returns `Error connecting to agent: Operation not permitted`, exit 2. This is
 the property that lets the harness, and never the model, own every write that
 leaves the machine, and it is the reason the SSH-agent blocker recorded in
-`warp/docs/host-session-isolation.md` does not apply to an unattended run.
+`warp/docs/host-session-isolation.md` does not apply to an unattended scheduled
+run.
 `TestLiveSRT` asserts it, and skips the assertion when the test's own
 environment has no `SSH_AUTH_SOCK` — with no agent to reach, a pass would prove
 nothing.
 
-## Hosted coding profile
+## Hosted weft segments
 
-Hosted segments no longer run under this profile: each runs as its own agent
-user (`docs/agent-users.md`), and the supervisor writes no profile. What follows
-is the profile segments launched before that ran under; `reap.Restart` still
-sweeps the boundary of such a row left in flight.
-
-Hosted `weft-remote/v1` segments used `CodingProfileJSON`, not the report profile
-above. Shuttle authors one profile before spawning `weft-worker`; the worker is
-given that path and must place every model launch behind `srt -s <profile> --`.
-The host first runs `srt -s <profile> -c true`, and records a `sandbox` failure
-without spawning the worker when the profile cannot be established.
-
-The coding profile re-allows the selected checkout, ticket store, retained run
-directory and derived worktree beneath the broad read denials. Writes are
-limited to the worktree, the code repository's Git object/ref storage, ticket
-files and tk state, Claude's subscription state, the segment temp directory,
-the per-user Darwin temp directory and the configured toolchain caches. The
-per-user temp directory is `confstr(_CS_DARWIN_USER_TEMP_DIR)` (what `getconf
-DARWIN_USER_TEMP_DIR` prints), resolved to its `/private/var/folders/.../T`
-path: SwiftPM's build service stages its build-manifest writes there and `swift
-test` creates its build temp there, both ignoring `TMPDIR`, so without it
-`swift build --disable-sandbox` fails with `EPERM`.
-
-`/private/tmp` (what `/tmp` resolves to) is writable too, and that is a
-deliberate widening of the write surface, not a free fix. Agents' tools and
-project test suites hardcode `/tmp` and fail with `Operation not permitted`
-without it; shuttle's own suite did. The worker environment still sets
-`TMPDIR` and `CLAUDE_CODE_TMPDIR` to the segment temp directory, so tools that
-honour them stay inside the segment. The residual risk: `/tmp` is shared by
-every process of every user, so a segment can create or replace files at
-predictable `/tmp` paths that unsandboxed processes on the host later read or
-execute (other agent sessions, shuttle's own tooling, git hooks staged there).
-`denyWrite` takes back only the paths known to matter: srt's default Claude
-temp dir `/tmp/claude`, and a host Claude Code session's temp tree
-`/tmp/claude-<uid>` (its scratchpads and task output; a host session runs
-outside srt with `TMPDIR=/tmp`), named for the host uid. Each is denied in
-both spellings, under `/tmp` and `/private/tmp`, and srt's deny rules take
-precedence over `allowWrite`. A segment's own Claude temp is not under either:
-`CLAUDE_CODE_TMPDIR` puts it in `<run_dir>/tmp`. The `/private/tmp` and
-per-user temp grants are shared by every segment's profile, so a worktree
-under either would be writable by every concurrent segment, and by every host
-process. The preflight refuses one before launch, whatever the run
-directory's placement: `requireCoding` tests each shared root against the
-worktree the way it tests an `allow_write` entry, literally and then by file
-identity, so a `weft.root` that reaches `/tmp` or the per-user temp dir through
-a symlink, the `/private` alias or a case alias is refused too, and the error
-names the shared root and the worktree. A run directory under `/tmp` is caught
-as well: the preflight has the sandbox itself try the run directory, and
-refuses a profile that lets the segment write it. Tests that run real srt
-therefore keep their fixtures under `/var/tmp`, not `/tmp`.
-
-`denyWrite` takes back
-both repositories' Git configuration, hooks and indirection files, the linked
-worktree's gitfile, Claude's global `.claude.json`, commands/plugins/rules,
-every project's auto-memory directory and installed work-policy files, and
-every sibling worktree admin directory enumerated while the host's durable
-repository reservation is held. Authentication refreshes and session records
-under `~/.claude/` remain writable; executable MCP configuration and persistent
-instructions do not.
-
-Repository reservations use the checkout's symlink-resolved canonical path,
-with macOS's `/private` alias normalized the same way as the worktree
-derivation. Two tk projects that name one checkout through different aliases
-therefore contend on one reservation rather than authoring incomplete sibling
-deny lists concurrently. The lock key itself is the directory's Darwin
-device/inode identity, so case aliases on the default case-insensitive volume
-also contend even though the worker argv retains a readable canonical path.
-
-Before profile generation, an existing worktree's gitfile must name the admin
-directory derived from its basename. For a new worktree that expected admin
-name must be absent. This fails closed on the suffix Git would otherwise assign
-for a stale registration, before a worker or model is launched.
-
-The worker process starts behind a separate inherited pipe gate. Shuttle
-records the process PID in the ledger before releasing that gate; if the daemon
-dies in the start/record window, EOF closes the gate and the worker executable
-is never reached.
-
-`TestCodingProfileProtectsGitIndirectionsAndSiblingWorktrees` asserts that
-generated shape. `SHUTTLE_LIVE_SRT=1 go test ./internal/sandbox -run
-TestLiveCodingSRT` is the host-level proof: a declared worktree write succeeds
-while an attempted Git-hook write returns `Operation not permitted`.
-`TestCodingProfileAllowsTmpButNotClaudeTmp` asserts the `/tmp` grant and the
-`/tmp/claude` and `/tmp/claude-<uid>` carve-outs, and under
-`SHUTTLE_LIVE_SRT=1` has real srt take a `/private/tmp` write and refuse one
-under each carve-out in both spellings.
-
-## Shuttle's own suite inside the coding profile
-
-A hosted segment's work and review agents run `go test ./...` on shuttle inside
-this profile. Its fixtures land where the profile lets them write: every temp
-root comes from `t.TempDir()` or `os.TempDir()`, which follow the segment's
-`TMPDIR`, except in four named sets of fixtures. The socket-bound fixture
-helpers (`newObserverEnv`, `preflightFixture`, `newLiveFixture`,
-`newQueueHost`, `newSupervisorFixture`, `shortRunDir`, `shortCodingRoot`) are
-the first. They keep a `/tmp` root, which the `/private/tmp` grant covers:
-srt's mux socket under their run directory must fit the 103-byte limit above,
-which the sandbox, runner and supervisor checks enforce even against a
-stand-in srt, and macOS's `os.TempDir()` is 49–57 bytes before the run
-directory starts. Their worktrees do not go there, since the preflight refuses
-a worktree under `/tmp` or the per-user temp dir. The worktree roots are the
-second set: `internal/sandbox`'s `worktreeRoot`, under its coding fixtures'
-worktrees, and `internal/weftremote`'s `fixtureWeftRoot`, the `weft.root` of
-`newSupervisorFixture` and `newQueueHost`, each make a dot-prefixed temp
-directory under the package directory rather than following `TMPDIR`, which a
-host session may set under `/tmp` and which on the host is the real per-user
-temp dir the supervisor grants. The checkout is writable both on the host and,
-as the segment's worktree, inside a hosted segment; `.gitignore` covers the
-roots a killed run leaves behind. The opt-in `SHUTTLE_LIVE_SRT` fixtures that run the real srt
-are the third: `liveCodingRoot`
-(`internal/sandbox/coding_test.go`) keeps a
-literal `/var/tmp` root, because their run directory must sit outside every
-coding-profile grant — `/tmp` and the per-user `TMPDIR` — or the coding check
-refuses it as writable. `internal/reap`'s `hostTmpRoot` is the fourth: it keeps
-a `/tmp` root for a run directory that must sit outside the per-user `TMPDIR` a
-containment decoy is granted. `TestNoTestHardcodesTmp` (`internal/repocheck`) fails
-on a literal `/tmp` fixture root outside the socket-bound helpers and
-`hostTmpRoot`.
-
-Some tests still cannot pass inside srt, and run only in the anchors, outside
-it. A failure among them in a segment is the sandbox, not the change. Measured
-2026-10-31 by running every package's test binary, one top-level test per srt
-invocation, under a profile with the coding profile's network keys and its
-`/private/tmp`, per-user temp and tk-state write grants:
-
-- **A nested sandbox.** A process already under a seatbelt profile cannot apply
-  another: `/usr/bin/sandbox-exec` exits 71. The containment tests that stand in
-  for a model process with a holder under its own profile start one — the nine
-  `internal/reap`'s package doc names, failing with `start detached child: exit
-  status 71`. `internal/sandbox`'s
-  `TestCheckRefusesAMalformedProfile` runs the real srt, which inside srt fails
-  one step earlier: with `allowUnixSockets` empty it cannot bind its own mux
-  socket (`Error: listen EPERM: operation not permitted …/srt-mux-<pid>-0.sock`).
-- **Local TCP binding.** The profile sets `allowLocalBinding: false`, so an
-  `httptest` server panics with `httptest: failed to listen on a port: listen
-  tcp6 [::1]:0: bind: operation not permitted`. The panic ends the package's test
-  binary, hiding every test after it. The packages whose tests bind one are
-  `cmd/shuttle/cmd`, `internal/deliver`, `internal/runner`,
-  `internal/runtime/claude` and `internal/weftremote`.
-- **Listing a user's processes.** srt's base policy lets a sandboxed process
-  read `kern.proc.all`, `kern.proc.pgrp` and `kern.proc.pid` and inspect
-  processes in its own sandbox, so process listing is not in itself denied:
-  every `internal/reap` test but the nine above passes inside it.
-  `kern.proc.uid` is outside that policy and refused, and it is the listing
-  `reap.Contain`'s sweep starts from. `kern.proc.tty`, which the terminal host
-  lists a PTY's jobs by, is outside the policy too; the terminal tests fail on
-  the local bind before reaching it.
+None of this applies to hosted weft segments: they do not run under srt. Each
+runs as its own per-slot agent user, and the uid is the boundary;
+`docs/agent-users.md` records what it protects and what it does not. The
+supervisor writes no profile and runs no srt preflight, and the restart pass
+contains a segment by killing its agent user rather than by sweeping a sandbox
+grant.
 
 ## Running unsandboxed
 
-`shuttle run <agent> --unsafe-no-sandbox` is the only way to run a model outside
-the sandbox. There is no `"none"` sandbox kind in the manifest schema (§4.1), no
+`shuttle run <agent> --unsafe-no-sandbox` is the only way to run a scheduled
+agent's model outside the sandbox. There is no `"none"` sandbox kind in the manifest schema (§4.1), no
 key for it in `config.json` and no environment variable the daemon reads; the
 flag is the only input that will select an empty `claude.Options.Launcher`.
-Hosted weft segments have no equivalent escape hatch. The manual report flag
-prints one line to stderr naming the run:
+The manual report flag prints one line to stderr naming the run:
 
 ```
 warning: --unsafe-no-sandbox: run daily-20260906-043000-3795 is exempt from the srt sandbox

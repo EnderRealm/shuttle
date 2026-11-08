@@ -3,6 +3,8 @@ package reap
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,6 +22,51 @@ type sessionMember struct {
 // listSession is the kernel's answer for who is in a session. A var so a
 // test can substitute a listing.
 var listSession = sessionMembers
+
+// readState is the kernel's current answer for a pid. A var so a test can
+// drive a lookup that fails or a pid handed on, which no process a test starts
+// produces on demand.
+var readState = processState
+
+// errProcessGone is a lookup on a pid that no longer has a live process.
+var errProcessGone = errors.New("no such process")
+
+// Containment is what one sweep did: the members it stopped and verified,
+// the pids it stopped and let go again because they were no longer the
+// process listed once stopped, and the members it killed. Names is the
+// command name the listing gave each pid it signalled, for the log line.
+type Containment struct {
+	Stopped, Released, Killed []int
+	Names                     map[int]string
+}
+
+// Found reports whether the sweep signalled anything.
+func (c Containment) Found() bool { return len(c.Stopped) > 0 || len(c.Released) > 0 }
+
+func (c Containment) String() string {
+	return fmt.Sprintf("stopped %d %s, released %d %s, killed %d %s",
+		len(c.Stopped), c.pids(c.Stopped), len(c.Released), c.pids(c.Released), len(c.Killed), c.pids(c.Killed))
+}
+
+// pids renders list as pid(comm), or the bare pid where no name was listed.
+func (c Containment) pids(list []int) string {
+	parts := make([]string, len(list))
+	for i, pid := range list {
+		parts[i] = strconv.Itoa(pid)
+		if name := c.Names[pid]; name != "" {
+			parts[i] += "(" + name + ")"
+		}
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
+func release(pid int, c *Containment) error {
+	c.Released = append(c.Released, pid)
+	if err := sendSignal(pid, syscall.SIGCONT); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("continue released pid %d: %w", pid, err)
+	}
+	return nil
+}
 
 // SessionGroups is every process group with a live member in session sid.
 func SessionGroups(sid int) ([]int, error) {
