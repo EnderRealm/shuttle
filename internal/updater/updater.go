@@ -66,7 +66,8 @@ type Updater struct {
 	Home string
 	// Bin is the install target, the path the plists pin.
 	Bin string
-	// Current is the running binary's version.Current.
+	// Current is the version this host runs: the binary's version.Current at
+	// start, advanced to a release's tag once its install is confirmed.
 	Current string
 
 	Source        Source
@@ -354,6 +355,10 @@ func (u *Updater) apply(ctx context.Context, s *staged, baseline string) error {
 		return u.fallBack(ctx, s, baseline, schema, backup, err)
 	}
 	u.Log.Printf("step 7: /v2/service reports %q", s.build)
+	// The install is confirmed, so this process is no longer behind the
+	// release even if the job replacement below never lands: a later poll
+	// must not repeat the update, rotating out its backup and .previous.
+	u.Current = s.tag
 	u.lift()
 	u.Log.Printf("step 8: update to %s complete", s.tag)
 	if err := u.Services.RestartSelf(u.Bin); err != nil {

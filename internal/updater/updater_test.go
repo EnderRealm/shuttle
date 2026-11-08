@@ -136,6 +136,7 @@ type fakeDaemon struct {
 	onRestart func(version string) error
 	onStop    func()
 	onSelf    func()
+	selfErr   error
 	// serving decides what a daemon of this version reports; the default is
 	// its own version.
 	serving func(version string) string
@@ -201,12 +202,12 @@ func (d *fakeDaemon) Stop(context.Context) error {
 func (d *fakeDaemon) RestartSelf(string) error {
 	d.mu.Lock()
 	d.selves++
-	hook := d.onSelf
+	hook, err := d.onSelf, d.selfErr
 	d.mu.Unlock()
 	if hook != nil {
 		hook()
 	}
-	return nil
+	return err
 }
 
 func (d *fakeDaemon) restarted() []string {
@@ -1314,6 +1315,36 @@ func TestDevBuildUpdatesToTheLatestRelease(t *testing.T) {
 	if h.daemon.build != newBuild {
 		t.Fatalf("serving %q", h.daemon.build)
 	}
+}
+
+// An updater whose job replacement failed keeps running the old build. It
+// installed and confirmed the release, so a later poll must leave the host as
+// that install did: the backup and .previous a fall-back would need stay put.
+func TestUpdaterDoesNotRepeatAConfirmedUpdate(t *testing.T) {
+	h := newHost(t)
+	h.daemon.selfErr = errors.New("plutil: lint failed")
+	if err := h.u.Tick(context.Background()); err == nil || !strings.Contains(err.Error(), "restart the updater") {
+		t.Fatalf("tick = %v", err)
+	}
+	h.wantNewBinary()
+	if err := h.u.Tick(context.Background()); err != nil {
+		t.Fatalf("second tick: %v\n%s", err, h.log())
+	}
+	h.wantLog("up to date: running " + newTag)
+	if got := h.daemon.restarted(); !reflect.DeepEqual(got, []string{newTag}) {
+		t.Fatalf("restarts = %v", got)
+	}
+	if h.daemon.selves != 1 {
+		t.Fatalf("self restarts = %d", h.daemon.selves)
+	}
+	if got := h.backups(); len(got) != 1 {
+		t.Fatalf("backups = %v", got)
+	}
+	if data, err := os.ReadFile(h.bin + previousSuffix); err != nil || string(data) != string(versionScript(oldVersion)) {
+		t.Fatalf("previous binary = %q/%v", data, err)
+	}
+	h.wantNewBinary()
+	h.wantDispatchOpen()
 }
 
 func TestBackupsKeepTheNewest(t *testing.T) {

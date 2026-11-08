@@ -214,6 +214,12 @@ pause`, whose pause then stands. Once the barrier is up neither does: see
 If the updater stops polling after an update (no new lines in `updater.log`), its detached helper
 died between bootout and bootstrap. `shuttle install updater` brings it back.
 
+If the updater's own restart fails before the bootout (the helper never starts, fails to write or
+lint its plist, or dies in its sleep), the old build keeps polling. It knows the release is
+installed, so it logs `up to date` rather than repeating the update. If that release migrated the
+ledger, though, the old build cannot open it and fails at `open ledger` on every poll. `shuttle
+install updater` is the remedy in both cases.
+
 ### Dev builds
 
 As in loom, a `dev` build always updates to the latest release, whatever that is, so a host never
