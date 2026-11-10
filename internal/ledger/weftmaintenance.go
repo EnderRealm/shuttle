@@ -416,6 +416,13 @@ func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
 		if blocked != "" || !d.Finished(run.Ticket) {
 			continue
 		}
+		unbound, err := t.hostCleanupUnbound(run, d)
+		if err != nil {
+			return err
+		}
+		if unbound {
+			continue
+		}
 		a := WeftAdmission{Kind: WeftEntryCleanup, Ticket: run.Ticket, Project: run.Project, RunID: run.ID,
 			RepositoryID: run.RepositoryID, Repository: run.Repo, TokenID: WeftHostToken}
 		e, err := t.insertEntryNoting(a, "host-started: "+run.Ticket+" is done or closed in tk")
@@ -435,6 +442,29 @@ func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
 		}
 	}
 	return nil
+}
+
+// hostCleanupUnbound is whether the run's last host-started cleanup was
+// invalidated binding_changed and d.Check still answers that for the cleanup
+// it would admit now. A cleanup that cannot proceed stays retained with its
+// reason and is not retried (§6.8): admitted again, it would only be
+// invalidated again, one more entry on every catalog change.
+func (t *WeftTx) hostCleanupUnbound(run *WeftRun, d WeftDispatch) (bool, error) {
+	var state string
+	var reason sql.NullString
+	err := t.tx.QueryRow(`SELECT state,invalidated_reason FROM weft_entries WHERE run_id=? AND kind=? AND token_id=?
+		ORDER BY position DESC LIMIT 1`, run.ID, WeftEntryCleanup, WeftHostToken).Scan(&state, &reason)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	case state != WeftEntryInvalidated || reason.String != WeftInvalidBinding:
+		return false, nil
+	}
+	again, _ := d.Check(&WeftEntry{Kind: WeftEntryCleanup, Ticket: run.Ticket, Project: run.Project,
+		RepositoryID: run.RepositoryID, Repository: run.Repo, RunID: sql.NullString{String: run.ID, Valid: true}})
+	return again == WeftInvalidBinding, nil
 }
 
 // dispatchMaintenance takes the repository as maintenance for the entry and
