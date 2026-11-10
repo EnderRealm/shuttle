@@ -476,7 +476,7 @@ func (s *studio) seedFixtureRuns(tickets []fixtureTicket) {
 		}
 		segment := 1
 		if answered {
-			qid, err := s.store.RecordWeftParked(run.ID, 1, "work", 1, 1, "Which shape?", fixtureBase, rendered)
+			qid, err := s.store.RecordWeftParked(run.ID, 1, "work", 1, 1, "Which shape?", nil, fixtureBase, rendered)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -517,7 +517,7 @@ func (s *studio) seedFixtureRuns(tickets []fixtureTicket) {
 		for _, row := range parkedDoc.Run.Stages {
 			stage(run.ID, 1, row)
 		}
-		if _, err := s.store.RecordWeftParked(run.ID, 1, "work", 1, 1, parkedDoc.Run.Question.Text, fixtureBase,
+		if _, err := s.store.RecordWeftParked(run.ID, 1, "work", 1, 1, parkedDoc.Run.Question.Text, nil, fixtureBase,
 			s.summary("run.json", "run", "summary")); err != nil {
 			t.Fatal(err)
 		}
@@ -1686,7 +1686,7 @@ func TestStateStreamCarriesV2RunEvents(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.store.RecordWeftParked(run.ID, 1, "review", 1, 1, "Which label?", fixtureBase,
+	if _, err := s.store.RecordWeftParked(run.ID, 1, "review", 1, 1, "Which label?", nil, fixtureBase,
 		s.summary("run.json", "run", "summary")); err != nil {
 		t.Fatal(err)
 	}

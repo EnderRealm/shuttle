@@ -196,7 +196,7 @@ func TestWeftRunParksAnswersAndResumesDurably(t *testing.T) {
 	if err := s.RecordWeftStage(stage); err != nil {
 		t.Fatal(err)
 	}
-	qid, err := s.RecordWeftParked(run.ID, 1, "work", 1, 1, "Which shape?", "head", json.RawMessage(`{"state":"rendered"}`))
+	qid, err := s.RecordWeftParked(run.ID, 1, "work", 1, 1, "Which shape?", nil, "head", json.RawMessage(`{"state":"rendered"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestReconcileWeftUnknownClosesAPIStateAndReleasesRepository(t *testing.T) {
 	if err := s.RecordWeftHello(run.ID, 1, "20260902T043012Z-abcd1234", "base", "criteria"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordWeftParked(run.ID, 1, "work", 1, 1, "Still there?", "head", json.RawMessage(`{"state":"rendered"}`)); err != nil {
+	if _, err := s.RecordWeftParked(run.ID, 1, "work", 1, 1, "Still there?", nil, "head", json.RawMessage(`{"state":"rendered"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.MarkUnknown(run.Segments[0].LedgerRunID); err != nil {
@@ -596,7 +596,7 @@ func TestTerminalSegmentStagesUnchanged(t *testing.T) {
 			return s.RecordWeftEnded(runID, 1, "failed", false, "review", "error", "", "", "review failed", "head", json.RawMessage(`{"state":"rendered"}`))
 		}, true},
 		{"parked", func(runID string) error {
-			_, err := s.RecordWeftParked(runID, 1, "review", 1, 1, "Which shape?", "head", json.RawMessage(`{"state":"rendered"}`))
+			_, err := s.RecordWeftParked(runID, 1, "review", 1, 1, "Which shape?", nil, "head", json.RawMessage(`{"state":"rendered"}`))
 			return err
 		}, false},
 	} {

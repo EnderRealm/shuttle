@@ -18,7 +18,8 @@ package ledger
 // schemaVersion 8: the agent user each hosted pipeline segment runs as.
 // schemaVersion 9: the host cleanup hold of each run (weft-service/v2 §6.8).
 // schemaVersion 10: whether each queue entry was dismissed (weft-service/v2 §6.3).
-const schemaVersion = 10
+// schemaVersion 11: structured questions and answers (weft-service/v2 §6.5).
+const schemaVersion = 11
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -359,4 +360,15 @@ ALTER TABLE weft_runs ADD COLUMN host_cleanup_hold INTEGER NOT NULL DEFAULT 0;
 // still find it.
 const weftQueueDismissSQL = `
 ALTER TABLE weft_entries ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;
+`
+
+// weftStructuredQuestionsSQL is schema 11: weft_questions.questions and
+// weft_answers.answers, a structured park's questions and its answer as the
+// JSON arrays the contract serves (§6.5). NULL is the legacy form, whose
+// text column carries the one free-text question or answer; a structured
+// row's text is empty. A stored question is never rewritten into the other
+// form.
+const weftStructuredQuestionsSQL = `
+ALTER TABLE weft_questions ADD COLUMN questions TEXT;
+ALTER TABLE weft_answers ADD COLUMN answers TEXT;
 `

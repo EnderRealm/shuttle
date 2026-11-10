@@ -114,7 +114,7 @@ func TestCatalogRevisionOnRunPhase(t *testing.T) {
 	})
 	var question string
 	catalogStep(t, s, "demo", "parked", true, func() (err error) {
-		question, err = s.RecordWeftParked(run.ID, 1, "work", 1, 1, "Which shape?", "head", json.RawMessage(`{"state":"rendered"}`))
+		question, err = s.RecordWeftParked(run.ID, 1, "work", 1, 1, "Which shape?", nil, "head", json.RawMessage(`{"state":"rendered"}`))
 		return err
 	})
 	catalogStep(t, s, "demo", "parked segment reaped", false, func() error {
@@ -250,6 +250,7 @@ func TestOpenMigratesSchemaSixToSeven(t *testing.T) {
 		`ALTER TABLE weft_segments DROP COLUMN agent_user`,
 		`ALTER TABLE weft_runs DROP COLUMN host_cleanup_hold`,
 		`ALTER TABLE weft_entries DROP COLUMN dismissed`,
+		`ALTER TABLE weft_questions DROP COLUMN questions`, `ALTER TABLE weft_answers DROP COLUMN answers`,
 		`UPDATE schema_meta SET value='6' WHERE key='schema_version'`} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			t.Fatal(err)
@@ -267,7 +268,7 @@ func TestOpenMigratesSchemaSixToSeven(t *testing.T) {
 	defer s.Close()
 	var version string
 	var digest sql.NullString
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "10" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "11" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	if err := s.db.QueryRow(`SELECT host_digest FROM weft_catalog WHERE project='demo'`).Scan(&digest); err != nil || !digest.Valid {

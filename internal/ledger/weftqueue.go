@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -731,8 +732,10 @@ func (t *WeftTx) insertEntryNoting(a WeftAdmission, detail string) (*WeftEntry, 
 
 // RecordAnswer is §6.5's one transaction: the question moved pending →
 // answered, the answer recorded once against it, and an answer entry carrying
-// it admitted. Dispatch, in the same transaction, then tries the entry.
-func (t *WeftTx) RecordAnswer(runID, questionID, text string, a WeftAdmission) (*WeftQuestion, *WeftEntry, error) {
+// it admitted. Dispatch, in the same transaction, then tries the entry. A
+// structured answer is answers, already validated against its question's
+// form and options; a legacy one is text.
+func (t *WeftTx) RecordAnswer(runID, questionID, text string, answers json.RawMessage, a WeftAdmission) (*WeftQuestion, *WeftEntry, error) {
 	run, err := getWeftRunTx(t.tx, runID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, refuse("run_not_found", "%s is not a run on this host", runID)
@@ -783,8 +786,8 @@ func (t *WeftTx) RecordAnswer(runID, questionID, text string, a WeftAdmission) (
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, nil, notPending(question, runID)
 	}
-	if _, err := t.tx.Exec(`INSERT INTO weft_answers(id,question_id,run_id,text,submitted_at,segment)
-		VALUES(?,?,?,?,?,?)`, answerID, questionID, runID, text, stamp, segment); err != nil {
+	if _, err := t.tx.Exec(`INSERT INTO weft_answers(id,question_id,run_id,text,answers,submitted_at,segment)
+		VALUES(?,?,?,?,?,?,?)`, answerID, questionID, runID, text, nullJSON(answers), stamp, segment); err != nil {
 		return nil, nil, err
 	}
 	a.Kind, a.Ticket, a.Project, a.RunID, a.AnswerID = WeftEntryAnswer, run.Ticket, run.Project, runID, answerID

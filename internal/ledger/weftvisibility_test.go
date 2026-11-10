@@ -118,7 +118,7 @@ func TestWeftOutputPruneSparesAuthoritativeState(t *testing.T) {
 	if _, err := s.RecordWeftOutput(WeftOutputChunk{RunID: ended.ID, WeftAttempt: attempt, Chunk: 1, At: "2026-09-20T09:00:00.000Z", Text: "old"}); err != nil {
 		t.Fatal(err)
 	}
-	qid, err := s.RecordWeftParked(ended.ID, 1, "work", 1, 1, "Which shape?", "head", json.RawMessage(`{"state":"rendered"}`))
+	qid, err := s.RecordWeftParked(ended.ID, 1, "work", 1, 1, "Which shape?", nil, "head", json.RawMessage(`{"state":"rendered"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestSchemaThreeMigratesToFour(t *testing.T) {
 	}
 	defer s.Close()
 	var version string
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "10" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "11" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	run, err := s.GetWeftRun("r-20260913T142233Z-6b2f0c1a")

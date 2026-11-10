@@ -241,6 +241,7 @@ func TestSchemaSevenMigratesToEight(t *testing.T) {
 	for _, stmt := range []string{`ALTER TABLE weft_segments DROP COLUMN agent_user`,
 		`ALTER TABLE weft_runs DROP COLUMN host_cleanup_hold`,
 		`ALTER TABLE weft_entries DROP COLUMN dismissed`,
+		`ALTER TABLE weft_questions DROP COLUMN questions`, `ALTER TABLE weft_answers DROP COLUMN answers`,
 		`UPDATE schema_meta SET value='7' WHERE key='schema_version'`} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			t.Fatal(err)
@@ -252,7 +253,7 @@ func TestSchemaSevenMigratesToEight(t *testing.T) {
 	}
 	defer s.Close()
 	var version string
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "10" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "11" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	got, err := s.GetWeftRun(run.ID)

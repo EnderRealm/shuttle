@@ -135,7 +135,7 @@ func (f *serviceFixture) parkedV1Run(t *testing.T) (*ledger.WeftRun, string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	qid, err := f.store.RecordWeftParked(run.ID, 1, "work", 1, 1, "Which implementation?", "head", json.RawMessage(`{"state":"rendered"}`))
+	qid, err := f.store.RecordWeftParked(run.ID, 1, "work", 1, 1, "Which implementation?", nil, "head", json.RawMessage(`{"state":"rendered"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

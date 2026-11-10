@@ -62,7 +62,9 @@ func (b *syncBuffer) String() string {
 }
 
 // queueWorkerScript is a weft-worker/v2 worker: its version is the control
-// directory's version.json, and its hello repeats CAPABILITIES.
+// directory's version.json, and its hello repeats CAPABILITIES. A park asks
+// the structured questions in the ticket's .questions control file when there
+// is one, else the legacy question.
 const queueWorkerScript = `#!/bin/sh
 control=CONTROL
 case "$1" in
@@ -124,7 +126,9 @@ if [ "$mode" = finish ]; then
   exit 0
 fi
 printf '{%s,"worker_run_id":"%s","seq":2,"ts":"2026-10-11T12:01:00.000Z","event":"stage","stage":"work","backend":"claude","occurrence":1,"attempt":1,"state":"needs_input","session":null,"detail":null,"exit_code":null,"turns":1,"spend":null,"processing_ms":100,"tokens":null}\n' "$env" "$worker"
-printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:01.000Z","event":"parked","stage":"work","occurrence":1,"attempt":1,"worker_outcome":"blocked","question":"Which shape?","head":"head","summary":%s}\n' "$env" "$worker" "$summary"
+asked='"question":"Which shape?"'
+if [ -f "$control/$slug.questions" ]; then asked="\"questions\":$(cat "$control/$slug.questions")"; fi
+printf '{%s,"worker_run_id":"%s","seq":3,"ts":"2026-10-11T12:01:01.000Z","event":"parked","stage":"work","occurrence":1,"attempt":1,"worker_outcome":"blocked",%s,"head":"head","summary":%s}\n' "$env" "$worker" "$asked" "$summary"
 `
 
 func newQueueHost(t *testing.T) *queueHost {

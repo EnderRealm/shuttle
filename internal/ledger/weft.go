@@ -138,6 +138,9 @@ type WeftStage struct {
 	At         string
 }
 
+// WeftQuestion is a park in either form (§6.5): Questions, a structured
+// park's questions as the contract's JSON array, or, when it is nil, the
+// legacy free-text Text.
 type WeftQuestion struct {
 	ID         string
 	RunID      string
@@ -147,17 +150,22 @@ type WeftQuestion struct {
 	Occurrence int
 	Attempt    int
 	Text       string
+	Questions  json.RawMessage
 	AskedAt    string
 	State      string
 	AnswerID   sql.NullString
 	Answer     *WeftAnswer
 }
 
+// WeftAnswer is an answer in its question's form: Answers, a structured
+// answer's entries as the contract's JSON array, or, when it is nil, the
+// legacy free-text Text.
 type WeftAnswer struct {
 	ID              string
 	QuestionID      string
 	RunID           string
 	Text            string
+	Answers         json.RawMessage
 	SubmittedAt     string
 	Segment         int
 	EntryID         sql.NullString
@@ -620,8 +628,10 @@ func (s *Store) RecordWeftStage(stage WeftStage) error {
 	})
 }
 
-// RecordWeftParked records a pending question; process settlement waits for reap.
-func (s *Store) RecordWeftParked(runID string, segment int, stage string, occurrence, attempt int, question, head string, summary json.RawMessage) (string, error) {
+// RecordWeftParked records a pending question — the legacy question, or a
+// structured park's questions when questions is non-nil; process settlement
+// waits for reap.
+func (s *Store) RecordWeftParked(runID string, segment int, stage string, occurrence, attempt int, question string, questions json.RawMessage, head string, summary json.RawMessage) (string, error) {
 	qid, err := newRemoteID("q", s.now())
 	if err != nil {
 		return "", err
@@ -643,8 +653,9 @@ func (s *Store) RecordWeftParked(runID string, segment int, stage string, occurr
 			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO weft_questions(
-			id,run_id,segment,stage,occurrence,attempt,text,asked_at,state)
-			VALUES(?,?,?,?,?,?,?,?,?)`, qid, runID, segment, stage, occurrence, attempt, question, stamp, "pending"); err != nil {
+			id,run_id,segment,stage,occurrence,attempt,text,questions,asked_at,state)
+			VALUES(?,?,?,?,?,?,?,?,?,?)`, qid, runID, segment, stage, occurrence, attempt, question,
+			nullJSON(questions), stamp, "pending"); err != nil {
 			return err
 		}
 		q, err := getQuestionTx(tx, qid)
@@ -1348,7 +1359,7 @@ func (s *Store) PendingWeftQuestion(runID string) (*WeftQuestion, error) {
 
 func pendingWeftQuestion(q querier, runID string) (*WeftQuestion, error) {
 	return scanQuestion(q.QueryRow(`SELECT q.id,q.run_id,r.ticket,q.segment,q.stage,q.occurrence,
-		q.attempt,q.text,q.asked_at,q.state,q.answer_id FROM weft_questions q
+		q.attempt,q.text,q.questions,q.asked_at,q.state,q.answer_id FROM weft_questions q
 		JOIN weft_runs r ON r.id=q.run_id WHERE q.run_id=? AND q.state='pending'`, runID))
 }
 
@@ -1358,7 +1369,7 @@ func (s *Store) WeftQuestion(id string) (*WeftQuestion, error) {
 
 func weftQuestion(db querier, id string) (*WeftQuestion, error) {
 	q, err := scanQuestion(db.QueryRow(`SELECT q.id,q.run_id,r.ticket,q.segment,q.stage,q.occurrence,
-		q.attempt,q.text,q.asked_at,q.state,q.answer_id FROM weft_questions q
+		q.attempt,q.text,q.questions,q.asked_at,q.state,q.answer_id FROM weft_questions q
 		JOIN weft_runs r ON r.id=q.run_id WHERE q.id=?`, id))
 	if err != nil {
 		return nil, err
@@ -1371,7 +1382,7 @@ func weftQuestion(db querier, id string) (*WeftQuestion, error) {
 
 func (s *Store) PendingWeftQuestions() ([]*WeftQuestion, error) {
 	rows, err := s.db.Query(`SELECT q.id,q.run_id,r.ticket,q.segment,q.stage,q.occurrence,
-		q.attempt,q.text,q.asked_at,q.state,q.answer_id FROM weft_questions q
+		q.attempt,q.text,q.questions,q.asked_at,q.state,q.answer_id FROM weft_questions q
 		JOIN weft_runs r ON r.id=q.run_id WHERE q.state='pending' ORDER BY q.asked_at`)
 	if err != nil {
 		return nil, err
@@ -1390,22 +1401,30 @@ func (s *Store) PendingWeftQuestions() ([]*WeftQuestion, error) {
 
 func getQuestionTx(tx *sql.Tx, id string) (*WeftQuestion, error) {
 	return scanQuestion(tx.QueryRow(`SELECT q.id,q.run_id,r.ticket,q.segment,q.stage,q.occurrence,
-		q.attempt,q.text,q.asked_at,q.state,q.answer_id FROM weft_questions q
+		q.attempt,q.text,q.questions,q.asked_at,q.state,q.answer_id FROM weft_questions q
 		JOIN weft_runs r ON r.id=q.run_id WHERE q.id=?`, id))
 }
 
 func scanQuestion(sc scanner) (*WeftQuestion, error) {
 	var q WeftQuestion
+	var questions sql.NullString
 	err := sc.Scan(&q.ID, &q.RunID, &q.Ticket, &q.Segment, &q.Stage, &q.Occurrence,
-		&q.Attempt, &q.Text, &q.AskedAt, &q.State, &q.AnswerID)
+		&q.Attempt, &q.Text, &questions, &q.AskedAt, &q.State, &q.AnswerID)
+	if questions.Valid {
+		q.Questions = json.RawMessage(questions.String)
+	}
 	return &q, err
 }
 
 func weftAnswer(q querier, id string) (*WeftAnswer, error) {
 	var a WeftAnswer
-	err := q.QueryRow(`SELECT id,question_id,run_id,text,submitted_at,segment,entry_id,consumed_segment
+	var answers sql.NullString
+	err := q.QueryRow(`SELECT id,question_id,run_id,text,answers,submitted_at,segment,entry_id,consumed_segment
 		FROM weft_answers WHERE id=?`, id).
-		Scan(&a.ID, &a.QuestionID, &a.RunID, &a.Text, &a.SubmittedAt, &a.Segment, &a.EntryID, &a.ConsumedSegment)
+		Scan(&a.ID, &a.QuestionID, &a.RunID, &a.Text, &answers, &a.SubmittedAt, &a.Segment, &a.EntryID, &a.ConsumedSegment)
+	if answers.Valid {
+		a.Answers = json.RawMessage(answers.String)
+	}
 	return &a, err
 }
 
@@ -1555,10 +1574,18 @@ func appendStageEventTx(tx *sql.Tx, stage WeftStage) error {
 func appendQuestionEventTx(tx *sql.Tx, question *WeftQuestion, stamp string) error {
 	var answer any
 	if a := question.Answer; a != nil {
-		answer = questionAnswerData{
-			AnswerID: a.ID, Text: a.Text, SubmittedAt: a.SubmittedAt,
+		data := questionAnswerData{
+			AnswerID: a.ID, Answers: a.Answers, SubmittedAt: a.SubmittedAt,
 			EntryID: nullable(a.EntryID), ConsumedSegment: nullableInt(a.ConsumedSegment),
 		}
+		if a.Answers == nil {
+			data.Text = &a.Text
+		}
+		answer = data
+	}
+	var text *string
+	if question.Questions == nil {
+		text = &question.Text
 	}
 	return appendWeftEventTx(tx, question.RunID, "question", stamp, func(seq int64) any {
 		return questionEventPayload{
@@ -1566,8 +1593,8 @@ func appendQuestionEventTx(tx *sql.Tx, question *WeftQuestion, stamp string) err
 			Question: questionEventData{
 				QuestionID: question.ID, RunID: question.RunID, Ticket: question.Ticket,
 				Segment: question.Segment, Stage: question.Stage, Occurrence: question.Occurrence,
-				Attempt: question.Attempt, Text: question.Text, AskedAt: question.AskedAt,
-				State: question.State, Answer: answer,
+				Attempt: question.Attempt, Text: text, Questions: question.Questions,
+				AskedAt: question.AskedAt, State: question.State, Answer: answer,
 			},
 		}
 	})
@@ -1642,26 +1669,30 @@ type questionEventPayload struct {
 	Question questionEventData `json:"question"`
 }
 
+// questionEventData is the question resource in either form (§6.5): text
+// for a legacy park, questions for a structured one, never both.
 type questionEventData struct {
-	QuestionID string `json:"question_id"`
-	RunID      string `json:"run_id"`
-	Ticket     string `json:"ticket"`
-	Segment    int    `json:"segment"`
-	Stage      string `json:"stage"`
-	Occurrence int    `json:"occurrence"`
-	Attempt    int    `json:"attempt"`
-	Text       string `json:"text"`
-	AskedAt    string `json:"asked_at"`
-	State      string `json:"state"`
-	Answer     any    `json:"answer"`
+	QuestionID string          `json:"question_id"`
+	RunID      string          `json:"run_id"`
+	Ticket     string          `json:"ticket"`
+	Segment    int             `json:"segment"`
+	Stage      string          `json:"stage"`
+	Occurrence int             `json:"occurrence"`
+	Attempt    int             `json:"attempt"`
+	Text       *string         `json:"text,omitempty"`
+	Questions  json.RawMessage `json:"questions,omitempty"`
+	AskedAt    string          `json:"asked_at"`
+	State      string          `json:"state"`
+	Answer     any             `json:"answer"`
 }
 
 type questionAnswerData struct {
-	AnswerID        string `json:"answer_id"`
-	Text            string `json:"text"`
-	SubmittedAt     string `json:"submitted_at"`
-	EntryID         any    `json:"entry_id"`
-	ConsumedSegment any    `json:"consumed_segment"`
+	AnswerID        string          `json:"answer_id"`
+	Text            *string         `json:"text,omitempty"`
+	Answers         json.RawMessage `json:"answers,omitempty"`
+	SubmittedAt     string          `json:"submitted_at"`
+	EntryID         any             `json:"entry_id"`
+	ConsumedSegment any             `json:"consumed_segment"`
 }
 
 func aggregateWeftSegmentTx(tx *sql.Tx, runID string, segment int) error {

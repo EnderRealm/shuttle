@@ -173,19 +173,33 @@ func v2Result(run *ledger.WeftRun) map[string]any {
 	}
 }
 
+// v2Question is the question resource in the form it was asked (§6.5):
+// questions and answers for a structured park, text for a legacy one.
 func v2Question(q *ledger.WeftQuestion) map[string]any {
 	var answer any
 	if a := q.Answer; a != nil {
-		answer = map[string]any{
-			"answer_id": a.ID, "text": a.Text, "submitted_at": a.SubmittedAt,
+		given := map[string]any{
+			"answer_id": a.ID, "submitted_at": a.SubmittedAt,
 			"entry_id": nullString(a.EntryID), "consumed_segment": nullInt(a.ConsumedSegment),
 		}
+		if a.Answers != nil {
+			given["answers"] = a.Answers
+		} else {
+			given["text"] = a.Text
+		}
+		answer = given
 	}
-	return map[string]any{
+	resource := map[string]any{
 		"question_id": q.ID, "run_id": q.RunID, "ticket": q.Ticket, "segment": q.Segment,
-		"stage": q.Stage, "occurrence": q.Occurrence, "attempt": q.Attempt, "text": q.Text,
+		"stage": q.Stage, "occurrence": q.Occurrence, "attempt": q.Attempt,
 		"asked_at": q.AskedAt, "state": q.State, "answer": answer,
 	}
+	if q.Questions != nil {
+		resource["questions"] = q.Questions
+	} else {
+		resource["text"] = q.Text
+	}
+	return resource
 }
 
 func (s *Service) handleV2Runs(w http.ResponseWriter, r *http.Request) {

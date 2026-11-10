@@ -842,7 +842,9 @@ func (s *Supervisor) environ(homeDir, runDir, oauthToken string) []string {
 }
 
 // writeAnswer writes the segment's answer file: v1 §4.1's, or
-// answer-file.json's under weft-worker/v2, which adds the answer's id.
+// answer-file.json's under weft-worker/v2, which adds the answer's id. A
+// structured park's file carries its questions and answers in place of the
+// question and answer (answer-file-structured.json).
 func (s *Supervisor) writeAnswer(run *ledger.WeftRun, segment ledger.WeftSegment, runDir, contract string) (string, error) {
 	if !segment.AnswerID.Valid {
 		return "", nil
@@ -859,9 +861,11 @@ func (s *Supervisor) writeAnswer(run *ledger.WeftRun, segment ledger.WeftSegment
 		return "", err
 	}
 	path := filepath.Join(runDir, "answer.json")
-	fields := map[string]any{
-		"contract_version": contract, "question_id": question.ID,
-		"question": question.Text, "answer": answer.Text,
+	fields := map[string]any{"contract_version": contract, "question_id": question.ID}
+	if question.Questions != nil {
+		fields["questions"], fields["answers"] = question.Questions, answer.Answers
+	} else {
+		fields["question"], fields["answer"] = question.Text, answer.Text
 	}
 	if contract == WorkerContractV2 {
 		fields["answer_id"] = answer.ID

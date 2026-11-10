@@ -23,6 +23,7 @@ func TestSchemaNineMigratesToTen(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, stmt := range []string{`ALTER TABLE weft_entries DROP COLUMN dismissed`,
+		`ALTER TABLE weft_questions DROP COLUMN questions`, `ALTER TABLE weft_answers DROP COLUMN answers`,
 		`UPDATE schema_meta SET value='9' WHERE key='schema_version'`} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			t.Fatal(err)
@@ -34,7 +35,7 @@ func TestSchemaNineMigratesToTen(t *testing.T) {
 	}
 	defer s.Close()
 	var version string
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "10" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "11" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	q, err := s.WeftQueue(time.Now().Add(-time.Hour))

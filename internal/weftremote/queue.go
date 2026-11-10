@@ -835,21 +835,33 @@ func (s *Service) handleRunCommand(w http.ResponseWriter, r *http.Request, runID
 }
 
 // answerCommit records an answer once against its pending question and
-// queues it (§6.5).
+// queues it (§6.5). The request carries a legacy answer or structured
+// answers, never both; either is held to its question's form, and
+// structured answers to its options, before anything is recorded.
 func (s *Service) answerCommit(body []byte, key, runID string) (v2Commit, error) {
 	var req struct {
-		ContractVersion string `json:"contract_version"`
-		QuestionID      string `json:"question_id"`
-		Answer          string `json:"answer"`
+		ContractVersion string         `json:"contract_version"`
+		QuestionID      string         `json:"question_id"`
+		Answer          *string        `json:"answer"`
+		Answers         []choiceAnswer `json:"answers"`
 	}
-	if err := decodeV2(body, &req, "question_id", "answer"); err != nil {
+	if err := decodeV2(body, &req, "question_id"); err != nil {
 		return refusedBy(err), nil
 	}
 	if !validProtocolID(req.QuestionID) {
 		return refused("malformed", "question_id is not well formed"), nil
 	}
-	if strings.TrimSpace(req.Answer) == "" || len(req.Answer) > maxAnswerBytes || !utf8.ValidString(req.Answer) {
-		return refused("malformed", "answer must be non-empty UTF-8 of at most %d bytes", maxAnswerBytes), nil
+	switch {
+	case req.Answer != nil && req.Answers == nil:
+		if strings.TrimSpace(*req.Answer) == "" || len(*req.Answer) > maxAnswerBytes || !utf8.ValidString(*req.Answer) {
+			return refused("malformed", "answer must be non-empty UTF-8 of at most %d bytes", maxAnswerBytes), nil
+		}
+	case req.Answer == nil && req.Answers != nil:
+		if len(body) > maxAnswerBytes {
+			return refused("malformed", "an answers request must be at most %d bytes", maxAnswerBytes), nil
+		}
+	default:
+		return refused("malformed", "the body must carry exactly one of answer and answers"), nil
 	}
 	if !validProtocolID(runID) {
 		return refused("run_not_found", "%s is not a run on host %s", runID, s.hostID), nil
@@ -859,7 +871,19 @@ func (s *Service) answerCommit(body []byte, key, runID string) (v2Commit, error)
 		return nil, err
 	}
 	return func(tx *ledger.WeftTx) (v2Outcome, error) {
-		question, entry, err := tx.RecordAnswer(runID, req.QuestionID, req.Answer, s.admission(key))
+		// A question that is missing or another run's is RecordAnswer's to
+		// refuse; its form is checked only against this run's question.
+		var answers json.RawMessage
+		asked, err := tx.WeftQuestion(req.QuestionID)
+		switch {
+		case err == nil && asked.RunID == runID:
+			if answers, err = answerFor(asked, req.Answers); err != nil {
+				return v2Outcome{}, err
+			}
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			return v2Outcome{}, err
+		}
+		question, entry, err := tx.RecordAnswer(runID, req.QuestionID, text(req.Answer), answers, s.admission(key))
 		if err != nil {
 			return v2Outcome{}, err
 		}

@@ -318,13 +318,31 @@ func (r *segmentStream) parked(line []byte) error {
 	if r.graded != nil {
 		return fmt.Errorf("parked after graded")
 	}
-	if event.WorkerOutcome != "blocked" || event.Question == "" ||
-		len([]byte(event.Question)) > maxAnswerBytes || event.Occurrence < 1 || event.Attempt < 1 {
+	if event.WorkerOutcome != "blocked" || event.Occurrence < 1 || event.Attempt < 1 {
 		return fmt.Errorf("invalid parked event")
+	}
+	// A park carries the legacy question or, from weft-worker/v2, structured
+	// questions — never both, never neither (§6.5) — and is stored as asked.
+	var questions json.RawMessage
+	switch {
+	case event.Question != nil && event.Questions == nil:
+		if *event.Question == "" || len(*event.Question) > maxAnswerBytes {
+			return fmt.Errorf("invalid parked event")
+		}
+	case event.Question == nil && event.Questions != nil && r.contract == WorkerContractV2:
+		if err := checkQuestions(event.Questions); err != nil {
+			return fmt.Errorf("invalid parked event: %w", err)
+		}
+		var err error
+		if questions, err = json.Marshal(event.Questions); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("invalid parked event: it must carry exactly one of question and questions")
 	}
 	r.s.stateMu.Lock()
 	_, err := r.s.store.RecordWeftParked(r.run.ID, r.segment.Segment, event.Stage,
-		event.Occurrence, event.Attempt, event.Question, event.Head, event.Summary)
+		event.Occurrence, event.Attempt, text(event.Question), questions, event.Head, event.Summary)
 	r.s.stateMu.Unlock()
 	if err != nil {
 		return err
@@ -746,13 +764,14 @@ type stageEvent struct {
 
 type parkedEvent struct {
 	envelope
-	Stage         string          `json:"stage"`
-	Occurrence    int             `json:"occurrence"`
-	Attempt       int             `json:"attempt"`
-	WorkerOutcome string          `json:"worker_outcome"`
-	Question      string          `json:"question"`
-	Head          string          `json:"head"`
-	Summary       json.RawMessage `json:"summary"`
+	Stage         string           `json:"stage"`
+	Occurrence    int              `json:"occurrence"`
+	Attempt       int              `json:"attempt"`
+	WorkerOutcome string           `json:"worker_outcome"`
+	Question      *string          `json:"question"`
+	Questions     []choiceQuestion `json:"questions"`
+	Head          string           `json:"head"`
+	Summary       json.RawMessage  `json:"summary"`
 }
 
 type endedEvent struct {
