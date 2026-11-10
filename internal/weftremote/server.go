@@ -146,15 +146,18 @@ func ValidateListen(address string) error {
 	return nil
 }
 
-// ListenAndServe binds the configured private endpoint until ctx is cancelled.
-func (s *Service) ListenAndServe(ctx context.Context) error {
-	if err := ValidateListen(s.cfg.Weft.Listen); err != nil {
-		return err
+// Listen binds the private endpoint address names. Separate from Serve so a
+// bind failure ends the daemon's start, before Restart has touched the queue,
+// rather than arriving once its loop is running.
+func Listen(address string) (net.Listener, error) {
+	if err := ValidateListen(address); err != nil {
+		return nil, err
 	}
-	listener, err := net.Listen("tcp", s.cfg.Weft.Listen)
-	if err != nil {
-		return err
-	}
+	return net.Listen("tcp", address)
+}
+
+// Serve answers on listener until ctx is cancelled.
+func (s *Service) Serve(ctx context.Context, listener net.Listener) error {
 	go s.watchCatalog(ctx)
 	go s.watchRetention(ctx)
 	// Waiting entries survive a restart (§12): dispatch resumes once the
@@ -171,7 +174,7 @@ func (s *Service) ListenAndServe(ctx context.Context) error {
 		case <-stopped:
 		}
 	}()
-	err = server.Serve(listener)
+	err := server.Serve(listener)
 	close(stopped)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil

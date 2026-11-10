@@ -11,19 +11,30 @@ import (
 	"github.com/spf13/cobra"
 
 	"shuttle/internal/config"
+	"shuttle/internal/launchd"
 	"shuttle/internal/ledger"
 	"shuttle/internal/schedule"
 	"shuttle/internal/weftremote"
 )
 
+// statusProcess reads the daemon's launchd process; a var so a test never
+// reaches the real launchd.
+var statusProcess = launchd.ProcessFor
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Agents, next slot, last outcome, streak, paused, open incidents, today's spend",
+	Short: "Daemon, agents, next slot, last outcome, streak, paused, open incidents, today's spend",
 	// The ledger errors name the agent and the row; cobra printing them a
 	// second time, with usage, would bury them.
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// First and before any load: a config.json the daemon cannot start on
+		// is one status cannot list agents from either, and the daemon row is
+		// what says so.
+		row, ok := daemonRow()
+		fmt.Println(row)
+		failed := !ok
 		store, err := openLedger()
 		if err != nil {
 			return err
@@ -34,7 +45,6 @@ var statusCmd = &cobra.Command{
 			return err
 		}
 		now := time.Now()
-		failed := false
 		for _, def := range sched.Defs {
 			agent, err := store.Agent(def.Name)
 			if err != nil {
@@ -96,7 +106,7 @@ var statusCmd = &cobra.Command{
 		}
 		fmt.Printf("open incidents\t%d\n", len(incidents))
 		if failed {
-			return errors.New("one or more agents could not be listed")
+			return errors.New("one or more rows could not be listed")
 		}
 		return nil
 	},
@@ -104,6 +114,25 @@ var statusCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+}
+
+// daemonRow renders the daemon's launchd process and, while one stands, the
+// start failure it last exited on. ok is false when the process cannot be
+// read, so the command still exits non-zero.
+func daemonRow() (string, bool) {
+	proc, running, err := statusProcess(launchd.DaemonLabel)
+	state, ok := "not running", true
+	switch {
+	case err != nil:
+		state, ok = "unknown: "+escapeControl(err.Error()), false
+	case running:
+		state = fmt.Sprintf("running (pid %d)", proc.PID)
+	}
+	row := "daemon\t" + state
+	if failure, recorded := startFailure(); recorded {
+		row += "\tstart failed: " + escapeControl(failure)
+	}
+	return row, ok
 }
 
 // lastOutcome renders the agent's most recent ledger row: its status, the slot

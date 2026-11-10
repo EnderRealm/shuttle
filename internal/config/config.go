@@ -182,7 +182,8 @@ func ReportsDir() (string, error) {
 }
 
 // Load reads Home()/config.json. Unknown keys refuse the load, so an inline
-// secret is an error rather than a silently ignored key.
+// secret is an error rather than a silently ignored key; a retiredKeys entry
+// refuses it naming the key's path and its remedy.
 func Load() (*Config, error) {
 	home, err := Home()
 	if err != nil {
@@ -197,6 +198,9 @@ func Load() (*Config, error) {
 	dec.DisallowUnknownFields()
 	var c Config
 	if err := dec.Decode(&c); err != nil {
+		if retired := retiredKey(data); retired != nil {
+			return nil, fmt.Errorf("%s: %w", path, retired)
+		}
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	// Decode reads one JSON value; anything after it would otherwise slip past
@@ -215,6 +219,45 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &c, nil
+}
+
+// retiredKeys are the keys config.json once carried that Shuttle no longer
+// reads, each with what to do about it. The strict decode refuses them as it
+// refuses any unknown key; naming the path and the remedy is what turns a
+// crash-looping daemon into a one-line fix.
+var retiredKeys = []struct {
+	path   []string
+	remedy string
+}{
+	{[]string{"weft", "allow_write"}, "delete it; a hosted segment's writes are bounded by its agent user (docs/agent-users.md)"},
+	{[]string{"repositories"}, "move it under weft, as weft.repositories"},
+}
+
+// retiredKey reports the first retired key data carries, or nil. Only
+// consulted once the strict decode has failed, so a body that is not a JSON
+// object, or a retired key's absence, leaves the decoder's own error standing.
+func retiredKey(data []byte) error {
+	for _, k := range retiredKeys {
+		if carriesKey(data, k.path) {
+			return fmt.Errorf("%s: Shuttle no longer reads this key; %s", strings.Join(k.path, "."), k.remedy)
+		}
+	}
+	return nil
+}
+
+func carriesKey(data []byte, path []string) bool {
+	for _, key := range path {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(data, &object) != nil {
+			return false
+		}
+		value, ok := object[key]
+		if !ok {
+			return false
+		}
+		data = value
+	}
+	return true
 }
 
 // validateWeftRoot refuses a weft_root at or inside any of trees, which agent

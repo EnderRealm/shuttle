@@ -82,6 +82,7 @@ State lives under `$SHUTTLE_HOME`, default `~/.shuttle`:
   runs/<agent>/<run-id>/         one directory per attempt (§7.2)
   reports/                       a git repo the harness commits into (§9.3)
   daemon.log                     launchd stdout+stderr
+  daemon-start-failure           the error the daemon last failed to start on
   notify.state                   notification cooldowns
 ```
 
@@ -841,7 +842,7 @@ also records the residuals the profile does not close.
 ```
 shuttle daemon                      the scheduler; launchd runs this
 shuttle run <agent> [--slot D] [--dry-run] [--no-deliver] [--unsafe-no-sandbox]
-shuttle status                      agents, next slot, last outcome, streak, paused, open incidents, today's spend
+shuttle status                      daemon, agents, next slot, last outcome, streak, paused, open incidents, today's spend
 shuttle runs [--agent A] [-n 20]    ledger rows
 shuttle show <run-id>               result.json, applied.json, paths
 shuttle reconcile <run-id>          resume a failed observer run's actions (observer-contract §11)
@@ -870,7 +871,12 @@ wait, bootstrap with retry, kickstart): `Program` is the resolved binary,
 `com.shuttle.daemon-watchdog.plist` runs the same binary with `Args: ["watchdog"]`
 and the same environment and log; every five seconds it kickstarts a processless
 daemon. This supplies explicit demand when macOS 26 leaves a KeepAlive respawn
-indefinitely as `pended nondemand spawn = inefficient`. `shuttle uninstall`
+indefinitely as `pended nondemand spawn = inefficient`. A daemon that fails before
+its loop is running records the error in `~/.shuttle/daemon-start-failure` and
+prints it only when it differs from the record; while the record stands the
+watchdog kickstarts without a line and logs once when the daemon is up, so a
+crash loop leaves one line per distinct failure in `daemon.log`, and `shuttle
+status` shows the record on its daemon row. `shuttle uninstall`
 removes the watchdog first, then the daemon, so the watchdog cannot revive a job
 being intentionally removed. Tunables are persisted to `~/.shuttle/daemon-env`
 first, loom's pattern, so a later updater can re-install from a daemon environment

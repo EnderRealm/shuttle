@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"shuttle/internal/launchd"
 	"shuttle/internal/ledger"
 	"shuttle/internal/runner"
 )
@@ -39,12 +40,16 @@ const dailyManifest = `{
 
 // shuttleEnv points this process at a temp state root and a temp agents dir,
 // the two overrides §13's launchd plist carries, and returns the agents dir.
+// status reads a processless daemon rather than the real launchd job.
 func shuttleEnv(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	agents := t.TempDir()
 	t.Setenv("SHUTTLE_HOME", home)
 	t.Setenv("SHUTTLE_AGENTS_DIR", agents)
+	original := statusProcess
+	statusProcess = func(string) (launchd.Process, bool, error) { return launchd.Process{}, false, nil }
+	t.Cleanup(func() { statusProcess = original })
 	return agents
 }
 

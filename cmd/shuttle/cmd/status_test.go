@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"shuttle/internal/config"
+	"shuttle/internal/launchd"
 	"shuttle/internal/ledger"
 	"shuttle/internal/sandbox"
 )
@@ -168,14 +170,14 @@ func TestStatusWeftWorkerProbe(t *testing.T) {
 func TestStatusWithoutWeft(t *testing.T) {
 	agents := shuttleEnv(t)
 	writeAgentDir(t, agents, "daily", dailyManifest)
-	// The rows status printed before the weft row existed: one per definition,
-	// then the spend and the incidents.
+	// The rows status printed before the weft row existed: the daemon, one per
+	// definition, then the spend and the incidents.
 	assertRows := func(out string) {
 		t.Helper()
 		lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-		if len(lines) != 3 || !strings.HasPrefix(lines[0], "daily\tnext ") ||
-			!strings.HasPrefix(lines[1], "today's spend\t") || lines[2] != "open incidents\t0" {
-			t.Fatalf("status printed:\n%s\nwant the daily row, the spend and the incidents only", out)
+		if len(lines) != 4 || lines[0] != "daemon\tnot running" || !strings.HasPrefix(lines[1], "daily\tnext ") ||
+			!strings.HasPrefix(lines[2], "today's spend\t") || lines[3] != "open incidents\t0" {
+			t.Fatalf("status printed:\n%s\nwant the daemon and daily rows, the spend and the incidents only", out)
 		}
 	}
 	for _, body := range []string{"", `{"weft": {"worker_bin": "/nonexistent/weft-worker"}}`} {
@@ -200,4 +202,43 @@ func TestStatusWithoutWeft(t *testing.T) {
 		t.Fatalf("status with an unreadable weft row succeeded:\n%s", out)
 	}
 	assertRows(out)
+}
+
+func TestStatusReportsADaemonThatCannotLoadItsConfig(t *testing.T) {
+	agents := shuttleEnv(t)
+	writeAgentDir(t, agents, "daily", dailyManifest)
+	writeConfig(t, `{"weft": {"allow_write": ["/Users/Shared/weft"]}}`)
+	const remedy = "weft.allow_write: Shuttle no longer reads this key; delete it"
+
+	out, err := execStdout(t, "status")
+	if err == nil || !strings.Contains(err.Error(), remedy) {
+		t.Fatalf("status error = %v, want the loader's naming %q", err, remedy)
+	}
+	if out != "daemon\tnot running\n" {
+		t.Fatalf("status printed:\n%s\nwant the daemon not running", out)
+	}
+
+	// The daemon's own start on that config records the failure, and the
+	// daemon row carries it.
+	daemonCmd.SetErr(&bytes.Buffer{})
+	t.Cleanup(func() { daemonCmd.SetErr(nil) })
+	if err := daemonCmd.RunE(daemonCmd, nil); err == nil {
+		t.Fatal("daemon started on config.json it should refuse")
+	}
+	out, err = execStdout(t, "status")
+	if err == nil || !strings.Contains(err.Error(), remedy) {
+		t.Fatalf("status error = %v, want the loader's naming %q", err, remedy)
+	}
+	if !strings.HasPrefix(out, "daemon\tnot running\tstart failed: ") || !strings.Contains(out, remedy) ||
+		strings.Count(out, "\n") != 1 {
+		t.Fatalf("status printed:\n%s\nwant the daemon not running on the recorded failure", out)
+	}
+
+	// A daemon still running on the config it loaded before the edit is
+	// reported as it is, with the error its next start will hit.
+	statusProcess = func(string) (launchd.Process, bool, error) { return launchd.Process{PID: 42}, true, nil }
+	out, err = execStdout(t, "status")
+	if err == nil || !strings.HasPrefix(out, "daemon\trunning (pid 42)\t") {
+		t.Fatalf("status = (%q, %v), want the running daemon and the loader's error", out, err)
+	}
 }

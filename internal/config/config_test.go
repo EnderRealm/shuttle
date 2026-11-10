@@ -155,6 +155,60 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
+func TestLoadNamesARetiredKeyAndItsRemedy(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+		not  string
+	}{
+		{
+			name: "weft.allow_write",
+			body: strings.Replace(sampleConfig, `"segment_timeout_seconds": 21600,`,
+				`"segment_timeout_seconds": 21600, "allow_write": ["/Users/Shared/weft"],`, 1),
+			want: []string{"weft.allow_write", "delete it"},
+		},
+		{
+			name: "top-level repositories",
+			body: strings.Replace(sampleConfig, `"timezone":`,
+				`"repositories": {"shuttle": "/Users/Shared/weft/repos/shuttle"}, "timezone":`, 1),
+			want: []string{"repositories", "move it under weft, as weft.repositories"},
+		},
+		{
+			// allow_write is retired only where Shuttle once read it; anywhere
+			// else it is a key Shuttle never accepted.
+			name: "allow_write elsewhere",
+			body: strings.Replace(sampleConfig, `"timezone":`, `"allow_write": [], "timezone":`, 1),
+			want: []string{`unknown field "allow_write"`},
+			not:  "no longer reads",
+		},
+		{
+			name: "never accepted",
+			body: strings.Replace(sampleConfig, `"segment_timeout_seconds": 21600,`,
+				`"segment_timeout_seconds": 21600, "allow_writes": [],`, 1),
+			want: []string{`unknown field "allow_writes"`},
+			not:  "no longer reads",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfig(t, tc.body)
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load succeeded, want an error")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not carry %q", err, want)
+				}
+			}
+			if tc.not != "" && strings.Contains(err.Error(), tc.not) {
+				t.Errorf("error %q reports a retired key", err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsTrailingJSON(t *testing.T) {
 	writeConfig(t, sampleConfig+"\n{\"anthropic\": {\"api_key\": \"sk-live-secret\"}}\n")
 	_, err := Load()

@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -25,6 +27,14 @@ import (
 // at startup.
 const tickInterval = 60 * time.Second
 
+// startFailureFile, under the state root, holds the text of the error that
+// last ended the daemon before its loop was running. launchd restarts a failed
+// daemon every 30 seconds and the watchdog kickstarts it in between, so the
+// record is what holds daemon.log to one line per distinct failure: the daemon
+// prints a start failure only when it differs from the record, the watchdog
+// kickstarts silently while one stands, and `shuttle status` shows it.
+const startFailureFile = "daemon-start-failure"
+
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Run the scheduler; launchd runs this",
@@ -40,12 +50,23 @@ SHUTTLE_AGENTS_DIR is invisible until the daemon is restarted.
 The restart pass runs once, at startup: a row it leaves in flight is re-checked
 only at the next daemon start, and until then that agent's slots skip on overlap.
 Claimed slots execute through the same §7 pipeline as shuttle run, with at most
-two run workers active across agents.`,
+two run workers active across agents.
+
+An error that ends the daemon before its loop is running is recorded in
+~/.shuttle/daemon-start-failure until a start succeeds. The same error again
+exits 1 without printing it a second time; shuttle status shows the record.`,
 	// The load and ledger errors name the agent and the row; cobra printing
 	// them a second time, with usage, would bury them.
 	SilenceUsage:  true,
 	SilenceErrors: true,
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, args []string) (err error) {
+		// Every error returned before the loop is running is a start failure.
+		looping := false
+		defer func() {
+			if err != nil && !looping {
+				err = recordStartFailure(err)
+			}
+		}()
 		// Cobra's error writer is stderr, which is what launchd captures into
 		// ~/.shuttle/daemon.log, and what a test can redirect.
 		logger := log.New(cmd.ErrOrStderr(), "", log.LstdFlags)
@@ -90,8 +111,6 @@ two run workers active across agents.`,
 		if err != nil {
 			return err
 		}
-		logger.Printf("daemon start: closed %d row(s) left in flight, %d not signalled (kill_failed/unresolved/foreign), watching %d agent(s)",
-			len(outcomes)-inFlight, unsignalled, len(sched.Defs))
 		pipeline, err := buildPipeline(store, logger)
 		if err != nil {
 			return err
@@ -105,9 +124,14 @@ two run workers active across agents.`,
 			return err
 		}
 		if cfg != nil && cfg.Weft.Listen != "" {
-			if err := weftremote.ValidateListen(cfg.Weft.Listen); err != nil {
+			// Bound before Restart, which can spawn segments, so a daemon that
+			// cannot take its address ends its start before touching the queue.
+			// Serve's shutdown closes it too; the second Close is harmless.
+			listener, err := weftremote.Listen(cfg.Weft.Listen)
+			if err != nil {
 				return err
 			}
+			defer listener.Close()
 			token, err := cfg.WeftToken()
 			if err != nil {
 				return fmt.Errorf("weft token: %w", err)
@@ -127,9 +151,17 @@ two run workers active across agents.`,
 			}
 			ch := make(chan error, 1)
 			serviceErr = ch
-			go func() { ch <- service.ListenAndServe(ctx) }()
+			go func() { ch <- service.Serve(ctx, listener) }()
 			logger.Printf("weft service listening on %s", cfg.Weft.Listen)
 		}
+		if err := clearStartFailure(); err != nil {
+			logger.Printf("start failure record: %v", err)
+		}
+		// Logged once nothing is left to end the start: a crash loop on a
+		// later startup step would otherwise read as a string of good starts.
+		logger.Printf("daemon start: closed %d row(s) left in flight, %d not signalled (kill_failed/unresolved/foreign), watching %d agent(s)",
+			len(outcomes)-inFlight, unsignalled, len(sched.Defs))
+		looping = true
 		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
 		sem := make(chan struct{}, 2)
@@ -171,6 +203,58 @@ two run workers active across agents.`,
 
 func init() {
 	rootCmd.AddCommand(daemonCmd)
+}
+
+func startFailurePath() (string, error) {
+	home, err := config.Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, startFailureFile), nil
+}
+
+// startFailure returns the standing start-failure record. One that cannot be
+// read reads as none, which leaves the daemon printing every start failure and
+// the watchdog logging every kickstart: noisy, never silent.
+func startFailure() (string, bool) {
+	path, err := startFailurePath()
+	if err != nil {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
+}
+
+// recordStartFailure records err as the daemon's start failure. One that
+// matches the standing record comes back quiet: daemon.log already carries it
+// from the start that recorded it.
+func recordStartFailure(err error) error {
+	text := err.Error()
+	if prior, ok := startFailure(); ok && prior == text {
+		return quietError{err}
+	}
+	path, recordErr := startFailurePath()
+	if recordErr == nil {
+		recordErr = os.WriteFile(path, []byte(text), 0o600)
+	}
+	if recordErr != nil {
+		return errors.Join(err, fmt.Errorf("record start failure: %w", recordErr))
+	}
+	return err
+}
+
+func clearStartFailure() error {
+	path, err := startFailurePath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // restartLine renders one restart outcome for the daemon log. A row that

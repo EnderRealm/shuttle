@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -33,8 +35,8 @@ Runs:
   preflight                    The per-run checks without a run
 
 Operations:
-  status                       Agents, next slot, last outcome, streak, paused,
-                                 open incidents, today's spend
+  status                       Daemon, agents, next slot, last outcome, streak,
+                                 paused, open incidents, today's spend
   ack <incident-id>            Acknowledge an open incident
   pause <agent> | resume <agent>
   prune --older 30d            Drop run directories past the retention window
@@ -77,9 +79,22 @@ func init() {
 	})
 }
 
+// quietError is a failure whose text the log already carries: the command
+// still exits non-zero, but Execute does not print it again.
+type quietError struct{ error }
+
+// reportError prints what Execute prints for a failed command.
+func reportError(w io.Writer, err error) {
+	var quiet quietError
+	if errors.As(err, &quiet) {
+		return
+	}
+	fmt.Fprintln(w, err)
+}
+
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		reportError(os.Stderr, err)
 		os.Exit(1)
 	}
 }
