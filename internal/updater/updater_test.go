@@ -1439,7 +1439,13 @@ func TestBuildRefusesAListenerTheDaemonWouldBeforeTheToken(t *testing.T) {
 		lookups++
 		return "secret", nil
 	}
-	for _, listen := range []string{"localhost:" + port, "203.0.113.7:" + port, "studio.example.com:" + port, "nonsense"} {
+	for _, listen := range []string{
+		"localhost:" + port, "203.0.113.7:" + port, "studio.example.com:" + port, "nonsense",
+		// ValidateListen passes these, and pasted into a URL they name
+		// another host or another port than the daemon serves.
+		"127.0.0.1:" + port + "@attacker.example", "127.0.0.1:" + port + "/x", "127.0.0.1:" + port + "#x",
+		"127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:", "127.0.0.1:+" + port, "127.0.0.1:0" + port,
+	} {
 		if _, err := buildAt(context.Background(), listen, token); err == nil || !strings.Contains(err.Error(), "weft.listen") {
 			t.Fatalf("%s: build = %v", listen, err)
 		}

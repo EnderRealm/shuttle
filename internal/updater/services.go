@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -65,14 +68,39 @@ func buildAt(ctx context.Context, listen string, token func() (string, error)) (
 	if listen == "" {
 		return "", errors.New("weft.listen is not set, so no /v2/service can confirm a build")
 	}
-	if err := weftremote.ValidateListen(listen); err != nil {
+	base, err := serviceBase(listen)
+	if err != nil {
 		return "", err
 	}
 	secret, err := token()
 	if err != nil {
 		return "", err
 	}
-	return readBuild(ctx, "http://"+listen, secret)
+	return readBuild(ctx, base, secret)
+}
+
+// serviceBase is the endpoint listen names, built from its validated host and
+// port. ValidateListen holds the host to the daemon's rule but not the port,
+// and listen pasted into a URL can name another host:
+// "127.0.0.1:7431@attacker.example" passes it and would send the bearer token
+// to attacker.example. A listen that net.JoinHostPort would not rebuild
+// exactly is refused rather than normalised, so the address read is the one
+// configured.
+func serviceBase(listen string) (string, error) {
+	if err := weftremote.ValidateListen(listen); err != nil {
+		return "", err
+	}
+	host, port, _ := net.SplitHostPort(listen)
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 {
+		return "", fmt.Errorf("weft.listen: port %q is not a number in 1-65535", port)
+	}
+	hostPort := net.JoinHostPort(host, strconv.FormatUint(n, 10))
+	if hostPort != listen {
+		return "", fmt.Errorf("weft.listen: %q is not in the canonical form %q", listen, hostPort)
+	}
+	u := url.URL{Scheme: "http", Host: hostPort}
+	return u.String(), nil
 }
 
 // readBuild reads host_build from the service at base, which every route
