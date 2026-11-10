@@ -967,6 +967,12 @@ func TestFreshArchivesThenStartsANewRun(t *testing.T) {
 	}
 	fresh(old.ID, "f-twice", old.Worktree, fixtureHead, h.run(old.ID).Revision).refused(t, http.StatusConflict, "run_active")
 	h.launch(id, "l-during").refused(t, http.StatusConflict, "ticket_in_flight")
+	// An archiving entry is running work, not settled (§6.3).
+	h.send(http.MethodPost, "/v2/queue/"+entry["entry_id"].(string)+"/dismiss", "d-archiving", revisionBody(entry["revision"])).
+		refused(t, http.StatusConflict, "entry_not_settled")
+	if e := h.entry(entry["entry_id"].(string)); e["state"] != "archiving" {
+		t.Fatalf("archiving entry after a refused dismissal = %v", e)
+	}
 
 	before := asOf(t, h.store)
 	h.release(id)

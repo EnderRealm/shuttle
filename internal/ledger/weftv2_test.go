@@ -249,6 +249,7 @@ func TestOpenMigratesSchemaSixToSeven(t *testing.T) {
 	for _, stmt := range []string{`ALTER TABLE weft_catalog DROP COLUMN host_digest`,
 		`ALTER TABLE weft_segments DROP COLUMN agent_user`,
 		`ALTER TABLE weft_runs DROP COLUMN host_cleanup_hold`,
+		`ALTER TABLE weft_entries DROP COLUMN dismissed`,
 		`UPDATE schema_meta SET value='6' WHERE key='schema_version'`} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			t.Fatal(err)
@@ -266,7 +267,7 @@ func TestOpenMigratesSchemaSixToSeven(t *testing.T) {
 	defer s.Close()
 	var version string
 	var digest sql.NullString
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "9" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "10" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	if err := s.db.QueryRow(`SELECT host_digest FROM weft_catalog WHERE project='demo'`).Scan(&digest); err != nil || !digest.Valid {

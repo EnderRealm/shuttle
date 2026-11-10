@@ -30,8 +30,8 @@ type capability struct {
 // developmentalCapabilities is §2.3's list in the contract's order, as
 // docs/service-v2/service-developmental.json began it (§2.4). output, landing
 // and cleanup are gated by the worker probe instead (workerGate); archive
-// import, terminals, the folder picker and ticket edits are the host's alone
-// and served.
+// import, terminals, the folder picker, ticket edits and queue dismissal are
+// the host's alone and served.
 var developmentalCapabilities = []capability{
 	{ID: "dashboard"},
 	{ID: "catalog"},
@@ -48,6 +48,7 @@ var developmentalCapabilities = []capability{
 	{ID: "folders"},
 	{ID: "archive"},
 	{ID: "ticket_edit"},
+	{ID: "queue_dismiss"},
 	{ID: "trial_launch", Reason: "not served by this host build: checkout launches arrive with warp/host-weft-worker-cd59"},
 }
 
@@ -65,6 +66,7 @@ var notServedRoutes = []struct {
 	{http.MethodPost, regexp.MustCompile(`^/v2/runs/[^/]+/(dismiss|fresh)$`), "cleanup"},
 	{http.MethodPost, regexp.MustCompile(`^/v2/archives$`), "archive"},
 	{http.MethodPost, ticketEdit, "ticket_edit"},
+	{http.MethodPost, regexp.MustCompile(`^/v2/queue/([^/]+/dismiss|dismiss-settled)$`), "queue_dismiss"},
 }
 
 // Each route answers its version's errors; §2.5 names the versions this host
@@ -177,10 +179,14 @@ func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 		s.handleQueue(w)
 	case r.Method == http.MethodPost && path == "/v2/queue/clear":
 		s.handleClear(w, r)
+	case r.Method == http.MethodPost && path == "/v2/queue/dismiss-settled":
+		s.handleDismissSettled(w, r)
 	case r.Method == http.MethodPut && path == "/v2/queue/capacity":
 		s.handleCapacity(w, r)
 	case r.Method == http.MethodPost && entryCancel.MatchString(path):
 		s.handleCancel(w, r, entryCancel.FindStringSubmatch(path)[1])
+	case r.Method == http.MethodPost && entryDismiss.MatchString(path):
+		s.handleDismiss(w, r, entryDismiss.FindStringSubmatch(path)[1])
 	case r.Method == http.MethodGet && path == "/v2/questions":
 		s.handleV2Questions(w)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v2/questions/"):

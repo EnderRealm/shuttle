@@ -23,6 +23,7 @@ import (
 var (
 	runCommand         = regexp.MustCompile(`^/v2/runs/([^/]+)/(answer|stop|resume|reconcile|dismiss|fresh)$`)
 	entryCancel        = regexp.MustCompile(`^/v2/queue/([^/]+)/cancel$`)
+	entryDismiss       = regexp.MustCompile(`^/v2/queue/([^/]+)/dismiss$`)
 	repositoryContinue = regexp.MustCompile(`^/v2/repositories/([^/]+)/continue$`)
 )
 
@@ -672,6 +673,49 @@ func (s *Service) handleClear(w http.ResponseWriter, r *http.Request) {
 				return v2Outcome{}, err
 			}
 			q, err := tx.Queue(time.Now().Add(-settledEntryWindow))
+			if err != nil {
+				return v2Outcome{}, err
+			}
+			return v2Outcome{status: http.StatusOK, fields: map[string]any{"queue": queueResource(q)}}, nil
+		}, nil
+	})
+}
+
+// handleDismiss takes one settled entry out of the listing (§6.3); its run,
+// that run's history and its result are untouched.
+func (s *Service) handleDismiss(w http.ResponseWriter, r *http.Request, entryID string) {
+	s.mutateV2(w, r, func(body []byte, _ string) (v2Commit, error) {
+		var req revisionRequest
+		if err := decodeV2(body, &req, "revision"); err != nil {
+			return refusedBy(err), nil
+		}
+		if !validProtocolID(entryID) {
+			return refused("entry_not_found", "entry %s is not on this host", entryID), nil
+		}
+		return func(tx *ledger.WeftTx) (v2Outcome, error) {
+			entry, err := tx.DismissEntry(entryID, req.Revision)
+			if err != nil {
+				return v2Outcome{}, err
+			}
+			return v2Outcome{status: http.StatusOK, fields: map[string]any{"entry": entry.Resource()}}, nil
+		}, nil
+	})
+}
+
+// handleDismissSettled takes every settled entry the listing holds out of it
+// (§6.3), against the queue revision the client was shown.
+func (s *Service) handleDismissSettled(w http.ResponseWriter, r *http.Request) {
+	s.mutateV2(w, r, func(body []byte, _ string) (v2Commit, error) {
+		var req revisionRequest
+		if err := decodeV2(body, &req, "revision"); err != nil {
+			return refusedBy(err), nil
+		}
+		return func(tx *ledger.WeftTx) (v2Outcome, error) {
+			settledSince := time.Now().Add(-settledEntryWindow)
+			if err := tx.DismissSettled(req.Revision, settledSince); err != nil {
+				return v2Outcome{}, err
+			}
+			q, err := tx.Queue(settledSince)
 			if err != nil {
 				return v2Outcome{}, err
 			}

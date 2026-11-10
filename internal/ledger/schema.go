@@ -17,7 +17,8 @@ package ledger
 // reads from the host, so catalog_revision moves when it does (§5.2).
 // schemaVersion 8: the agent user each hosted pipeline segment runs as.
 // schemaVersion 9: the host cleanup hold of each run (weft-service/v2 §6.8).
-const schemaVersion = 9
+// schemaVersion 10: whether each queue entry was dismissed (weft-service/v2 §6.3).
+const schemaVersion = 10
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -350,4 +351,12 @@ ALTER TABLE weft_segments ADD COLUMN agent_user TEXT;
 // carries it, and nothing lifts it.
 const weftHostCleanupSQL = `
 ALTER TABLE weft_runs ADD COLUMN host_cleanup_hold INTEGER NOT NULL DEFAULT 0;
+`
+
+// weftQueueDismissSQL is schema 10: weft_entries.dismissed, set when a human
+// dismisses a settled entry (§6.3). GET /v2/queue leaves a dismissed entry
+// out; a read by id, and the idempotency replay of whatever returned it,
+// still find it.
+const weftQueueDismissSQL = `
+ALTER TABLE weft_entries ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;
 `

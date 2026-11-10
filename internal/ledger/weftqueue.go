@@ -71,6 +71,7 @@ func refuse(code, format string, args ...any) error {
 
 // WeftEntry is one row of the admission queue. WaitingDetail is derived when
 // the entry is read, from the state its waiting reason names as it is then.
+// Dismissed takes it out of the listing and out of no other read (§6.3).
 type WeftEntry struct {
 	ID, Kind, Ticket, Project, RepositoryID, Repository string
 	SelectionID                                         sql.NullString
@@ -82,6 +83,7 @@ type WeftEntry struct {
 	RunID, Supersedes, AnswerID                         sql.NullString
 	CreatedAt, UpdatedAt                                string
 	Revision                                            int64
+	Dismissed                                           bool
 }
 
 // Resource is the entry as every response and queue event carries it.
@@ -108,13 +110,13 @@ func (e *WeftEntry) Resource() map[string]any {
 
 const weftEntryColumns = `id,kind,ticket,project,repository_id,repository,selection_id,position,state,
 	waiting_reason,holder_kind,holder_id,invalidated_reason,invalidated_detail,run_id,supersedes,answer_id,
-	created_at,updated_at,revision`
+	created_at,updated_at,revision,dismissed`
 
 func scanWeftEntry(sc scanner) (*WeftEntry, error) {
 	var e WeftEntry
 	err := sc.Scan(&e.ID, &e.Kind, &e.Ticket, &e.Project, &e.RepositoryID, &e.Repository, &e.SelectionID,
 		&e.Position, &e.State, &e.WaitingReason, &e.HolderKind, &e.HolderID, &e.InvalidatedReason,
-		&e.InvalidatedDetail, &e.RunID, &e.Supersedes, &e.AnswerID, &e.CreatedAt, &e.UpdatedAt, &e.Revision)
+		&e.InvalidatedDetail, &e.RunID, &e.Supersedes, &e.AnswerID, &e.CreatedAt, &e.UpdatedAt, &e.Revision, &e.Dismissed)
 	return &e, err
 }
 
@@ -417,13 +419,13 @@ func weftQueue(q querier, settledSince time.Time) (*WeftQueue, error) {
 	if out.Capacity, err = weftCapacity(q); err != nil {
 		return nil, err
 	}
-	out.Entries, err = loadWeftEntries(q, `state IN (?,?) OR updated_at>=?`,
+	out.Entries, err = loadWeftEntries(q, `(state IN (?,?) OR updated_at>=?) AND dismissed=0`,
 		WeftEntryWaiting, WeftEntryArchiving, weftTimestamp(settledSince))
 	return &out, err
 }
 
 // WeftQueue lists the waiting and archiving entries and those settled since
-// settledSince, with the queue's revision and capacity.
+// settledSince, less any dismissed, with the queue's revision and capacity.
 func (s *Store) WeftQueue(settledSince time.Time) (*WeftQueue, error) {
 	return weftQueue(s.db, settledSince)
 }
@@ -438,6 +440,7 @@ type queueEventPayload struct {
 	Seq             int64          `json:"seq"`
 	TS              string         `json:"ts"`
 	QueueRevision   int64          `json:"queue_revision"`
+	Dismissed       bool           `json:"dismissed"`
 	Entry           map[string]any `json:"entry"`
 }
 
@@ -456,14 +459,21 @@ type answerEventPayload struct {
 	EntryID    string `json:"entry_id"`
 }
 
-func appendQueueEventTx(tx *sql.Tx, entryID string, revision int64, stamp string) error {
+// appendQueueEventTx writes the entry's queue event, and sets its dismissed
+// flag to the event's: a dismissal takes the entry out of the listing, and
+// any later change to it — a dispatched cleanup refused — puts it back, so
+// the listing never disagrees with what the stream told a client (§6.3).
+func appendQueueEventTx(tx *sql.Tx, entryID string, revision int64, stamp string, dismissed bool) error {
+	if _, err := tx.Exec(`UPDATE weft_entries SET dismissed=? WHERE id=?`, dismissed, entryID); err != nil {
+		return err
+	}
 	e, err := weftEntry(tx, entryID)
 	if err != nil {
 		return err
 	}
 	return appendWeftEventTx(tx, "", "queue", stamp, func(seq int64) any {
 		return queueEventPayload{ContractVersion: WeftServiceVersion, Seq: seq, TS: stamp,
-			QueueRevision: revision, Entry: e.Resource()}
+			QueueRevision: revision, Dismissed: dismissed, Entry: e.Resource()}
 	})
 }
 
@@ -487,7 +497,7 @@ func queueStepTx(tx *sql.Tx, stamp string, capacity bool, entryIDs ...string) er
 		return err
 	}
 	for _, id := range entryIDs {
-		if err := appendQueueEventTx(tx, id, revision, stamp); err != nil {
+		if err := appendQueueEventTx(tx, id, revision, stamp, false); err != nil {
 			return err
 		}
 	}
@@ -1038,6 +1048,72 @@ func (t *WeftTx) ClearQueue(revision int64) error {
 	return queueStepTx(t.tx, stamp, true, ids...)
 }
 
+// DismissEntry takes one settled entry out of the listing (§6.3). It keeps
+// its state and revision and stays readable by id; one already dismissed is
+// answered as it stands, writing nothing.
+func (t *WeftTx) DismissEntry(id string, revision int64) (*WeftEntry, error) {
+	e, err := t.Entry(id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, refuse("entry_not_found", "entry %s is not on this host", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch e.State {
+	case WeftEntryWaiting:
+		return nil, refuse("entry_not_settled", "entry %s is waiting, not settled: cancel it, or dismiss it once it has dispatched", id)
+	case WeftEntryArchiving:
+		return nil, refuse("entry_not_settled", "entry %s is archiving, not settled: dismiss it once it has dispatched", id)
+	}
+	if e.Revision != revision {
+		return nil, refuse("revision_conflict", "entry %s is at revision %d, not %d: read the queue again and decide again", id, e.Revision, revision)
+	}
+	if e.Dismissed {
+		return e, nil
+	}
+	if err := t.dismissEntries([]*WeftEntry{e}, ""); err != nil {
+		return nil, err
+	}
+	return t.Entry(id)
+}
+
+// DismissSettled takes every settled entry the listing holds — those settled
+// since settledSince and not yet dismissed — out of it (§6.3). With none
+// listed it writes nothing.
+func (t *WeftTx) DismissSettled(revision int64, settledSince time.Time) error {
+	current, err := queueRevision(t.tx)
+	if err != nil {
+		return err
+	}
+	if current != revision {
+		return refuse("revision_conflict", "the queue is at revision %d, not %d: read the queue again and decide again", current, revision)
+	}
+	entries, err := loadWeftEntries(t.tx, `state NOT IN (?,?) AND updated_at>=? AND dismissed=0`,
+		WeftEntryWaiting, WeftEntryArchiving, weftTimestamp(settledSince))
+	if err != nil || len(entries) == 0 {
+		return err
+	}
+	return t.dismissEntries(entries, "dismiss-settled")
+}
+
+// dismissEntries is one dismissal's commit: the queue revision raised once
+// and a dismissed queue event per entry. No count moves, so no capacity
+// event follows.
+func (t *WeftTx) dismissEntries(entries []*WeftEntry, detail string) error {
+	stamp := t.Stamp()
+	revision, err := bumpQueueRevisionTx(t.tx)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := appendQueueEventTx(t.tx, e.ID, revision, stamp, true); err != nil {
+			return err
+		}
+		t.change("dismissed", e, e.RunID.String, detail)
+	}
+	return nil
+}
+
 func (t *WeftTx) settleEntry(e *WeftEntry, state, stamp string) error {
 	_, err := t.tx.Exec(`UPDATE weft_entries SET state=?,waiting_reason=NULL,holder_kind=NULL,holder_id=NULL,
 		updated_at=?,revision=revision+1 WHERE id=?`, state, stamp, e.ID)
@@ -1300,7 +1376,7 @@ func (t *WeftTx) dispatch(e *WeftEntry, d WeftDispatch) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if err := appendQueueEventTx(t.tx, e.ID, revision, stamp); err != nil {
+		if err := appendQueueEventTx(t.tx, e.ID, revision, stamp, false); err != nil {
 			return false, err
 		}
 		if err := appendRunEventTx(t.tx, runID, stamp); err != nil {
@@ -1377,7 +1453,7 @@ func (t *WeftTx) dispatch(e *WeftEntry, d WeftDispatch) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := appendQueueEventTx(t.tx, e.ID, revision, stamp); err != nil {
+	if err := appendQueueEventTx(t.tx, e.ID, revision, stamp, false); err != nil {
 		return false, err
 	}
 	if err := appendRunEventTx(t.tx, runID, stamp); err != nil {
