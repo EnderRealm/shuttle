@@ -3,7 +3,9 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strconv"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
@@ -33,12 +35,16 @@ var runsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// Space-padded so each column reads down at one offset, including when
+		// pasted where tabs would not survive; no trailing tab, so the last
+		// column is not padded.
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		for _, r := range runs {
-			fmt.Printf("%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 				escapeControl(r.ID), escapeControl(r.Status), escapeControl(r.ScheduledFor),
 				formatCost(r.CostUSD), nullOr(r.DeliveryStatus))
 		}
-		return nil
+		return w.Flush()
 	},
 }
 
@@ -82,10 +88,11 @@ func nullOr(v sql.NullString) string {
 // error_signature, delivery_error and session_id carry text the harness did
 // not author — a model runtime's stderr, an email provider's response — so a
 // value can hold escape sequences that would otherwise reach the terminal, and
-// tabs or newlines that would break both this command's tab-separated rows and
-// `show`'s aligned columns. strconv.Quote escapes every control character and
-// leaves printable text, including UTF-8, alone; the quotes it wraps the value
-// in are dropped because the columns are not quoted otherwise.
+// tabs or newlines that would break the aligned columns of both this command
+// and `show` (a tab is this command's tabwriter cell separator). strconv.Quote
+// escapes every control character and leaves printable text, including UTF-8,
+// alone; the quotes it wraps the value in are dropped because the columns are
+// not quoted otherwise.
 func escapeControl(v string) string {
 	q := strconv.Quote(v)
 	return q[1 : len(q)-1]

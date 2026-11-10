@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -90,7 +91,7 @@ func TestLedgerCommandsIgnoreAMalformedConfig(t *testing.T) {
 	writeConfig(t, `{"notify": {"enabled": true,}`)
 
 	out, err := execStdout(t, "runs")
-	if err != nil || !strings.Contains(out, run.ID+"\t"+ledger.StatusFailed) {
+	if err != nil || !strings.Contains(out, run.ID+"  "+ledger.StatusFailed+"  ") {
 		t.Fatalf("runs = %q, %v", out, err)
 	}
 	out, err = execStdout(t, "show", run.ID)
@@ -103,5 +104,64 @@ func TestLedgerCommandsIgnoreAMalformedConfig(t *testing.T) {
 	incidents, err = store.OpenIncidents()
 	if err != nil || len(incidents) != 0 {
 		t.Fatalf("open incidents after ack = %v, %v", incidents, err)
+	}
+}
+
+// Ids and scheduled_for values differ in width across agents and zones; every
+// column must still start at one offset on every row, separated by spaces.
+func TestRunsAlignsColumns(t *testing.T) {
+	shuttleEnv(t)
+	store, err := openLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pacific := time.FixedZone("", -8*60*60)
+	if _, ok, err := store.Skip("daily", time.Date(2026, 11, 8, 4, 30, 0, 0, pacific), ledger.TriggerCron, ledger.SkipMissed); err != nil || !ok {
+		t.Fatalf("skip daily: %v", err)
+	}
+	if _, ok, err := store.Skip("weft-worker", time.Date(2026, 11, 7, 0, 13, 17, 0, time.UTC), ledger.TriggerCron, ledger.SkipMissed); err != nil || !ok {
+		t.Fatalf("skip weft-worker: %v", err)
+	}
+	run, ok, err := store.Claim("nightly", time.Date(2026, 11, 6, 4, 30, 0, 0, pacific), ledger.TriggerCron)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.Fail(run.ID, ledger.ClassDied, "exit 1", ledger.Result{}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := execStdout(t, "runs")
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if strings.Contains(out, "\t") {
+		t.Fatalf("runs output carries a tab:\n%s", out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("runs printed %d rows, want 3:\n%s", len(lines), out)
+	}
+	var want []int
+	for _, line := range lines {
+		if strings.HasSuffix(line, " ") {
+			t.Fatalf("row %q ends in padding", line)
+		}
+		var starts []int
+		for i := range line {
+			if line[i] != ' ' && (i == 0 || line[i-1] == ' ') {
+				starts = append(starts, i)
+			}
+		}
+		if len(starts) != 5 {
+			t.Fatalf("row %q has %d columns, want 5", line, len(starts))
+		}
+		if want == nil {
+			want = starts
+			continue
+		}
+		if !slices.Equal(starts, want) {
+			t.Fatalf("column offsets %v, want %v:\n%s", starts, want, out)
+		}
 	}
 }
