@@ -164,8 +164,12 @@ decides which projects exist and holds their tickets, but its paths are never
 used: a tk project with no binding here is unavailable (`no_binding`), and
 project terminals open in the bound checkout. The daemon reads `config.json`
 at start, so restart it after adding a binding.
-`scripts/agent-users/provision-checkout.sh <origin-url>` clones and protects
-the checkout and prints the line to add (`docs/agent-users.md`). Nothing
+`shuttle weft bind <origin-url>` does all of it: it runs
+`scripts/agent-users/provision-checkout.sh <origin-url>`, which clones and
+protects the checkout, adds the binding once the daemon's loader passes the
+edited file, restarts the daemon while nothing runs and reports the project from
+`/v2/projects`; `shuttle weft unbind <project>` removes a binding the same way
+(`docs/agent-users.md`). Nothing
 updates a hosted checkout from origin yet: after pushing from elsewhere, run
 `git -C /Users/Shared/weft/repos/<repo> pull --ff-only` before launching.
 

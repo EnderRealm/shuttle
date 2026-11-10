@@ -100,5 +100,6 @@ publish "$stage/repos/$name" "$dest"
 published=1
 
 echo "published: $dest"
-echo "bind it in shuttle's config.json; the daemon reads config.json at start, so restart it after:"
+echo "bind it in shuttle's config.json; the daemon reads config.json at start, so restart it after"
+echo "(shuttle weft bind <origin-url> runs this script, then binds, checks and restarts):"
 echo "  \"weft\": {\"repositories\": {\"$name\": \"$dest\"}}"

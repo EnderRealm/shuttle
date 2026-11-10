@@ -94,12 +94,19 @@ var updaterRebootstrapCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(*cobra.Command, []string) error {
-		specs, err := launchSpecs(func(s launchd.Spec) bool { return !isUpdaterSpec(s) })
-		if err != nil {
-			return err
-		}
-		return bootstrapSpecs(specs)
+		return rebootstrapDaemon()
 	},
+}
+
+// rebootstrapDaemon is bootout and bootstrap of the daemon and watchdog jobs
+// under the running binary, which is what restarts the daemon: see
+// launchdServices.Restart for why nothing lighter does.
+func rebootstrapDaemon() error {
+	specs, err := launchSpecs(func(s launchd.Spec) bool { return !isUpdaterSpec(s) })
+	if err != nil {
+		return err
+	}
+	return bootstrapSpecs(specs)
 }
 
 // updaterReexecCmd is the detached helper that replaces the updater's own job

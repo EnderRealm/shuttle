@@ -34,9 +34,9 @@ const (
 	// HostedWorktreeRoot is SHARED_ROOT/worktrees, where every hosted run's
 	// worktree lives: the --worktree-root a segment's worker is launched with.
 	HostedWorktreeRoot = HostedSharedRoot + "/" + sandbox.WorktreesDir
-	// hostedRepositoriesRoot is SHARED_ROOT/repos, where every hosted checkout
+	// HostedRepositoriesRoot is SHARED_ROOT/repos, where every hosted checkout
 	// lives.
-	hostedRepositoriesRoot = HostedSharedRoot + "/repos"
+	HostedRepositoriesRoot = HostedSharedRoot + "/repos"
 )
 
 // Config is config.json, the §4.2 shape. Credentials are Keychain item names
@@ -181,19 +181,34 @@ func ReportsDir() (string, error) {
 	return filepath.Join(home, reportsDir), nil
 }
 
+// Path returns Home()/config.json.
+func Path() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, configFile), nil
+}
+
 // Load reads Home()/config.json. Unknown keys refuse the load, so an inline
 // secret is an error rather than a silently ignored key; a retiredKeys entry
 // refuses it naming the key's path and its remedy.
 func Load() (*Config, error) {
-	home, err := Home()
+	path, err := Path()
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(home, configFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return Parse(path, data)
+}
+
+// Parse is Load on data, the contents of config.json at path, which only
+// names the file in its errors. A command editing config.json holds its edit
+// to Parse before writing it, so the daemon is never handed a file it refuses.
+func Parse(path string, data []byte) (*Config, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var c Config
@@ -208,14 +223,14 @@ func Load() (*Config, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%s: trailing content after the config object", path)
 	}
-	if err := validateRepositories(hostedRepositoriesRoot, c.Weft.Repositories); err != nil {
+	if err := validateRepositories(HostedRepositoriesRoot, c.Weft.Repositories); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := validateAgentUsers(c.Weft.AgentUsers); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	// Both trees carry the inheritable agent-write ACL (docs/agent-users.md).
-	if err := validateWeftRoot(c.Weft.Root, []string{HostedWorktreeRoot, hostedRepositoriesRoot}); err != nil {
+	if err := validateWeftRoot(c.Weft.Root, []string{HostedWorktreeRoot, HostedRepositoriesRoot}); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &c, nil

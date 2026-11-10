@@ -135,7 +135,7 @@ func (u *Updater) Tick(ctx context.Context) error {
 }
 
 func (u *Updater) cycle(ctx context.Context) error {
-	unlock, held, err := u.lock()
+	unlock, held, err := Lock(u.Home)
 	if err != nil {
 		return err
 	}
@@ -231,13 +231,15 @@ func (u *Updater) held() (string, error) {
 	return "", nil
 }
 
-// lock takes the host's one updater lock. Holding it proves no other updater
-// is mid-cycle, which is what makes an update pause found here a stale one.
-func (u *Updater) lock() (unlock func(), held bool, err error) {
-	if err := ledger.EnsureHome(u.Home); err != nil {
+// Lock takes the host's one updater lock under the state root home, held is
+// false when another process has it. Holding it proves no updater is
+// mid-cycle, which is what makes an update pause found here a stale one, so
+// anything else that claims the update pause takes it first.
+func Lock(home string) (unlock func(), held bool, err error) {
+	if err := ledger.EnsureHome(home); err != nil {
 		return nil, false, err
 	}
-	f, err := os.OpenFile(filepath.Join(u.Home, lockFile), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(filepath.Join(home, lockFile), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, false, err
 	}

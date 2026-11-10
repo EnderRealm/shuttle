@@ -156,6 +156,41 @@ which agents can write, and leaves a missing, symlinked or foreign checkout to t
 reports that project unavailable. Nothing fetches into a hosted
 checkout yet; the operator pulls by hand.
 
+**Binding: `shuttle weft bind <origin-url>`.** Run as the operator, with the installed `shuttle`:
+the restart re-registers the daemon and watchdog jobs under the binary that runs it, as `shuttle
+install daemon` does. It provisions the checkout, binds it and restarts the daemon, checking each.
+It derives `<name>` as the script does and edits `weft.repositories` in `config.json`, preserving
+every other key and its order (re-indented with two spaces), and holds the edited file to the
+daemon's own loader: a name tk cannot resolve, a binding already present, and an edit the loader
+refuses (an unreachable binding elsewhere in the file, a retired key) all refuse before anything is
+cloned. It takes the updater's lock (`~/.shuttle/updater.lock`) and keeps it to the end, so no
+updater poll runs meanwhile, and refuses when an updater poll holds it. It refuses while anything a
+daemon restart would kill is running, as the updater's drain reads it, or while `weft-worker` is
+paused for any reason. It then runs
+`~/code/shuttle/scripts/agent-users/provision-checkout.sh` (a release ships the binary alone) and
+requires the script to report publishing the checkout it derived. The edit and the restart check are
+made again after the clone; a refusal there leaves the checkout published and unbound, and the
+script refuses it on a second run, so remove it before running bind again. `config.json` is written
+by rename, with the file it replaced kept beside it as `config.json.bak-<UTC stamp>`, and the daemon
+and watchdog are restarted by bootout and bootstrap. Last it reads `/v2/projects` until the
+restarted service answers, up to two minutes, and reports the project available or the host's
+reason; a project tk's `config.yaml` does not register is not listed, and is reported so.
+
+From before the final check until `/v2/projects` answers, bind holds new work exactly as an update
+does: it claims the update pause on `weft-worker`, which shuts every weft claim, then
+`ArmRestartBarrier` makes the final restart check and raises the restart barrier in one transaction,
+which every other claim reads, so nothing claimed after that check starts only for the restart to
+kill it. Both come down when bind ends, whether it succeeds or fails; only the update pause is
+lifted, so a pause that replaced it stands. A bind that dies leaves them to the updater's next poll,
+which finds them stale once the lock goes with the process, or to the barrier's 30-minute lease.
+That reuse has two costs. While the hold stands, hosted clients are told shuttle is updating, the
+update pause's wording, though no update runs. And bind refuses whenever `weft-worker` is already
+paused, by the operator, an auth failure or a failure streak, naming that pause and leaving
+`config.json` unchanged: the hold is the update pause, which takes over no other, so resume the
+worker (or wait for the update) and run bind again. A pause taken during the clone refuses after it,
+leaving the checkout published and unbound as above. `shuttle weft unbind <project>` removes the
+binding the same way, under the same lock and hold, and leaves the checkout on disk.
+
 Three orderings bind whatever creates and operates production checkouts and worktrees.
 `provision-checkout.sh` builds checkouts by the first; nothing here builds production worktrees:
 

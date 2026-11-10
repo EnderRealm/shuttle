@@ -370,7 +370,7 @@ func TestLoadRefusesAgentUsersThatBoundNothing(t *testing.T) {
 // Agent users can write both hosted trees, so weft_root, which holds what
 // grades and resumes a run, may not be at or inside either.
 func TestLoadRefusesAWeftRootAgentsCanWrite(t *testing.T) {
-	for _, tree := range []string{HostedWorktreeRoot, hostedRepositoriesRoot} {
+	for _, tree := range []string{HostedWorktreeRoot, HostedRepositoriesRoot} {
 		for _, root := range []string{tree, tree + "/state", tree + "/"} {
 			t.Run(root, func(t *testing.T) {
 				writeConfig(t, strings.Replace(sampleConfig, `"/opt/shuttle/weft"`, strconv.Quote(root), 1))

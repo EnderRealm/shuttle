@@ -17,7 +17,7 @@ Usage: shuttle <command> [args]
 
 Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack',
 'preflight', 'pause', 'resume', 'install', 'uninstall', 'deliver', 'reconcile',
-'updater' and 'run'.
+'updater', 'weft' and 'run'.
 Manual and daemon claims execute the same retained, sandboxed pipeline; --dry-run
 stops after inputs and prompt. The rest is the phase 1 surface (docs/phase1-design.md §12) that the
 remaining phase 1 tickets fill in.
@@ -41,6 +41,13 @@ Operations:
   pause <agent> | resume <agent>
   prune --older 30d            Drop run directories past the retention window
   deliver --test               One test email through the configured sender
+
+Hosted weft:
+  weft bind <origin-url>       Provision a hosted checkout, bind it in
+                                 config.json, restart the daemon and report
+                                 the project from /v2/projects
+  weft unbind <project>        Remove a binding the same way; the checkout
+                                 stays on disk
 
 Lifecycle:
   install [daemon|updater]     Create the state root and the reports repo;
