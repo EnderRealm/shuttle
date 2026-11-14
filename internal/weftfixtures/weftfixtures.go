@@ -18,6 +18,12 @@ import (
 	"shuttle/internal/gitenv"
 )
 
+// originalHome is HOME as the process started, before any test redirected it:
+// git's global config, where an agent user's safe.directory lives, is read from
+// there, so a test that points HOME at a scratch directory must not reach
+// fixture resolution.
+var originalHome = os.Getenv("HOME")
+
 // Resolve returns weft's docs/service-v2 for the checkout containing start.
 // By default it is the tree committed at HEAD of the weft checkout beside the
 // main checkout, extracted into scratch: an uncommitted edit there is another
@@ -140,7 +146,7 @@ func git(dir string, args ...string) (string, error) {
 
 func gitOutput(dir string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = gitenv.Env()
+	cmd.Env = append(gitenv.Env(), "HOME="+originalHome)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

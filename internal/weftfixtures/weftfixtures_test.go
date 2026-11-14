@@ -152,3 +152,23 @@ func gitRun(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
 }
+
+// A test that redirects HOME must not change what fixture resolution's git
+// reads: an unparseable .gitconfig there would fail any git that consulted it.
+func TestResolveIgnoresRedirectedHome(t *testing.T) {
+	t.Setenv("WEFT_CONTRACT_DIR", "")
+	tmp := t.TempDir()
+	repo := newRepo(t, filepath.Join(tmp, "shuttle"))
+	weft := newRepo(t, filepath.Join(tmp, "weft"))
+	writeFile(t, filepath.Join(weft, "docs", "service-v2", "manifest.json"), "{}")
+	gitRun(t, weft, "add", "-A")
+	commit(t, weft, "fixtures")
+
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".gitconfig"), "[broken\n")
+	t.Setenv("HOME", home)
+
+	if _, err := Resolve(repo, t.TempDir()); err != nil {
+		t.Fatalf("Resolve with redirected HOME: %v", err)
+	}
+}
