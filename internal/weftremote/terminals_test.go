@@ -1078,7 +1078,7 @@ func TestRestartInterruptsTerminals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted.segments.findKey = th.service.segments.findKey
+	restarted.segments.carrySeams(th.service.segments)
 	if err := restarted.Restart(); err != nil {
 		t.Fatal(err)
 	}
@@ -1139,7 +1139,7 @@ func TestRestartInterruptsTerminals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	again.segments.findKey = th.service.segments.findKey
+	again.segments.carrySeams(th.service.segments)
 	if err := again.Restart(); err != nil {
 		t.Fatal(err)
 	}
@@ -1283,7 +1283,7 @@ func TestRestartKeepsAnUnresolvedShareWithNoPID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted.segments.findKey = th.service.segments.findKey
+	restarted.segments.carrySeams(th.service.segments)
 	if err := restarted.Restart(); err != nil {
 		t.Fatal(err)
 	}
@@ -1418,7 +1418,7 @@ func TestRestartReleasesAShareWhosePidWasHandedOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted.segments.findKey = th.service.segments.findKey
+	restarted.segments.carrySeams(th.service.segments)
 	if err := restarted.Restart(); err != nil {
 		t.Fatal(err)
 	}

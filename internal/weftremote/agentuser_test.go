@@ -3,6 +3,7 @@ package weftremote
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -429,4 +430,31 @@ func TestCapacityIsBoundedByTheAgentUsers(t *testing.T) {
 func jsonNumber(v any) string {
 	doc, _ := json.Marshal(v)
 	return string(doc)
+}
+
+// carrySeams hands a restarted supervisor the fixture seams of the one it
+// replaces, so it never falls back to the real keychain, shared root or users.
+func (s *Supervisor) carrySeams(from *Supervisor) {
+	s.findKey = from.findKey
+	s.sharedRoot = from.sharedRoot
+	s.killUser = from.killUser
+}
+
+// errRealKiller is what a test-built supervisor's default killer panics with.
+const errRealKiller = "test-built service reached the real agent-user killer: give it a fixture killer (userTable.killer().KillUser)"
+
+func init() {
+	defaultKillUser = func(user string) ([]reap.UserProcess, error) { panic(errRealKiller + " for " + user) }
+}
+
+func TestFixtureServiceNeverKillsRealUsers(t *testing.T) {
+	f := newServiceFixture(t)
+	defer func() {
+		if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), errRealKiller) {
+			t.Fatalf("a service given no fixture killer did not fail on a kill: %v", r)
+		}
+	}()
+	if _, err := NewSupervisor(f.service.cfg, f.store, f.root, f.service.log).killUser("weftagent1"); err != nil {
+		t.Fatal(err)
+	}
 }

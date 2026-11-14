@@ -916,6 +916,7 @@ func TestRunProjectionsSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	restarted.segments.carrySeams(h.service.segments)
 	if err := restarted.Restart(); err != nil {
 		t.Fatal(err)
 	}

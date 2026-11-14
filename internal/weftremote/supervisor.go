@@ -100,6 +100,10 @@ type Supervisor struct {
 	killUser func(user string) ([]reap.UserProcess, error)
 }
 
+// defaultKillUser is the killer a new Supervisor starts with; the test binary
+// replaces it with one that fails, so no test reaches the real agent users.
+var defaultKillUser = reap.KillUser
+
 func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger *log.Logger, locks ...*sync.RWMutex) *Supervisor {
 	stateMu := &sync.RWMutex{}
 	if len(locks) > 0 && locks[0] != nil {
@@ -108,7 +112,7 @@ func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger 
 	return &Supervisor{
 		cfg: cfg, store: store, home: home, log: logger, stateMu: stateMu,
 		active: make(map[string]*activeSegment), stopping: make(map[string]bool), output: newBroadcast(),
-		sharedRoot: config.HostedSharedRoot, killUser: reap.KillUser,
+		sharedRoot: config.HostedSharedRoot, killUser: defaultKillUser,
 	}
 }
 

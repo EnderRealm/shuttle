@@ -75,6 +75,8 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	service.segments.sharedRoot = filepath.Join(root, "shared")
+	service.segments.killUser = newUserTable().killer().KillUser
 	return &serviceFixture{root: root, store: store, service: service}
 }
 

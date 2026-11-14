@@ -524,7 +524,7 @@ func TestRestartReconcilesALandingSegmentItLost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted.segments.findKey = h.service.segments.findKey
+	restarted.segments.carrySeams(h.service.segments)
 	h.service = restarted
 	if err := restarted.Restart(); err != nil {
 		t.Fatal(err)
@@ -1526,7 +1526,7 @@ func TestStoppedLandingStaysStoppedThroughARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted.segments.findKey = h.service.segments.findKey
+	restarted.segments.carrySeams(h.service.segments)
 	h.service = restarted
 	if err := restarted.Restart(); err != nil {
 		t.Fatal(err)
