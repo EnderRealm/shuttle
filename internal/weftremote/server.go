@@ -197,6 +197,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case version == "v2":
 		s.serveV2(w, r, path)
 		return
+	case version == "releases":
+		s.serveReleases(w, r, path)
+		return
 	case version != "v1" && unspokenVersion(version):
 		s.upgradeRequired(w, version)
 		return

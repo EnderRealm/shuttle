@@ -154,6 +154,11 @@ It is never in argv. The daemon refuses a listener outside loopback or
 `100.64.0.0/10`, and refuses each segment before spawning the worker if that item
 is missing or the worker does not list the `agent_user` capability.
 
+`release_root` (optional) is the directory weft's Studio builder writes its release
+to. When set, the service serves its regular files read-only at
+`/releases/weft/<file>` (e.g. `manifest.json`), behind the same bearer token as
+`/v2`; no listing, and nothing outside the root, symlinks included.
+
 `repositories` binds each hosted tk project to its checkout. A binding that is
 not a path directly under `/Users/Shared/weft/repos`, where agent users can
 reach it, or that is under the operator's home, refuses the load, naming the

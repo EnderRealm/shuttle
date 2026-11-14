@@ -105,6 +105,10 @@ type Weft struct {
 	WorkerBin             string `json:"worker_bin"`
 	Root                  string `json:"weft_root"`
 	SegmentTimeoutSeconds int    `json:"segment_timeout_seconds"`
+	// ReleaseRoot is the directory weft's Studio builder writes its release
+	// to (manifest.json and the artifacts). The service serves it read-only
+	// under /releases/weft/; empty serves nothing there.
+	ReleaseRoot string `json:"release_root,omitempty"`
 	// AgentUsers are the hosted slots' macOS users (docs/agent-users.md).
 	// Each live segment runs as one of them, never shared, so capacity is
 	// never more than there are.
