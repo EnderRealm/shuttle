@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -462,6 +463,72 @@ func TestWeftBindRefusesWhileASegmentRuns(t *testing.T) {
 		if len(h.provisioned) != 0 {
 			t.Errorf("provisioned %v while the updater held its lock", h.provisioned)
 		}
+	})
+}
+
+// An interrupt while the restart hold stands ends the command with the hold
+// released. The signal is a real one, to this process: were nothing to catch
+// it, it would kill the test binary with the hold still up.
+func TestWeftInterruptReleasesTheHold(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		sig  syscall.Signal
+	}{
+		{[]string{"bind", "git@github.com:EnderRealm/ticket.git"}, syscall.SIGINT},
+		{[]string{"unbind", "loom"}, syscall.SIGTERM},
+	} {
+		t.Run(c.args[0]+" on "+c.sig.String(), func(t *testing.T) {
+			h := newWeftHost(t, hostedConfig)
+			reads := 0
+			readProjects = func(ctx context.Context, _, _ string) ([]v2Project, error) {
+				reads++
+				store, err := openLedger()
+				if err != nil {
+					t.Fatal(err)
+				}
+				agent, err := store.Agent(ledger.WeftAgent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				barrier, err := store.RestartBarrier()
+				store.Close()
+				if err != nil || !barrier || agent.PausedReason.String != ledger.PauseUpdate {
+					t.Fatalf("the hold is not up while /v2/projects is awaited: barrier=%t (err %v), %s pause %q", barrier, err, ledger.WeftAgent, agent.PausedReason.String)
+				}
+				if err := syscall.Kill(os.Getpid(), c.sig); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(10 * time.Second):
+					t.Error("the interrupt did not end the command's context")
+					return nil, errors.New("unreachable")
+				}
+			}
+			_, err := h.run(c.args...)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("%s: %v, want it ended by the interrupt", c.args[0], err)
+			}
+			if reads != 1 {
+				t.Errorf("/v2/projects read %d time(s) after the interrupt, want once", reads)
+			}
+			requireNoHold(t, "")
+		})
+	}
+
+	// An interrupt taken before the write, here during the clone, stops the
+	// command short of it: config.json is left as it was and nothing restarts.
+	t.Run("bind, interrupted before the write", func(t *testing.T) {
+		h := newWeftHost(t, hostedConfig)
+		ctx, cancel := context.WithCancel(context.Background())
+		h.duringProvision = cancel
+		err := weftBind(ctx, io.Discard, io.Discard, "git@github.com:EnderRealm/ticket.git")
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "is published and unbound") {
+			t.Fatalf("bind: %v, want a refusal on the interrupt naming the unbound checkout", err)
+		}
+		h.requireUntouched(hostedConfig)
+		requireNoHold(t, "")
 	})
 }
 

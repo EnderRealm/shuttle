@@ -12,10 +12,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -71,7 +73,9 @@ mid-poll or another bind runs, or when weft-worker is already paused.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return weftBind(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0])
+		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return weftBind(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0])
 	},
 }
 
@@ -84,7 +88,9 @@ report the project as /v2/projects sees it. The checkout stays on disk.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return weftUnbind(cmd.Context(), cmd.OutOrStdout(), args[0])
+		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return weftUnbind(ctx, cmd.OutOrStdout(), args[0])
 	},
 }
 
@@ -244,6 +250,12 @@ func commitBinding(ctx context.Context, out io.Writer, verb, name string, edit f
 	err = idle(store)
 	if err == nil {
 		err = store.ArmRestartBarrier(restartHoldLease)
+	}
+	// ctx ends on an interrupt, which the signal context keeps from killing
+	// the process so the hold is released; one taken before this point, during
+	// the clone included, stops the command short of the write and the restart.
+	if err == nil {
+		err = ctx.Err()
 	}
 	var backup string
 	if err == nil {
