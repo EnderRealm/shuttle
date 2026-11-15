@@ -151,5 +151,10 @@ after the transition.
   reservation rather than being refused (§6.2, §6.8; `dismiss-response.json`, `fresh-response.json`).
 - An archive segment that fails before it spawns invalidates its fresh entry `archive_refused`:
   nothing can have been written.
+- An archive worker lost while the daemon stays up — reaped without `maintained` — settles by
+  the archive ref: at the entry's archive head it mints the new run as a done would; absent or
+  at any other head the fresh entry is invalidated `archive_refused` naming the failure, its
+  row and slot released, and it is never queued again. The segment's failed row is its one
+  count toward the failure streak. A worker found gone at restart still waits again (§12 step 5).
 - A weft-archive/v1 run with no repository binds to its project's repository on this host;
   a project with none is refused 404 `project_not_found`.

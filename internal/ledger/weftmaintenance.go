@@ -661,9 +661,12 @@ type WeftArchiveReport struct {
 // SettleWeftArchive settles a reaped archive segment (§6.7). Reported done,
 // the maintenance → run transaction mints the new run; refused, the fresh
 // entry is invalidated archive_refused and its row and slot released. A
-// worker gone without reporting is settled as §12 step 5 settles one: by the
-// archive ref archiveHead reads. failClass is the host's failure class for
-// the segment's row, or "" when it ended after its terminal event.
+// worker gone without reporting settles by the archive ref archiveHead
+// reads: at the entry's head the new run is minted as for a done; otherwise
+// the entry is refused as for a refusal, the failure in its detail, and never
+// waits again as a restart's does (§12 step 5). failClass is the host's
+// failure class for the segment's row, or "" when it ended after its
+// terminal event.
 func (s *Store) SettleWeftArchive(runID string, segment int, report *WeftArchiveReport, failClass, failDetail string,
 	d WeftDispatch, archiveHead func(repo, ref string) (string, error)) (spawn []string, changes []WeftChange, err error) {
 	var event Event
@@ -716,7 +719,26 @@ func (t *WeftTx) settleArchive(runID string, segment int, report *WeftArchiveRep
 	if err != nil {
 		return fmt.Errorf("entry %s: read %s in %s: %w", e.ID, ref, e.Repository, err)
 	}
-	return t.settleArchiving(e, d, head)
+	want, err := weftArchiveHead(t.tx, e.ID)
+	if err != nil {
+		return err
+	}
+	if head != "" && head == want {
+		return t.settleArchiving(e, d, head)
+	}
+	// A worker lost while the daemon stays up is refused, not waited again as
+	// §12 step 5 waits one: dispatch would claim another archive segment at
+	// once, each failing toward the streak that pauses the agent.
+	found := "absent"
+	if head != "" {
+		found = "at " + head
+	}
+	detail := fmt.Sprintf("the archive worker ended without maintained (%s: %s); %s is %s, not %s",
+		failClass, failDetail, ref, found, want)
+	if err := t.refuseArchive(e, detail, stamp); err != nil {
+		return err
+	}
+	return t.CleanFinishedRun(runID, d)
 }
 
 // RefuseWeftMaintenance settles a cleanup or archive segment the host

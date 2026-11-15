@@ -2575,6 +2575,79 @@ func TestArchiveFailingBeforeSpawnIsRefused(t *testing.T) {
 	}
 }
 
+// An archive worker lost while the daemon stays up, having written no archive
+// ref at the head, is refused, not queued again: its fresh entry is
+// invalidated archive_refused naming the failure, its row and slot released,
+// no further archive segment claimed, and the one failed row the only advance
+// of the failure streak. One lost after it wrote the ref settles by it, as a
+// done would (§6 settled calls).
+func TestLiveArchiveWorkerLostIsRefused(t *testing.T) {
+	h := newHostCleanupHost(t)
+	lost, wrote := "weft/example-fourth-6e4f", "loom/example-moved-5e6f"
+	for _, id := range []string{lost, wrote} {
+		h.ticket(id, ticket.StatusReady, 2)
+	}
+	fresh := func(run *ledger.WeftRun) string {
+		return entryOf(h.send(http.MethodPost, "/v2/runs/"+run.ID+"/fresh", "fresh-"+slugOf(run.Ticket),
+			freshBody(run.Revision, run.Worktree, run.Head.String)))["entry_id"].(string)
+	}
+
+	old := h.haltedRun(lost)
+	h.script(lost, 2, workerLines{dieLine})
+	before, err := h.store.Agent(ledger.WeftAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := fresh(old)
+	waitFor(t, func() bool {
+		return h.entry(entry)["state"] == "invalidated" && h.reaped(h.run(old.ID))
+	})
+	h.settle()
+	invalid := h.entry(entry)["invalidated"].(map[string]any)
+	detail, _ := invalid["detail"].(string)
+	if invalid["reason"] != "archive_refused" || !strings.Contains(detail, ledger.ClassDied) ||
+		!strings.Contains(detail, ledger.WeftArchiveRef(old.ID)) {
+		t.Fatalf("lost archive = %v", invalid)
+	}
+	run := h.run(old.ID)
+	if run.Disposition != ledger.WeftDispositionRetained || run.SupersededBy.Valid || len(run.Segments) != 2 ||
+		run.Segments[1].Kind != ledger.WeftSegmentArchive || run.Segments[1].Failure.String != ledger.ClassDied ||
+		strings.Count(h.argv(), "archive --contract") != 1 {
+		t.Fatalf("run after a lost archive = %+v\n%s", run, h.argv())
+	}
+	if c := h.queue()["capacity"].(map[string]any); c["running"] != float64(0) || h.repositoryOf("weft")["reservation"] != nil {
+		t.Fatalf("a lost archive kept its slot or row: %v %v", c, h.repositoryOf("weft"))
+	}
+	after, err := h.store.Agent(ledger.WeftAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.FailureStreak != before.FailureStreak+1 || after.Paused {
+		t.Fatalf("failure streak %d -> %d, paused %v", before.FailureStreak, after.FailureStreak, after.Paused)
+	}
+
+	// The archived head has to be a commit for the ref to name it.
+	repo := h.projects["loom"]
+	head := strings.TrimSpace(h.git(repo, "rev-parse", "HEAD"))
+	halted := h.halted(wrote)
+	halted[indexOf(halted, "graded")]["head"] = head
+	h.script(wrote, 1, halted)
+	other := h.waitReaped(h.waitDispatched(entryOf(h.launch(wrote, "wrote"))["entry_id"].(string)))
+	h.script(wrote, 2, workerLines{nil, dieLine})
+	entry = fresh(other)
+	waitFor(t, func() bool {
+		return h.entry(entry)["state"] == "archiving" && strings.Contains(h.argv(), "archive --contract weft-worker/v2 --run "+other.ID)
+	})
+	h.git(repo, "update-ref", ledger.WeftArchiveRef(other.ID), head)
+	h.release(wrote)
+	newRun := h.waitDispatched(entry)
+	h.waitReaped(newRun)
+	if archived := h.run(other.ID); archived.Disposition != ledger.WeftDispositionArchived || archived.SupersededBy.String != newRun {
+		t.Fatalf("archived run = %+v", archived)
+	}
+	h.settle()
+}
+
 // A maintenance entry for a run that has claimed all its segments takes
 // nothing at dispatch: it is invalidated run_changed naming the limit, with
 // no segment claimed and no row taken.
