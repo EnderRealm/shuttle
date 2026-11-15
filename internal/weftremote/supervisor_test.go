@@ -498,7 +498,7 @@ func (f *supervisorFixture) claim(t *testing.T, id string) *ledger.WeftRun {
 	t.Helper()
 	run, err := f.store.ClaimWeft(ledger.WeftLaunch{
 		Ticket: id, Project: "demo", Repo: f.repo, Branch: id, Worktree: f.worktree(t, id),
-		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent), AgentUser: fixtureAgentUsers[0],
+		RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent), AgentUser: fixtureAgentUser(fixtureAgentUsers[0]),
 	})
 	if err != nil {
 		t.Fatal(err)

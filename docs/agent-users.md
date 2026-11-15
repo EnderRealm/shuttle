@@ -230,9 +230,19 @@ only those two entries, scoped to a test root, the agent committed in a worktree
 installed.
 
 **Hosted slots: `weft.agent_users`.** shuttle's `config.json` lists the users its hosted
-segments run as; the README gives the key's rules. Dispatch claims each launch, answer or resume
-segment with the first listed user no unsettled segment holds, records it on the segment, and
-launches the worker with `--agent-user <user> --worktree-root /Users/Shared/weft/worktrees`.
+segments run as; the README gives the key's rules. Dispatch resolves each listed name to its uid,
+claims each launch, answer or resume segment with the first listed user whose uid no unsettled
+segment holds, records the name and uid on the segment, and launches the worker with
+`--agent-user <user> --worktree-root /Users/Shared/weft/worktrees`. A segment holds its uid
+whatever name the account has since taken, and a listed name that does not resolve is handed to no
+segment. A segment claimed before uids were recorded, and still unsettled when shuttle is upgraded,
+has its uid recorded once, by the first restart pass after the upgrade, from the name as it
+resolves then. One whose name does not resolve then ran as a uid nothing can establish, which could
+be any listed user's, so while it stays unsettled no segment is claimed with any agent user; the
+restart pass holds it, naming its run directory. Once no process of the account it ran as is left,
+under whatever name the account now has, create `<run_dir>/release-held` and restart the daemon,
+which closes the row without killing as the recorded name. Its name is never resolved again: an
+account given that name later is not known to be the one it ran as.
 Reconcile, cleanup and archive run as the operator and hold no user. The user is the segment's
 containment domain: once the worker has exited or been stopped, timed out or killed, and again
 after a daemon restart, shuttle repeats `sudo -n -u <user> /usr/bin/pkill -KILL -U <user>` until
@@ -240,8 +250,11 @@ no process of the user's real uid is left, as `kill_agent` does, giving up after
 and naming each survivor. What it leaves is `distnoted`, `cfprefsd`, `lsd` and `secd`, each
 recognised by its exec path under `/usr/sbin` or `/usr/libexec` together with launchd as its
 parent, never by its short name. Until the kill succeeds the segment stays unsettled, holding its
-repository and its user. The worker's own children that run as the operator (git, tk, the
-security lens) are outside the uid and are swept by the worker's session as before. A segment
+repository and its user. Before each kill shuttle checks that the recorded name still resolves to
+the recorded uid. For an account renamed or replaced since the claim nothing is killed, and the
+segment stays unsettled, its uid held, until the name resolves to that uid again. The worker's
+own children that run as the operator (git, tk, the security lens) are outside the uid and are
+swept by the worker's session as before. A segment
 launched before agent users, left in flight by a daemon crash across the upgrade, has no user
 to kill: the restart pass kills its worker's group and then holds the row with its repository
 reserved, naming the worktree. Once no process writes that worktree, create

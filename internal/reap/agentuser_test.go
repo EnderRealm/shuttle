@@ -1,7 +1,9 @@
 package reap
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -180,6 +182,53 @@ func TestKillUserFailsClosed(t *testing.T) {
 		if _, err := f.killer().KillUser(name); err == nil || len(f.calls) != 0 {
 			t.Fatalf("KillUser(%q) = %v with calls %v, want refused before any", name, err, f.calls)
 		}
+	}
+}
+
+// fakeDirectory stands in for the account directory Restart resolves a
+// segment's agent user in, by name to uid.
+func fakeDirectory(t *testing.T, accounts map[string]int) {
+	t.Helper()
+	prior := lookupUID
+	lookupUID = func(name string) (int, error) {
+		uid, ok := accounts[name]
+		if !ok {
+			return 0, fmt.Errorf("user: unknown user %s", name)
+		}
+		return uid, nil
+	}
+	t.Cleanup(func() { lookupUID = prior })
+}
+
+// A recorded agent user is killed as only while its name still resolves to
+// the uid its segment was claimed with; one with no uid recorded is never
+// killed as, nor looked up.
+func TestVerifyAgentUIDHoldsARenamedOrReplacedAccount(t *testing.T) {
+	directory := map[string]int{"weftagent1": 601, "weftagent2": 777}
+	lookups := 0
+	lookup := func(name string) (int, error) {
+		lookups++
+		uid, ok := directory[name]
+		if !ok {
+			return 0, errors.New("unknown user " + name)
+		}
+		return uid, nil
+	}
+	claimed := sql.NullInt64{Int64: 601, Valid: true}
+	if err := VerifyAgentUID("weftagent1", claimed, lookup); err != nil {
+		t.Fatalf("an unchanged account = %v", err)
+	}
+	if err := VerifyAgentUID("weftagent9", claimed, lookup); err == nil || err.Error() !=
+		"agent user weftagent9 was uid 601 when its segment was claimed and no longer resolves (unknown user weftagent9); the uid stays held" {
+		t.Fatalf("a renamed account = %v", err)
+	}
+	if err := VerifyAgentUID("weftagent2", claimed, lookup); err == nil || err.Error() !=
+		"agent user weftagent2 resolves to uid 777, not the uid 601 its segment was claimed with, which stays held" {
+		t.Fatalf("a replaced account = %v", err)
+	}
+	lookups = 0
+	if err := VerifyAgentUID("weftagent1", sql.NullInt64{}, lookup); err == nil || err.Error() != "agent user weftagent1: "+unknownUID || lookups != 0 {
+		t.Fatalf("a segment with no recorded uid = %v after %d lookup(s), want it refused unlooked-up", err, lookups)
 	}
 }
 

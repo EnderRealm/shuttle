@@ -146,11 +146,25 @@ type Ledger interface {
 	MarkUnknown(id string) error
 	WeftSegmentAgent(ledgerRunID string) (ledger.WeftAgentSegment, bool, error)
 	WeftLegacyCodingWorktree(ledgerRunID string) (string, bool, error)
+	BackfillWeftAgentUIDs(lookup func(name string) (int, error)) error
 }
 
 // killUser is the kill Restart runs for a hosted segment's agent user. A var
 // so a test can substitute the kill command and process table.
 var killUser = KillUser
+
+// lookupUID resolves a hosted segment's recorded agent user before Restart
+// kills as it. A var so a test can stand in for the directory.
+var lookupUID = LookupUID
+
+// killAgent kills every process of the segment's agent user, once its
+// recorded name still resolves to the uid the segment was claimed with.
+func killAgent(agent *ledger.WeftAgentSegment) ([]UserProcess, error) {
+	if err := VerifyAgentUID(agent.AgentUser, agent.AgentUID, lookupUID); err != nil {
+		return nil, err
+	}
+	return killUser(agent.AgentUser)
+}
 
 var _ Ledger = (*ledger.Store)(nil)
 
@@ -178,18 +192,27 @@ var _ Ledger = (*ledger.Store)(nil)
 //
 // A hosted segment that runs as an agent user is held the same way until every
 // process of that user is gone, killed before its worker's group and again
-// after it: the group being empty is not the segment being gone. A hosted
-// segment that launches a model but was launched before agent users has no
-// user to kill, so nothing the pass reads establishes that a detached
+// after it: the group being empty is not the segment being gone. While its
+// recorded name no longer resolves to the uid it was claimed with, nothing is
+// killed as that name and the row is held kill_failed, its uid held. The first
+// pass over a ledger upgraded to schema 12 first records the uid of each
+// segment claimed before uids were recorded, by its name as it resolves then;
+// one whose name did not resolve has no uid, so no kill is known to reach it,
+// and it is held until the operator creates its release marker (unknownUIDRow).
+// A hosted segment that launches a model but was launched before agent users
+// has no user to kill, so nothing the pass reads establishes that a detached
 // descendant of it is gone: once its group is accounted for it is held until
 // the operator creates its release marker (legacyRow).
 //
 // It returns one Outcome per row, in ledger order. A MarkUnknown failure, or a
-// ledger read that cannot say which agent user a row holds or whether it is a
-// pre-agent-user hosted segment, stops the pass and is returned with the
-// outcomes recorded so far: the daemon must not go on to tick over a row it
-// could not close.
+// ledger read or write that cannot say which agent user a row holds, or
+// whether it is a pre-agent-user hosted segment, stops the pass and is
+// returned with the outcomes recorded so far: the daemon must not go on to
+// tick over a row it could not close.
 func Restart(l Ledger) ([]Outcome, error) {
+	if err := l.BackfillWeftAgentUIDs(lookupUID); err != nil {
+		return nil, fmt.Errorf("backfill agent uids: %w", err)
+	}
 	runs, err := l.InFlight()
 	if err != nil {
 		return nil, err
@@ -213,15 +236,24 @@ func Restart(l Ledger) ([]Outcome, error) {
 				return append(outcomes, out), fmt.Errorf("run %s: %w", run.ID, err)
 			}
 		}
+		released := ""
+		if agent != nil && !agent.AgentUID.Valid && run.PID.Valid && run.PID.Int64 > 0 {
+			var held bool
+			if released, held = unknownUIDRow(run, agent); held {
+				out.Action, out.Detail = ActionUnresolved, released
+				outcomes = append(outcomes, out)
+				continue
+			}
+		}
 		swept := ""
-		if agent != nil && run.PID.Valid && run.PID.Int64 > 0 {
+		if agent != nil && released == "" && run.PID.Valid && run.PID.Int64 > 0 {
 			// The agent's processes share the worker's process group and
 			// session, where the operator's signals do not reach them, so they
 			// go first: the group kill below would otherwise outlast its
 			// SIGKILL. The user is this row's alone, so nothing of it is
 			// foreign. A row with no pid never released its worker's start
 			// gate, and nothing ran as its user.
-			found, err := killUser(agent.AgentUser)
+			found, err := killAgent(agent)
 			if err != nil {
 				out.Action, out.Detail = ActionKillFailed, "agent user: "+err.Error()
 				outcomes = append(outcomes, out)
@@ -237,6 +269,8 @@ func Restart(l Ledger) ([]Outcome, error) {
 		}
 		if out.Action != ActionKillFailed && out.Action != ActionUnresolved && out.Action != ActionNoPID {
 			switch {
+			case released != "":
+				out.Detail = joinDetail(out.Detail, released)
 			case agent != nil:
 				out.Action, out.Detail = containRow(agent, out.Action, out.Detail)
 			case legacy:
@@ -263,7 +297,7 @@ func Restart(l Ledger) ([]Outcome, error) {
 // ran, and the caller skips it. A hosted segment launched before agent users
 // has no user to kill and is legacyRow's instead.
 func containRow(agent *ledger.WeftAgentSegment, action Action, detail string) (Action, string) {
-	found, err := killUser(agent.AgentUser)
+	found, err := killAgent(agent)
 	if err != nil {
 		return ActionKillFailed, joinDetail(detail, "agent user: "+err.Error())
 	}
@@ -272,10 +306,54 @@ func containRow(agent *ledger.WeftAgentSegment, action Action, detail string) (A
 
 // releaseMarker is the file an operator creates in a held pre-agent-user
 // segment's run directory once no process of the segment still writes its
-// worktree. That segment's srt profile denied writes to the run directory
-// itself, and its preflight checked so, so nothing the segment left behind can
-// create it.
+// worktree, or in a held agent-user segment's whose uid is unknown once no
+// process of its account is left. A pre-agent-user segment's srt profile
+// denied writes to the run directory itself, and its preflight checked so,
+// and an agent user cannot reach the operator's home it lies under, so
+// nothing either segment left behind can create it.
 const releaseMarker = "release-held"
+
+// releasedBy answers whether the operator has created run's release marker,
+// and its path; "" when the row has no absolute run_dir to carry one.
+func releasedBy(run *ledger.Run) (string, bool, error) {
+	dir := run.RunDir.String
+	if !filepath.IsAbs(dir) {
+		return "", false, nil
+	}
+	marker := filepath.Join(dir, releaseMarker)
+	_, err := os.Lstat(marker)
+	switch {
+	case err == nil:
+		return marker, true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return marker, false, nil
+	}
+	return marker, false, err
+}
+
+// unknownUIDRow decides an agent-user segment whose uid is unknown: claimed
+// before uids were recorded, its name did not resolve when the ledger was
+// upgraded. No kill is known to reach its processes, and they may run under
+// whatever name its account now has, so the row is held, its detail naming the
+// marker, holding every agent user (ledger freeAgentUser) until the operator
+// has confirmed none of them is left and created the marker. With the marker
+// the user is not killed and the row goes on to its group kill and closes; the
+// detail it returns then says so.
+func unknownUIDRow(run *ledger.Run, agent *ledger.WeftAgentSegment) (detail string, held bool) {
+	why := fmt.Sprintf("agent user %s: %s", agent.AgentUser, unknownUID)
+	marker, ok, err := releasedBy(run)
+	switch {
+	case ok:
+		return fmt.Sprintf("agent user %s: uid unknown since the upgrade, not killed; closed on the operator's release marker %s",
+			agent.AgentUser, marker), false
+	case err != nil:
+		return why + "; release marker: " + err.Error(), true
+	case marker == "":
+		return why + fmt.Sprintf("; with no absolute run_dir there is no %s to release it", releaseMarker), true
+	}
+	return why + fmt.Sprintf("; once no process of the account it ran as is left, under whatever name it now has, create %s and restart the daemon",
+		marker), true
+}
 
 // legacyRow finishes a pre-agent-user hosted segment's row once its process
 // group is accounted for. The segment ran as the operator under srt, so a
@@ -287,22 +365,19 @@ const releaseMarker = "release-held"
 // with the marker the row closes as action. A row with no pid never released
 // its worker's start gate, so nothing of it ever ran, and the caller skips it.
 func legacyRow(run *ledger.Run, worktree string, action Action, detail string) (Action, string) {
-	dir := run.RunDir.String
-	if !filepath.IsAbs(dir) {
+	marker, ok, err := releasedBy(run)
+	switch {
+	case ok:
+		return action, joinDetail(detail, "pre-agent-user hosted segment: closed on the operator's release marker "+marker)
+	case err != nil:
+		return ActionUnresolved, joinDetail(detail, "release marker: "+err.Error())
+	case marker == "":
 		// No run directory to carry the marker. identify closes any other row
 		// like this, but closing this one would release the reservation over
 		// the descendants the hold exists for, so it is held all the same.
 		return ActionUnresolved, joinDetail(detail, fmt.Sprintf(
 			"pre-agent-user hosted segment: worktree %s stays reserved, and with no absolute run_dir there is no %s to release it",
 			worktree, releaseMarker))
-	}
-	marker := filepath.Join(dir, releaseMarker)
-	_, err := os.Lstat(marker)
-	switch {
-	case err == nil:
-		return action, joinDetail(detail, "pre-agent-user hosted segment: closed on the operator's release marker "+marker)
-	case !errors.Is(err, fs.ErrNotExist):
-		return ActionUnresolved, joinDetail(detail, "release marker: "+err.Error())
 	}
 	return ActionUnresolved, joinDetail(detail, fmt.Sprintf(
 		"pre-agent-user hosted segment: no agent user contains a detached descendant, so worktree %s stays reserved; "+

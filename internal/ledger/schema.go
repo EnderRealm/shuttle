@@ -19,7 +19,8 @@ package ledger
 // schemaVersion 9: the host cleanup hold of each run (weft-service/v2 §6.8).
 // schemaVersion 10: whether each queue entry was dismissed (weft-service/v2 §6.3).
 // schemaVersion 11: structured questions and answers (weft-service/v2 §6.5).
-const schemaVersion = 11
+// schemaVersion 12: the uid each hosted pipeline segment's agent user resolved to.
+const schemaVersion = 12
 
 // schemaSQL is the schema-2 DDL: §6 plus weft-remote/v1. IF NOT EXISTS
 // throughout because migrate applies it to a fresh database and to a schema-2
@@ -372,3 +373,18 @@ const weftStructuredQuestionsSQL = `
 ALTER TABLE weft_questions ADD COLUMN questions TEXT;
 ALTER TABLE weft_answers ADD COLUMN answers TEXT;
 `
+
+// weftAgentUIDSQL is schema 12: weft_segments.agent_uid, the uid agent_user
+// resolved to when the segment was claimed. The uid is the containment
+// domain (docs/agent-users.md), so an unsettled segment holds its uid
+// whatever name the account has since taken. NULL wherever agent_user is,
+// and on a segment claimed before uids were recorded until
+// BackfillWeftAgentUIDs resolves its name.
+const weftAgentUIDSQL = `
+ALTER TABLE weft_segments ADD COLUMN agent_uid INTEGER;
+`
+
+// weftAgentUIDBackfillKey is the schema_meta row the migration to schema 12
+// leaves on an upgraded ledger until BackfillWeftAgentUIDs has run. A fresh
+// ledger has no segment to backfill and gets none.
+const weftAgentUIDBackfillKey = "weft_agent_uid_backfill"

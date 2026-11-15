@@ -1,6 +1,7 @@
 package reap
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -152,13 +153,51 @@ func pkillAs(name string) error {
 
 // listAgentUser is every live process whose real uid is name's.
 func listAgentUser(name string) ([]UserProcess, error) {
-	u, err := user.Lookup(name)
+	uid, err := LookupUID(name)
 	if err != nil {
 		return nil, fmt.Errorf("agent user %s: %w", name, err)
 	}
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		return nil, fmt.Errorf("agent user %s: uid %q: %w", name, u.Uid, err)
-	}
 	return uidProcesses(uid)
 }
+
+// LookupUID is the uid the account name resolves to now. Its error names the
+// account already, as user.Lookup's does.
+func LookupUID(name string) (int, error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, err
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, fmt.Errorf("user %s: uid %q: %w", name, u.Uid, err)
+	}
+	return uid, nil
+}
+
+// VerifyAgentUID refuses to kill as name, a segment's recorded agent user,
+// unless lookup still resolves it to uid, the uid the segment was claimed
+// with. A name that no longer resolves, or resolves to another uid, is an
+// account renamed or replaced since the claim: the kill would reach another
+// uid's processes, or none, and leave the claimed uid's alive, so the caller
+// keeps the segment unsettled and its uid held. A segment with no uid was
+// claimed before uids were recorded and its name did not resolve on the
+// upgrade, so no kill as any name is known to reach it.
+func VerifyAgentUID(name string, uid sql.NullInt64, lookup func(string) (int, error)) error {
+	if !uid.Valid {
+		return fmt.Errorf("agent user %s: %s", name, unknownUID)
+	}
+	got, err := lookup(name)
+	if err != nil {
+		return fmt.Errorf("agent user %s was uid %d when its segment was claimed and no longer resolves (%v); the uid stays held",
+			name, uid.Int64, err)
+	}
+	if int64(got) != uid.Int64 {
+		return fmt.Errorf("agent user %s resolves to uid %d, not the uid %d its segment was claimed with, which stays held",
+			name, got, uid.Int64)
+	}
+	return nil
+}
+
+// unknownUID says why a segment with no recorded uid is held.
+const unknownUID = "its segment was claimed before uids were recorded and the name did not resolve when the ledger was upgraded, " +
+	"so the uid it ran as is unknown and no agent user is handed out while it is held"

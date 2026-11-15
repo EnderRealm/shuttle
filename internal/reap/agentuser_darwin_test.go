@@ -3,7 +3,9 @@
 package reap
 
 import (
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"shuttle/internal/ledger"
+	"shuttle/internal/sandbox"
 )
 
 // The real table answers for another process of this uid with its parent and
@@ -245,15 +248,17 @@ func waitUntil(t *testing.T, ok func() bool) {
 	}
 }
 
-// agentRow is a hosted segment running as weftagent1 left by a previous
-// daemon: its worker, a live group leader carrying the segment's --run and
-// --segment, and a table in which weftagent1 runs a setsid'd orphan.
+// agentRow is a hosted segment running as weftagent1, claimed as uid 601,
+// left by a previous daemon: its worker, a live group leader carrying the
+// segment's --run and --segment, a table in which weftagent1 runs a setsid'd
+// orphan, and a directory in which weftagent1 is still uid 601.
 func agentRow(t *testing.T, s *ledger.Store, argv func(runID string) []string) (*ledger.WeftRun, int, *fakeTable) {
 	t.Helper()
 	root := resolved(t, t.TempDir())
 	run, err := s.ClaimWeft(ledger.WeftLaunch{
 		Ticket: "demo/agent", Project: "demo", Repo: "/tmp/shuttle-agent-repo", Branch: "demo/agent",
-		Worktree: filepath.Join(root, "worktree"), RunDirRoot: filepath.Join(root, "runs"), AgentUser: "weftagent1",
+		Worktree: filepath.Join(root, "worktree"), RunDirRoot: filepath.Join(root, "runs"),
+		AgentUser: ledger.WeftAgentUser{Name: "weftagent1", UID: 601},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -270,6 +275,7 @@ func agentRow(t *testing.T, s *ledger.Store, argv func(runID string) []string) (
 	prior := killUser
 	killUser = f.killer().KillUser
 	t.Cleanup(func() { killUser = prior })
+	fakeDirectory(t, map[string]int{"weftagent1": 601})
 	return run, cmd.Process.Pid, f
 }
 
@@ -338,6 +344,275 @@ func TestRestartHoldsARowWhoseAgentUserOutlivesTheKill(t *testing.T) {
 	if agent, ok, err := s.WeftSegmentAgent(ledgerRun); !ok || err != nil || agent.AgentUser != "weftagent1" {
 		t.Fatalf("held row's agent = %+v %v %v", agent, ok, err)
 	}
+}
+
+// An account renamed, or its name taken by another account, while its
+// segment's row is left in flight with a process still running as its uid:
+// the pass kills nothing as the recorded name and holds the row kill_failed,
+// its worker unsignalled. The uid stays held whatever the account is called
+// now, so with spare capacity dispatch hands the renamed account to no
+// segment, while another free user still is.
+func TestRestartHoldsTheUIDOfARenamedAgentUser(t *testing.T) {
+	requireIdentity(t)
+	for _, tt := range []struct {
+		name      string
+		directory map[string]int
+		want      string
+	}{
+		{name: "renamed", directory: map[string]int{"weftagent9": 601, "weftagent2": 602},
+			want: "agent user weftagent1 was uid 601 when its segment was claimed and no longer resolves (user: unknown user weftagent1); the uid stays held"},
+		{name: "replaced", directory: map[string]int{"weftagent1": 777, "weftagent9": 601, "weftagent2": 602},
+			want: "agent user weftagent1 resolves to uid 777, not the uid 601 its segment was claimed with, which stays held"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore(t)
+			run, pid, f := agentRow(t, s, func(id string) []string { return workerArgv(id, 1) })
+			fakeDirectory(t, tt.directory)
+			sent := recordSignals(t)
+			outcomes := restart(t, s)
+			ledgerRun := run.Segments[0].LedgerRunID
+			if len(outcomes) != 1 || outcomes[0].Action != ActionKillFailed || !strings.Contains(outcomes[0].Detail, tt.want) {
+				t.Fatalf("outcomes = %+v, want kill_failed with %q", outcomes, tt.want)
+			}
+			assertUntouched(t, s, ledgerRun, pid, f, sent)
+			got := dispatchBeside(t, s, []ledger.WeftAgentUser{{Name: "weftagent9", UID: 601}, {Name: "weftagent2", UID: 602}})
+			if !slices.Equal(got, []ledger.WeftAgentUser{{Name: "weftagent2", UID: 602}, {}}) {
+				t.Fatalf("dispatched as %v, want weftagent2 and the second entry waiting: weftagent9 is uid 601, held by the row", got)
+			}
+			assertHeld(t, s, ledgerRun)
+		})
+	}
+}
+
+// A segment claimed under schema 11 records no uid, and is left in flight
+// with a process still running as its account across the upgrade. When the
+// account was renamed before the upgrade, the first pass cannot resolve the
+// recorded name: the row is held unresolved, nothing killed, and since its
+// uid could be any configured user's, dispatch hands out none, though slots
+// are spare. Naming the account back does not resolve it later, since a name
+// that comes back need not be the same account; the operator's release
+// marker closes it. When the account was renamed only after the upgrade, the
+// first pass recorded its uid, which stays held by uid under the new name.
+func TestRestartHoldsTheUIDOfASchemaElevenSegment(t *testing.T) {
+	requireIdentity(t)
+	users := []ledger.WeftAgentUser{{Name: "weftagent9", UID: 601}, {Name: "weftagent2", UID: 602}}
+	renamed := map[string]int{"weftagent9": 601, "weftagent2": 602}
+	t.Run("renamed before the upgrade", func(t *testing.T) {
+		s, run, pid, f := schemaElevenAgentRow(t)
+		fakeDirectory(t, renamed)
+		sent := recordSignals(t)
+		ledgerRun := run.Segments[0].LedgerRunID
+		marker := filepath.Join(run.Segments[0].RunDir.String, releaseMarker)
+		outcomes := restart(t, s)
+		want := "agent user weftagent1: " + unknownUID + "; once no process of the account it ran as is left, under whatever name it now has, create " +
+			marker + " and restart the daemon"
+		if len(outcomes) != 1 || outcomes[0].Action != ActionUnresolved || outcomes[0].Detail != want {
+			t.Fatalf("outcomes = %+v, want unresolved with %q", outcomes, want)
+		}
+		assertUntouched(t, s, ledgerRun, pid, f, sent)
+		if got := dispatchBeside(t, s, users); !slices.Equal(got, []ledger.WeftAgentUser{{}, {}}) {
+			t.Fatalf("dispatched as %v while the row's uid is unknown, want both entries waiting", got)
+		}
+
+		fakeDirectory(t, map[string]int{"weftagent1": 601, "weftagent2": 602})
+		if outcomes := restart(t, s); len(outcomes) != 1 || outcomes[0].Action != ActionUnresolved || len(f.calls) != 0 {
+			t.Fatalf("outcomes = %+v with calls %v, want the row still held, its name not looked up again", outcomes, f.calls)
+		}
+		assertInFlight(t, s, ledgerRun)
+
+		if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(marker, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		outcomes = restart(t, s)
+		if len(outcomes) != 1 || outcomes[0].Action != ActionKilled ||
+			!strings.Contains(outcomes[0].Detail, "agent user weftagent1: uid unknown since the upgrade, not killed; closed on the operator's release marker "+marker) {
+			t.Fatalf("outcomes = %+v, want the row closed on the marker", outcomes)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("calls = %v, want nothing killed as the recorded name", f.calls)
+		}
+		waitGone(t, "worker", pid)
+		assertUnknown(t, s, ledgerRun)
+	})
+	t.Run("renamed after the upgrade", func(t *testing.T) {
+		s, run, pid, f := schemaElevenAgentRow(t)
+		f.stubborn[setsidOrphan.PID] = true
+		ledgerRun := run.Segments[0].LedgerRunID
+		if outcomes := restart(t, s); len(outcomes) != 1 || outcomes[0].Action != ActionKillFailed ||
+			!strings.Contains(outcomes[0].Detail, "702(/bin/sleep)") {
+			t.Fatalf("outcomes = %+v, want the survivor to hold the row", outcomes)
+		}
+		if a, ok, err := s.WeftSegmentAgent(ledgerRun); !ok || err != nil || a.AgentUID != (sql.NullInt64{Int64: 601, Valid: true}) {
+			t.Fatalf("held row's agent = %+v %v %v, want uid 601 recorded on the upgrade", a, ok, err)
+		}
+		fakeDirectory(t, renamed)
+		f.calls = nil
+		sent := recordSignals(t)
+		if outcomes := restart(t, s); len(outcomes) != 1 || outcomes[0].Action != ActionKillFailed ||
+			!strings.Contains(outcomes[0].Detail, "agent user weftagent1 was uid 601 when its segment was claimed and no longer resolves") {
+			t.Fatalf("outcomes = %+v, want the renamed account's row held", outcomes)
+		}
+		if len(f.calls) != 0 || !slices.Equal(f.left("weftagent1"), []UserProcess{setsidOrphan, distnoted}) {
+			t.Fatalf("calls = %v leaving %v, want nothing killed after the rename", f.calls, f.left("weftagent1"))
+		}
+		assertSignals(t, sent)
+		if !alive(pid) {
+			t.Fatalf("worker %d was signalled", pid)
+		}
+		if got := dispatchBeside(t, s, users); !slices.Equal(got, []ledger.WeftAgentUser{{Name: "weftagent2", UID: 602}, {}}) {
+			t.Fatalf("dispatched as %v, want weftagent2 and the second entry waiting: weftagent9 is uid 601, held by the row", got)
+		}
+		assertHeld(t, s, ledgerRun)
+	})
+}
+
+// schemaElevenAgentRow is agentRow on a ledger the previous binary wrote:
+// claimed at schema 11, before uids were recorded, and opened again by this
+// one, which migrates it to 12.
+func schemaElevenAgentRow(t *testing.T) (*ledger.Store, *ledger.WeftRun, int, *fakeTable) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "runs.db")
+	s, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, pid, f := agentRow(t, s, func(id string) []string { return workerArgv(id, 1) })
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{`ALTER TABLE weft_segments DROP COLUMN agent_uid`,
+		`UPDATE schema_meta SET value='11' WHERE key='schema_version'`} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if s, err = ledger.Open(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s, run, pid, f
+}
+
+// assertUntouched checks a held agent row's pass killed and listed nothing
+// as its recorded name, left uid 601's processes and its worker alone, and
+// kept the row in flight and its repository reserved.
+func assertUntouched(t *testing.T, s *ledger.Store, ledgerRun string, pid int, f *fakeTable, sent *[]string) {
+	t.Helper()
+	if len(f.calls) != 0 {
+		t.Fatalf("calls = %v, want nothing killed or listed as the recorded name", f.calls)
+	}
+	if left := f.left("weftagent1"); !slices.Equal(left, []UserProcess{setsidOrphan, distnoted}) {
+		t.Fatalf("uid 601 runs %v, want its processes untouched", left)
+	}
+	assertSignals(t, sent)
+	if !alive(pid) {
+		t.Fatalf("worker %d was signalled", pid)
+	}
+	assertInFlight(t, s, ledgerRun)
+	released, _, _, err := s.RestartWeftQueue(ledger.WeftDispatch{}, func(string, string) (string, error) { return "", nil })
+	if err != nil || len(released) != 0 {
+		t.Fatalf("queue restart released %+v, %v", released, err)
+	}
+}
+
+// assertHeld checks the row is still running once dispatch has claimed
+// others beside it.
+func assertHeld(t *testing.T, s *ledger.Store, ledgerRun string) {
+	t.Helper()
+	if row, err := s.Get(ledgerRun); err != nil || row.Status != ledger.StatusRunning {
+		t.Fatalf("held row = %+v %v, want it still running", row, err)
+	}
+}
+
+// dispatchBeside admits two launches beside the held row, with capacity to
+// spare for both, and dispatches them with users. It answers the agent user
+// each entry's segment was claimed with, none for an entry left waiting on
+// capacity.
+func dispatchBeside(t *testing.T, s *ledger.Store, users []ledger.WeftAgentUser) []ledger.WeftAgentUser {
+	t.Helper()
+	entries := admitLaunches(t, s, 2)
+	root := t.TempDir()
+	d := ledger.WeftDispatch{SharedRoot: filepath.Join(root, "shared"), RunDirRoot: filepath.Join(root, "runs"),
+		AgentUsers: users, Check: func(*ledger.WeftEntry) (string, string) { return "", "" }}
+	if c, err := s.WeftCapacity(); err != nil || c.Cap-c.Running < 2 {
+		t.Fatalf("capacity = %+v %v, want room for both entries", c, err)
+	}
+	if _, _, err := s.DispatchWeft(d); err != nil {
+		t.Fatal(err)
+	}
+	q, err := s.WeftQueue(time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]*ledger.WeftEntry{}
+	for _, e := range q.Entries {
+		states[e.ID] = e
+	}
+	got := make([]ledger.WeftAgentUser, len(entries))
+	for i, entry := range entries {
+		e := states[entry.ID]
+		switch {
+		case e == nil:
+			t.Fatalf("entry %s left the queue", entry.ID)
+		case !e.RunID.Valid:
+			if e.State != ledger.WeftEntryWaiting || e.WaitingReason.String != ledger.WeftWaitCapacity {
+				t.Fatalf("entry = %+v, want it dispatched or waiting on capacity", e)
+			}
+			continue
+		}
+		run, err := s.GetWeftRun(e.RunID.String)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seg := run.Segments[0]
+		got[i] = ledger.WeftAgentUser{Name: seg.AgentUser.String, UID: int(seg.AgentUID.Int64)}
+	}
+	return got
+}
+
+// admitLaunches binds n repositories and admits one launch entry for each.
+func admitLaunches(t *testing.T, s *ledger.Store, n int) []*ledger.WeftEntry {
+	t.Helper()
+	root := t.TempDir()
+	bindings := map[string]ledger.WeftBinding{}
+	var repos []string
+	for i := range n {
+		repo := filepath.Join(root, fmt.Sprintf("repo%d", i))
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		repos = append(repos, repo)
+		bindings[fmt.Sprintf("p%d", i)] = ledger.WeftBinding{Digest: "tk", RepositoryID: sandbox.RepositoryID(repo), Repository: repo}
+	}
+	if _, _, err := s.SyncWeftCatalog(bindings); err != nil {
+		t.Fatal(err)
+	}
+	var entries []*ledger.WeftEntry
+	if err := s.WeftTx(func(tx *ledger.WeftTx) error {
+		for i, repo := range repos {
+			e, err := tx.Admit(ledger.WeftAdmission{Kind: ledger.WeftEntryLaunch, Ticket: fmt.Sprintf("p%d/t-%04d", i, i),
+				Project: fmt.Sprintf("p%d", i), RepositoryID: sandbox.RepositoryID(repo), Repository: repo,
+				TokenID: "token", RequestKey: fmt.Sprintf("k%d", i)})
+			if err != nil {
+				return err
+			}
+			entries = append(entries, e)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return entries
 }
 
 // A live pid carrying another segment's --segment is not the worker and is

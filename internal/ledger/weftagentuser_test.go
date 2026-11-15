@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -27,7 +29,7 @@ func agentUserHost(t *testing.T, n int, users ...string) (*Store, WeftDispatch, 
 	if _, _, err := s.SyncWeftCatalog(bindings); err != nil {
 		t.Fatal(err)
 	}
-	d := WeftDispatch{SharedRoot: filepath.Join(root, "shared"), RunDirRoot: filepath.Join(root, "runs"), AgentUsers: users,
+	d := WeftDispatch{SharedRoot: filepath.Join(root, "shared"), RunDirRoot: filepath.Join(root, "runs"), AgentUsers: testAgentUsers(users...),
 		Check: func(*WeftEntry) (string, string) { return "", "" }}
 	var entries []*WeftEntry
 	if err := s.WeftTx(func(tx *WeftTx) error {
@@ -44,6 +46,24 @@ func agentUserHost(t *testing.T, n int, users ...string) (*Store, WeftDispatch, 
 		t.Fatal(err)
 	}
 	return s, d, entries
+}
+
+// testAgentUsers are names as dispatch reads them, weftagentN resolving to
+// uid 600+N.
+func testAgentUsers(names ...string) []WeftAgentUser {
+	users := make([]WeftAgentUser, len(names))
+	for i, name := range names {
+		users[i] = WeftAgentUser{Name: name, UID: testAgentUID(name)}
+	}
+	return users
+}
+
+func testAgentUID(name string) int {
+	n, err := strconv.Atoi(strings.TrimPrefix(name, "weftagent"))
+	if err != nil {
+		panic(name)
+	}
+	return 600 + n
 }
 
 // agentUsersOf maps each dispatched entry's run to the user its latest
@@ -121,6 +141,89 @@ func TestDispatchClaimsEachSegmentWithItsOwnAgentUser(t *testing.T) {
 	}
 }
 
+// An unsettled segment holds the uid it was claimed with, whatever its
+// account is called now: a configured user of that uid is never handed out,
+// though the segment recorded another name. A user it does not hold is.
+func TestDispatchHoldsAgentUsersByUID(t *testing.T) {
+	s, d, entries := agentUserHost(t, 2, "weftagent1", "weftagent2", "weftagent3")
+	if err := setCapacity(t, s, 4); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	renamed, err := s.ClaimWeft(WeftLaunch{Ticket: "old/renamed-0001", Project: "old", Repo: filepath.Join(root, "renamed"),
+		Branch: "old/renamed-0001", Worktree: filepath.Join(root, "w1"), RunDirRoot: d.RunDirRoot,
+		AgentUser: WeftAgentUser{Name: "weftold", UID: testAgentUID("weftagent2")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.DispatchWeft(d); err != nil {
+		t.Fatal(err)
+	}
+	users := agentUsersOf(t, s, entries)
+	if len(users) != 2 {
+		t.Fatalf("dispatched %v, want both entries", users)
+	}
+	for runID, user := range users {
+		run, err := s.GetWeftRun(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uid := run.Segments[0].AgentUID
+		if user == "weftagent2" || uid != (sql.NullInt64{Int64: int64(testAgentUID(user)), Valid: true}) {
+			t.Fatalf("dispatched run holds %q as %v, want weftagent1 or weftagent3 as its own uid: uid 602 is held", user, uid)
+		}
+	}
+	if a, ok, err := s.WeftSegmentAgent(renamed.Segments[0].LedgerRunID); !ok || err != nil ||
+		a.AgentUser != "weftold" || a.AgentUID != (sql.NullInt64{Int64: 602, Valid: true}) {
+		t.Fatalf("renamed row's agent = %+v %v %v", a, ok, err)
+	}
+}
+
+// An unsettled segment with no uid ran as an account no name is known to
+// reach, which could be any configured user's: while it is unsettled no
+// agent user is handed out, however many are configured and slots spare.
+// Once it settles they are again.
+func TestDispatchHandsOutNoAgentUserWhileAUIDIsUnknown(t *testing.T) {
+	s, d, entries := agentUserHost(t, 2, "weftagent1", "weftagent2", "weftagent3")
+	if err := setCapacity(t, s, 4); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	unknown, err := s.ClaimWeft(WeftLaunch{Ticket: "old/legacy-0002", Project: "old", Repo: filepath.Join(root, "legacy"),
+		Branch: "old/legacy-0002", Worktree: filepath.Join(root, "w2"), RunDirRoot: d.RunDirRoot,
+		AgentUser: WeftAgentUser{Name: "weftold", UID: 999}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE weft_segments SET agent_uid=NULL WHERE run_id=?`, unknown.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.DispatchWeft(d); err != nil {
+		t.Fatal(err)
+	}
+	if users := agentUsersOf(t, s, entries); len(users) != 0 {
+		t.Fatalf("dispatched %v while a segment's uid is unknown, want none", users)
+	}
+	q, err := s.WeftQueue(testClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range q.Entries {
+		if e.State != WeftEntryWaiting || e.WaitingReason.String != WeftWaitCapacity {
+			t.Fatalf("entry = %+v, want it waiting on capacity", e)
+		}
+	}
+	if err := s.MarkUnknown(unknown.Segments[0].LedgerRunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.DispatchWeft(d); err != nil {
+		t.Fatal(err)
+	}
+	if users := agentUsersOf(t, s, entries); len(users) != 2 {
+		t.Fatalf("dispatched %v once the segment settled, want both entries", users)
+	}
+}
+
 // A maintenance segment runs as the operator and holds no agent user.
 func TestMaintenanceSegmentsHoldNoAgentUser(t *testing.T) {
 	s, d, entries := agentUserHost(t, 1, "weftagent1")
@@ -148,7 +251,7 @@ func TestMaintenanceSegmentsHoldNoAgentUser(t *testing.T) {
 		t.Fatalf("maintenance row reads as an agent segment: %v %v", ok, err)
 	}
 	a, ok, err := s.WeftSegmentAgent(run.Segments[0].LedgerRunID)
-	if !ok || err != nil || a != (WeftAgentSegment{RunID: runID, Segment: 1, AgentUser: "weftagent1"}) {
+	if !ok || err != nil || a != (WeftAgentSegment{RunID: runID, Segment: 1, AgentUser: "weftagent1", AgentUID: sql.NullInt64{Int64: 601, Valid: true}}) {
 		t.Fatalf("launch row = %+v %v %v", a, ok, err)
 	}
 	for _, seg := range run.Segments {
@@ -238,7 +341,7 @@ func TestSchemaSevenMigratesToEight(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := claimVisible(t, s, "demo/migrated-0008")
-	for _, stmt := range []string{`ALTER TABLE weft_segments DROP COLUMN agent_user`,
+	for _, stmt := range []string{`ALTER TABLE weft_segments DROP COLUMN agent_uid`, `ALTER TABLE weft_segments DROP COLUMN agent_user`,
 		`ALTER TABLE weft_runs DROP COLUMN host_cleanup_hold`,
 		`ALTER TABLE weft_entries DROP COLUMN dismissed`,
 		`ALTER TABLE weft_questions DROP COLUMN questions`, `ALTER TABLE weft_answers DROP COLUMN answers`,
@@ -253,12 +356,144 @@ func TestSchemaSevenMigratesToEight(t *testing.T) {
 	}
 	defer s.Close()
 	var version string
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "11" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "12" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	got, err := s.GetWeftRun(run.ID)
 	if err != nil || len(got.Segments) != 1 || got.Segments[0].AgentUser.Valid {
 		t.Fatalf("migrated run = %+v %v", got, err)
+	}
+}
+
+// A ledger stamped 11 gains weft_segments.agent_uid, a segment claimed with
+// an agent user reading as holding no uid, and owes the uid backfill.
+func TestSchemaElevenMigratesToTwelve(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	run, err := s.ClaimWeft(WeftLaunch{Ticket: "demo/migrated-0012", Project: "demo", Repo: filepath.Join(root, "repo"),
+		Branch: "demo/migrated-0012", Worktree: filepath.Join(root, "worktree"), RunDirRoot: filepath.Join(root, "runs"),
+		AgentUser: WeftAgentUser{Name: "weftagent1", UID: 601}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owed := backfillOwed(t, s); owed {
+		t.Fatal("a fresh ledger owes the uid backfill")
+	}
+	s = reopenAtEleven(t, s, path)
+	defer s.Close()
+	var version string
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "12" {
+		t.Fatalf("version = %q %v", version, err)
+	}
+	got, err := s.GetWeftRun(run.ID)
+	if err != nil || len(got.Segments) != 1 || got.Segments[0].AgentUser.String != "weftagent1" || got.Segments[0].AgentUID.Valid {
+		t.Fatalf("migrated run = %+v %v", got, err)
+	}
+	if !backfillOwed(t, s) {
+		t.Fatal("the upgraded ledger does not owe the uid backfill")
+	}
+}
+
+// reopenAtEleven carries s back to schema 11, as a ledger the previous
+// binary wrote, and reopens it, which migrates it to 12.
+func reopenAtEleven(t *testing.T, s *Store, path string) *Store {
+	t.Helper()
+	for _, stmt := range []string{`ALTER TABLE weft_segments DROP COLUMN agent_uid`,
+		`UPDATE schema_meta SET value='11' WHERE key='schema_version'`} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrate 11 to 12: %v", err)
+	}
+	return s
+}
+
+func backfillOwed(t *testing.T, s *Store) bool {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_meta WHERE key=?`, weftAgentUIDBackfillKey).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n == 1
+}
+
+// The first backfill over an upgraded ledger resolves each unsettled
+// segment's recorded name once and records the uid; a name that does not
+// resolve leaves its segment with none, and a settled segment is not looked
+// up. A later backfill looks nothing up, so an account given the
+// unresolved name afterwards is never taken for the one the segment ran as.
+func TestBackfillWeftAgentUIDsResolvesEachUnsettledSegmentOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	claim := func(ticket, user string) *WeftRun {
+		run, err := s.ClaimWeft(WeftLaunch{Ticket: ticket, Project: "demo", Repo: filepath.Join(root, ticket),
+			Branch: ticket, Worktree: filepath.Join(root, "w-"+ticket), RunDirRoot: filepath.Join(root, "runs"),
+			AgentUser: WeftAgentUser{Name: user, UID: 1}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+	resolved, renamed, settled := claim("demo/a", "weftagent1"), claim("demo/b", "weftagent9"), claim("demo/c", "weftagent2")
+	if err := s.MarkUnknown(settled.Segments[0].LedgerRunID); err != nil {
+		t.Fatal(err)
+	}
+	s = reopenAtEleven(t, s, path)
+	defer s.Close()
+	var looked []string
+	directory := map[string]int{"weftagent1": 601, "weftagent2": 602}
+	lookup := func(name string) (int, error) {
+		looked = append(looked, name)
+		if uid, ok := directory[name]; ok {
+			return uid, nil
+		}
+		return 0, fmt.Errorf("user: unknown user %s", name)
+	}
+	if err := s.BackfillWeftAgentUIDs(lookup); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(looked)
+	if !slices.Equal(looked, []string{"weftagent1", "weftagent9"}) {
+		t.Fatalf("looked up %v, want the two unsettled segments' names", looked)
+	}
+	uidOf := func(run *WeftRun) sql.NullInt64 {
+		a, ok, err := s.WeftSegmentAgent(run.Segments[0].LedgerRunID)
+		if !ok || err != nil {
+			t.Fatalf("agent of %s = %v %v", run.ID, ok, err)
+		}
+		return a.AgentUID
+	}
+	if got := uidOf(resolved); got != (sql.NullInt64{Int64: 601, Valid: true}) {
+		t.Fatalf("resolved segment's uid = %v, want 601", got)
+	}
+	if got := uidOf(renamed); got.Valid {
+		t.Fatalf("unresolved segment's uid = %v, want none", got)
+	}
+	if got := uidOf(settled); got.Valid {
+		t.Fatalf("settled segment's uid = %v, want none", got)
+	}
+	if backfillOwed(t, s) {
+		t.Fatal("the backfill is still owed after it ran")
+	}
+
+	looked, directory["weftagent9"] = nil, 603
+	if err := s.BackfillWeftAgentUIDs(lookup); err != nil {
+		t.Fatal(err)
+	}
+	if len(looked) != 0 || uidOf(renamed).Valid {
+		t.Fatalf("a second backfill looked up %v and left %v, want nothing looked up", looked, uidOf(renamed))
 	}
 }
 

@@ -76,7 +76,7 @@ func TestCatalogRevisionOnRunPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 	runs := filepath.Join(root, "runs")
-	d := WeftDispatch{SharedRoot: filepath.Join(root, "weft"), RunDirRoot: runs, AgentUsers: []string{"weftagent1"},
+	d := WeftDispatch{SharedRoot: filepath.Join(root, "weft"), RunDirRoot: runs, AgentUsers: testAgentUsers("weftagent1"),
 		Check: func(*WeftEntry) (string, string) { return "", "" }}
 	const ticket = "demo/phase-0001"
 	if _, _, err := s.SyncWeftCatalog(map[string]WeftBinding{"demo": {Digest: "tk", RepositoryID: sandboxID(repo), Repository: repo}}); err != nil {
@@ -247,7 +247,7 @@ func TestOpenMigratesSchemaSixToSeven(t *testing.T) {
 	}
 	run := claimVisible(t, s, "demo/migrated-0001")
 	for _, stmt := range []string{`ALTER TABLE weft_catalog DROP COLUMN host_digest`,
-		`ALTER TABLE weft_segments DROP COLUMN agent_user`,
+		`ALTER TABLE weft_segments DROP COLUMN agent_uid`, `ALTER TABLE weft_segments DROP COLUMN agent_user`,
 		`ALTER TABLE weft_runs DROP COLUMN host_cleanup_hold`,
 		`ALTER TABLE weft_entries DROP COLUMN dismissed`,
 		`ALTER TABLE weft_questions DROP COLUMN questions`, `ALTER TABLE weft_answers DROP COLUMN answers`,
@@ -268,7 +268,7 @@ func TestOpenMigratesSchemaSixToSeven(t *testing.T) {
 	defer s.Close()
 	var version string
 	var digest sql.NullString
-	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "11" {
+	if err := s.db.QueryRow(`SELECT value FROM schema_meta WHERE key='schema_version'`).Scan(&version); err != nil || version != "12" {
 		t.Fatalf("version = %q %v", version, err)
 	}
 	if err := s.db.QueryRow(`SELECT host_digest FROM weft_catalog WHERE project='demo'`).Scan(&digest); err != nil || !digest.Valid {

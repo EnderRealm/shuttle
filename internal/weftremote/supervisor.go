@@ -102,11 +102,18 @@ type Supervisor struct {
 	// killUser kills every process of a segment's agent user; a test hands
 	// it a process table of its own.
 	killUser func(user string) ([]reap.UserProcess, error)
+	// lookupUID resolves an agent user's name to its uid, at dispatch and
+	// before each kill; a test hands it a directory of its own.
+	lookupUID func(name string) (int, error)
 }
 
 // defaultKillUser is the killer a new Supervisor starts with; the test binary
 // replaces it with one that fails, so no test reaches the real agent users.
 var defaultKillUser = reap.KillUser
+
+// defaultLookupUID is the directory a new Supervisor starts with; the test
+// binary replaces it with the fixture users'.
+var defaultLookupUID = reap.LookupUID
 
 func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger *log.Logger, locks ...*sync.RWMutex) *Supervisor {
 	stateMu := &sync.RWMutex{}
@@ -116,7 +123,7 @@ func NewSupervisor(cfg *config.Config, store *ledger.Store, home string, logger 
 	return &Supervisor{
 		cfg: cfg, store: store, home: home, log: logger, stateMu: stateMu,
 		active: make(map[string]*activeSegment), stopping: make(map[string]bool), output: newBroadcast(),
-		sharedRoot: config.HostedSharedRoot, killUser: defaultKillUser,
+		sharedRoot: config.HostedSharedRoot, killUser: defaultKillUser, lookupUID: defaultLookupUID,
 	}
 }
 
@@ -168,13 +175,32 @@ func (s *Supervisor) isStopping(runID string) bool {
 func landServed(w *workerInfo) bool { return w.has("land") && w.has("reconcile") }
 
 // dispatchBase is what dispatch mints runs and claims segments under: the
-// last probe, as the capabilities a client reads report it. It never probes,
-// so it is safe inside a ledger transaction.
+// last probe, as the capabilities a client reads report it, and each
+// configured agent user as the account directory resolves it now. It never
+// probes the worker, but it does look up every configured agent user, once
+// per call; callers build it inside ledger transactions, so each of those
+// lookups runs with the transaction open.
 func (s *Supervisor) dispatchBase() ledger.WeftDispatch {
 	return ledger.WeftDispatch{
 		SharedRoot: s.sharedRoot, RunDirRoot: filepath.Join(s.home, "runs", ledger.WeftAgent),
-		AgentUsers: s.cfg.Weft.AgentUsers, Land: landServed(s.worker.Load()),
+		AgentUsers: s.agentUsers(), Land: landServed(s.worker.Load()),
 	}
+}
+
+// agentUsers is weft.agent_users with the uid each name resolves to now. A
+// segment holds its user by that uid, so a name that does not resolve is
+// left out and no segment is claimed with it.
+func (s *Supervisor) agentUsers() []ledger.WeftAgentUser {
+	users := make([]ledger.WeftAgentUser, 0, len(s.cfg.Weft.AgentUsers))
+	for _, name := range s.cfg.Weft.AgentUsers {
+		uid, err := s.lookupUID(name)
+		if err != nil {
+			s.log.Printf("weft dispatch host=%s: agent user %s is not handed out: %v", s.hostID, name, err)
+			continue
+		}
+		users = append(users, ledger.WeftAgentUser{Name: name, UID: uid})
+	}
+	return users
 }
 
 // worktreeRoot is the --worktree-root every segment is launched with.
@@ -716,12 +742,16 @@ func ensureProcessGroupGone(pgid int) error {
 // agent user: every process of the user is killed, which reaches a
 // descendant that called setsid. The user is the segment's alone, so nothing
 // of it is another's. Until the kill establishes that none is left the
-// segment is not settled, so its user and its reservation are retained.
+// segment is not settled, so its user and its reservation are retained; so
+// too while the user's name no longer resolves to the uid it was claimed with.
 func (s *Supervisor) containUser(run *ledger.WeftRun, segment ledger.WeftSegment) error {
 	if !segment.AgentUser.Valid {
 		return nil
 	}
 	ids := segmentIDs(s.hostID, run.ID, segment, "")
+	if err := reap.VerifyAgentUID(segment.AgentUser.String, segment.AgentUID, s.lookupUID); err != nil {
+		return fmt.Errorf("weft segment %s: containment: %w; reservation retained", ids, err)
+	}
 	found, err := s.killUser(segment.AgentUser.String)
 	if len(found) > 0 {
 		names := make([]string, len(found))

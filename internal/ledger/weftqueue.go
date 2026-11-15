@@ -204,45 +204,57 @@ func (s *Store) ConfigureWeftAgentUsers(n int) error {
 	})
 }
 
-// weftHeldAgentUsersSQL is every agent user a pipeline segment holds: one
-// whose phase-1 row is claimed or running. A segment settles only once its
-// user's processes are gone, so a user is free again only after that.
-const weftHeldAgentUsersSQL = `SELECT s.agent_user FROM weft_segments s JOIN runs r ON r.id=s.ledger_run_id
+// weftUnsettledAgentSegmentsSQL is every pipeline segment that holds an agent
+// user: one whose phase-1 row is claimed or running. A segment settles only
+// once its user's processes are gone, so a user is free again only after that.
+const weftUnsettledAgentSegmentsSQL = ` FROM weft_segments s JOIN runs r ON r.id=s.ledger_run_id
 	WHERE s.agent_user IS NOT NULL AND r.status IN ('` + StatusClaimed + `','` + StatusRunning + `')`
 
-// freeAgentUser is the first of users no unsettled segment holds, or "" when
-// every one is held.
-func freeAgentUser(q querier, users []string) (string, error) {
-	rows, err := q.Query(weftHeldAgentUsersSQL)
+// freeAgentUser is the first of users no unsettled segment holds, or one with
+// no name when every one is held. A segment holds the uid it recorded, whatever
+// name that uid's account has since taken, since the uid is what its
+// containment kills. One that recorded no uid was claimed before uids were
+// recorded and its name did not resolve when the restart pass backfilled them
+// (BackfillWeftAgentUIDs): the uid it ran as is unknown and could be any
+// configured user's, so while it is unsettled none is free.
+func freeAgentUser(q querier, users []WeftAgentUser) (WeftAgentUser, error) {
+	rows, err := q.Query(`SELECT s.agent_uid` + weftUnsettledAgentSegmentsSQL)
 	if err != nil {
-		return "", err
+		return WeftAgentUser{}, err
 	}
-	held := map[string]bool{}
+	held, unknown := map[int64]bool{}, false
 	for rows.Next() {
-		var user string
-		if err := rows.Scan(&user); err != nil {
+		var uid sql.NullInt64
+		if err := rows.Scan(&uid); err != nil {
 			rows.Close()
-			return "", err
+			return WeftAgentUser{}, err
 		}
-		held[user] = true
+		if !uid.Valid {
+			unknown = true
+			continue
+		}
+		held[uid.Int64] = true
 	}
 	if err := rows.Close(); err != nil {
-		return "", err
+		return WeftAgentUser{}, err
+	}
+	if unknown {
+		return WeftAgentUser{}, nil
 	}
 	for _, user := range users {
-		if !held[user] {
+		if !held[int64(user.UID)] {
 			return user, nil
 		}
 	}
-	return "", nil
+	return WeftAgentUser{}, nil
 }
 
 // agentUser is the user the entry's pipeline segment is claimed with.
 // blocking has already made the entry wait while none is free, so none
 // being free here is a ledger that holds more segments than slots.
-func (t *WeftTx) agentUser(e *WeftEntry, d WeftDispatch) (string, error) {
+func (t *WeftTx) agentUser(e *WeftEntry, d WeftDispatch) (WeftAgentUser, error) {
 	user, err := freeAgentUser(t.tx, d.AgentUsers)
-	if err == nil && user == "" {
+	if err == nil && user.Name == "" {
 		err = fmt.Errorf("entry %s: every one of the %d agent users is held by an unsettled segment", e.ID, len(d.AgentUsers))
 	}
 	return user, err
@@ -1147,9 +1159,11 @@ func (t *WeftTx) SetCapacity(capacity int, revision int64) error {
 type WeftDispatch struct {
 	// SharedRoot is the root a new run's worktree is derived under.
 	SharedRoot, RunDirRoot string
-	// AgentUsers are the host's agent users: a pipeline segment is claimed
-	// with the first one no unsettled segment holds.
-	AgentUsers []string
+	// AgentUsers are the host's agent users with the uid each resolved to
+	// when the host read them: a pipeline segment is claimed with the first
+	// one no unsettled segment holds. A configured user whose name did not
+	// resolve is left out, and so never claimed.
+	AgentUsers []WeftAgentUser
 	// Land is whether the host serves landing: a run minted while it does is
 	// pending its landing from the start (§7.1).
 	Land bool
@@ -1233,7 +1247,7 @@ func (t *WeftTx) dispatchEntry(e *WeftEntry, d WeftDispatch, paused bool, c *Wef
 // cleanup entries ignore a landing pause and hold no slot (§6.1, §7.5);
 // every other entry needs a slot and, for the pipeline segment it claims
 // now or once its archive step is over, one of users free.
-func (t *WeftTx) blocking(e *WeftEntry, paused bool, c WeftCapacity, users []string) (reason, holderKind, holderID string, err error) {
+func (t *WeftTx) blocking(e *WeftEntry, paused bool, c WeftCapacity, users []WeftAgentUser) (reason, holderKind, holderID string, err error) {
 	if paused {
 		return WeftWaitHostPaused, "", "", nil
 	}
@@ -1261,7 +1275,7 @@ func (t *WeftTx) blocking(e *WeftEntry, paused bool, c WeftCapacity, users []str
 		return WeftWaitCapacity, "", "", nil
 	}
 	user, err := freeAgentUser(t.tx, users)
-	if err != nil || user == "" {
+	if err != nil || user.Name == "" {
 		return WeftWaitCapacity, "", "", err
 	}
 	return "", "", "", nil

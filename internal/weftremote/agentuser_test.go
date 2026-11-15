@@ -1,10 +1,12 @@
 package weftremote
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,6 +24,26 @@ import (
 // fixtureAgentUsers are a fixture host's weft.agent_users. No process is
 // ever killed as one: every fixture kills against a userTable.
 var fixtureAgentUsers = []string{"weftagent1", "weftagent2", "weftagent3"}
+
+// fixtureUIDs is the account directory a fixture host resolves its agent
+// users in: weftagentN is uid 600+N, none of them a real account's.
+var fixtureUIDs = map[string]int{"weftagent1": 601, "weftagent2": 602, "weftagent3": 603}
+
+func fixtureLookupUID(name string) (int, error) {
+	if uid, ok := fixtureUIDs[name]; ok {
+		return uid, nil
+	}
+	return 0, fmt.Errorf("user: unknown user %s", name)
+}
+
+// fixtureAgentUser is name as dispatch claims a segment with it.
+func fixtureAgentUser(name string) ledger.WeftAgentUser {
+	uid, err := fixtureLookupUID(name)
+	if err != nil {
+		panic(err)
+	}
+	return ledger.WeftAgentUser{Name: name, UID: uid}
+}
 
 // userTable is the agent users' process table as a fixture host sees it. A
 // kill as a user removes every process of that user but the stubborn ones,
@@ -318,6 +340,96 @@ func TestAgentUsersReturnToThePoolOnlyOnceTheirProcessesAreGone(t *testing.T) {
 	})
 }
 
+// directory is an account directory a test renames accounts in while the
+// host reads it.
+type directory struct {
+	mu   sync.Mutex
+	uids map[string]int
+}
+
+func (d *directory) lookup(name string) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if uid, ok := d.uids[name]; ok {
+		return uid, nil
+	}
+	return 0, fmt.Errorf("user: unknown user %s", name)
+}
+
+func (d *directory) set(uids map[string]int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.uids = uids
+}
+
+// weftagent1 is renamed weftagent3, which another account was called until
+// it was deleted, while a segment runs as it. The segment's settlement kills
+// nothing as the recorded name and keeps its slot, repository and uid held.
+// With spare capacity the next entry is claimed with weftagent2, the one
+// configured user still free: weftagent1 resolves to no uid and weftagent3
+// to the held one, so the entry after waits.
+func TestARenamedAgentUserKeepsItsUIDHeld(t *testing.T) {
+	h := newQueueHost(t)
+	dir := &directory{uids: maps.Clone(fixtureUIDs)}
+	h.service.segments.lookupUID = dir.lookup
+	ids := []string{"loom/first-0001", "ticket/second-0002", "warp/third-0003"}
+	for _, id := range ids {
+		h.ticket(id, ticket.StatusReady, 2)
+		h.mode(id, "hold")
+	}
+	first := h.waitDispatched(entryOf(h.launch(ids[0], "launch-"+ids[0]))["entry_id"].(string))
+	waitFor(t, func() bool { return h.run(first).Segments[0].StartedAt.Valid })
+	if seg := h.run(first).Segments[0]; seg.AgentUser.String != "weftagent1" || seg.AgentUID != (sql.NullInt64{Int64: 601, Valid: true}) {
+		t.Fatalf("first segment holds %v as %v, want weftagent1 as uid 601", seg.AgentUser, seg.AgentUID)
+	}
+
+	// Torn down by hand: the account is named back and the first segment
+	// settled, so the host's teardown finds nothing running.
+	t.Cleanup(func() {
+		dir.set(maps.Clone(fixtureUIDs))
+		h.release(ids[1])
+		h.release(ids[2])
+		run := h.run(first)
+		if _, err := h.service.segments.settle(run, run.Segments[0], "", "", nil); err != nil {
+			t.Error(err)
+		}
+	})
+	dir.set(map[string]int{"weftagent2": 602, "weftagent3": 601})
+	h.users.run("weftagent1", detached, false)
+	h.release(ids[0])
+	waitFor(t, func() bool {
+		return strings.Contains(h.logs.String(), "agent user weftagent1 was uid 601 when its segment was claimed and no longer resolves (user: unknown user weftagent1); the uid stays held") &&
+			strings.Contains(h.logs.String(), "reservation retained")
+	})
+	run := h.run(first)
+	if row, err := h.store.Get(run.Segments[0].LedgerRunID); err != nil || row.Status != ledger.StatusRunning || h.reaped(run) {
+		t.Fatalf("the renamed user's segment settled: %+v %v", row, err)
+	}
+	if n := h.users.kills("weftagent1"); n != 0 {
+		t.Fatalf("killed as weftagent1 %d time(s) after the rename, want none", n)
+	}
+	if left := h.users.left("weftagent1"); len(left) != 1 {
+		t.Fatalf("uid 601 runs %v, want its process left for the operator", left)
+	}
+
+	second := h.waitDispatched(entryOf(h.launch(ids[1], "launch-"+ids[1]))["entry_id"].(string))
+	if seg := h.run(second).Segments[0]; seg.AgentUser.String != "weftagent2" || seg.AgentUID != (sql.NullInt64{Int64: 602, Valid: true}) {
+		t.Fatalf("second segment holds %v as %v, want weftagent2 as uid 602", seg.AgentUser, seg.AgentUID)
+	}
+	if !strings.Contains(h.logs.String(), "agent user weftagent1 is not handed out: user: unknown user weftagent1") {
+		t.Fatalf("log does not say weftagent1 was not handed out:\n%s", h.logs.String())
+	}
+	third := entryOf(h.launch(ids[2], "launch-"+ids[2]))["entry_id"].(string)
+	if c, err := h.store.WeftCapacity(); err != nil || c.Running != 2 || c.Cap != 3 {
+		t.Fatalf("capacity = %+v %v, want a slot to spare", c, err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if e := h.entry(third); e["state"] != ledger.WeftEntryWaiting || e["waiting"].(map[string]any)["reason"] != ledger.WeftWaitCapacity ||
+		len(h.invocations(ids[2])) != 0 {
+		t.Fatalf("third entry = %v with %v, want it waiting: weftagent3 is uid 601, still held", e, h.invocations(ids[2]))
+	}
+}
+
 // A segment claimed before hosted segments ran as agent users, a run whose
 // worktree agent users cannot reach, and a worker that cannot launch as an
 // agent user are each refused before spawn, and the repository is released.
@@ -335,7 +447,7 @@ func TestPipelineSegmentsAreRefusedWithoutAnAgentUserLaunch(t *testing.T) {
 		{name: "old worktree", want: "is not under " + "WORKTREES", claim: func(t *testing.T, f *supervisorFixture) (*ledger.WeftRun, error) {
 			return f.store.ClaimWeft(ledger.WeftLaunch{Ticket: "demo/old", Project: "demo", Repo: f.repo, Branch: "demo/old",
 				Worktree:   filepath.Join(f.cfg.Weft.Root, "worktrees", "repo-1", "demo-old"),
-				RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent), AgentUser: "weftagent1"})
+				RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent), AgentUser: fixtureAgentUser("weftagent1")})
 		}},
 		{name: "v1 worker", want: "does not speak weft-worker/v2 with the agent_user capability", setup: func(t *testing.T, f *supervisorFixture) {
 			script := "#!/bin/sh\ncase \"$1\" in version|allowance-probe) exit 64 ;; esac\nexit 0\n"
@@ -361,7 +473,7 @@ func TestPipelineSegmentsAreRefusedWithoutAnAgentUserLaunch(t *testing.T) {
 				run, err = tt.claim(t, f)
 			} else {
 				run, err = f.store.ClaimWeft(ledger.WeftLaunch{Ticket: "demo/old", Project: "demo", Repo: f.repo, Branch: "demo/old",
-					Worktree: f.worktree(t, "demo/old"), RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent), AgentUser: "weftagent1"})
+					Worktree: f.worktree(t, "demo/old"), RunDirRoot: filepath.Join(f.root, "runs", ledger.WeftAgent), AgentUser: fixtureAgentUser("weftagent1")})
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -438,6 +550,7 @@ func (s *Supervisor) carrySeams(from *Supervisor) {
 	s.findKey = from.findKey
 	s.sharedRoot = from.sharedRoot
 	s.killUser = from.killUser
+	s.lookupUID = from.lookupUID
 }
 
 // errRealKiller is what a test-built supervisor's default killer panics with.
@@ -445,6 +558,7 @@ const errRealKiller = "test-built service reached the real agent-user killer: gi
 
 func init() {
 	defaultKillUser = func(user string) ([]reap.UserProcess, error) { panic(errRealKiller + " for " + user) }
+	defaultLookupUID = fixtureLookupUID
 }
 
 func TestFixtureServiceNeverKillsRealUsers(t *testing.T) {
