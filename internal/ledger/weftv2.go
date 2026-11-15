@@ -391,6 +391,32 @@ type WeftCounts struct {
 	QuestionsPending, RepositoriesPaused, TerminalsOpen int
 }
 
+// Action is the action the run is held for, as every read and run event
+// carries it: the one recorded on it, else run_halted for a hosted run that
+// halted and kept its worktree and head (§6.7). run_halted is derived, so the
+// archive or cleanup that changes the run's disposition drops it unwritten.
+func (r *WeftRun) Action() (reason, detail sql.NullString) {
+	if r.ActionRequired.Valid {
+		return r.ActionRequired, r.ActionDetail
+	}
+	if r.Origin == WeftOriginArchive || r.Phase != WeftPhaseEnded || r.Outcome.String != "halted" ||
+		r.Disposition != WeftDispositionRetained || !r.Head.Valid {
+		return sql.NullString{}, sql.NullString{}
+	}
+	at := ""
+	if r.HaltStage.Valid {
+		at = " at " + r.HaltStage.String
+	}
+	return sql.NullString{String: WeftActionRunHalted, Valid: true}, sql.NullString{Valid: true, String: fmt.Sprintf(
+		"the run halted%s and kept its worktree at %s; it is not resumable, so a fresh run archives that head and starts the ticket again from main",
+		at, r.Head.String)}
+}
+
+// weftActionRequiredSQL is Action's rule over weft_runs: a run carrying an
+// action, recorded or derived.
+const weftActionRequiredSQL = `(action_required IS NOT NULL OR (origin<>'` + WeftOriginArchive + `' AND phase='` +
+	WeftPhaseEnded + `' AND outcome='halted' AND disposition='` + WeftDispositionRetained + `' AND head IS NOT NULL))`
+
 // WeftDashboardCounts reads every dashboard figure in one statement, so they
 // agree with each other. Capacity's running count is weftRunningSQL's.
 func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
@@ -401,7 +427,7 @@ func (s *Store) WeftDashboardCounts() (WeftCounts, error) {
 		(SELECT value FROM weft_settings WHERE key=?),
 		(SELECT count(*) FROM weft_runs WHERE phase IN (?,?,?)),
 		(SELECT count(*) FROM weft_runs WHERE phase=?),
-		(SELECT count(*) FROM weft_runs WHERE action_required IS NOT NULL),
+		(SELECT count(*) FROM weft_runs WHERE `+weftActionRequiredSQL+`),
 		(SELECT count(*) FROM weft_questions WHERE state='pending'),
 		(SELECT count(*) FROM weft_entries WHERE state='waiting'),
 		(`+weftRunningSQL+`),

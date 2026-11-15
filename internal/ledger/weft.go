@@ -1544,12 +1544,13 @@ func appendRunEventTx(tx *sql.Tx, runID, stamp string) error {
 	if segment == 0 && run.Origin == WeftOriginArchive {
 		segment = WeftArchivedSegment
 	}
+	action, _ := run.Action()
 	return appendWeftEventTx(tx, runID, "run", stamp, func(seq int64) any {
 		return runEventPayload{
 			eventBase: newEventBase(seq, stamp, runID),
 			State:     stateOf(run.Phase), Phase: WeftV2Phase(run.Phase), Outcome: nullable(run.Outcome),
 			Failed: failedOf(run), Stopped: run.Stopped, Segment: segment,
-			ActionRequired: nullable(run.ActionRequired), Landing: run.SettlementState,
+			ActionRequired: nullable(action), Landing: run.SettlementState,
 			Disposition: run.Disposition, Revision: run.Revision,
 		}
 	})
@@ -1784,7 +1785,7 @@ func stateOf(phase string) string {
 }
 
 func failedOf(run *WeftRun) bool {
-	return run.Phase == WeftPhaseEnded && run.Outcome.String == "failed"
+	return run.Phase == WeftPhaseEnded && (run.Outcome.String == "failed" || run.Outcome.String == "halted")
 }
 
 func nullable(v sql.NullString) any {

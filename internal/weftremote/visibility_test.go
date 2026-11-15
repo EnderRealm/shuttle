@@ -288,7 +288,7 @@ func runShapeOf(t *testing.T) *shape {
 	stalled["run"].(map[string]any)["liveness"] = fixtureEvents(t, "events.sse")["liveness"][0].(map[string]any)["liveness"]
 	return learn(decode(t, fixtureBytes(t, "run.json")), decode(t, fixtureBytes(t, "run-landed.json")),
 		decode(t, fixtureBytes(t, "run-not-landed.json")), decode(t, fixtureBytes(t, "run-stale-base.json")),
-		decode(t, fixtureBytes(t, "run-stopped.json")), stalled)
+		decode(t, fixtureBytes(t, "run-stopped.json")), decode(t, fixtureBytes(t, "run-halted.json")), stalled)
 }
 
 // stateSamples are events.sse's and events-reset.sse's events, with a stage

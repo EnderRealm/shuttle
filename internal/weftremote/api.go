@@ -183,7 +183,7 @@ func runState(run *ledger.WeftRun) string {
 }
 
 func runFailed(run *ledger.WeftRun) bool {
-	return run.Phase == ledger.WeftPhaseEnded && run.Outcome.String == "failed"
+	return run.Phase == ledger.WeftPhaseEnded && (run.Outcome.String == "failed" || run.Outcome.String == "halted")
 }
 
 func nullString(v sql.NullString) any {

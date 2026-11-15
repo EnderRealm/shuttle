@@ -1034,6 +1034,246 @@ func TestFreshArchivesThenStartsANewRun(t *testing.T) {
 	h.settle()
 }
 
+// runHaltedDetail is the action detail a run that halted at stage and kept
+// its worktree at head carries (run-halted.json).
+func runHaltedDetail(stage, head string) string {
+	return "the run halted at " + stage + " and kept its worktree at " + head +
+		"; it is not resumable, so a fresh run archives that head and starts the ticket again from main"
+}
+
+// lastRunEvent is the newest run event written for the run after seq.
+func (h *queueHost) lastRunEvent(seq int64, runID string) map[string]any {
+	h.t.Helper()
+	var last map[string]any
+	for _, ev := range h.eventsSince(seq) {
+		if ev.Type == "run" && ev.RunID == runID {
+			last = decode(h.t, ev.Payload).(map[string]any)
+		}
+	}
+	if last == nil {
+		h.t.Fatalf("no run event for %s after %d", runID, seq)
+	}
+	return last
+}
+
+// runHeader is the run's row in the history (runs.json).
+func (h *queueHost) runHeader(runID string) map[string]any {
+	h.t.Helper()
+	for _, r := range h.get("/v2/runs")["runs"].([]any) {
+		if r.(map[string]any)["run_id"] == runID {
+			return r.(map[string]any)
+		}
+	}
+	h.t.Fatalf("run %s is not listed", runID)
+	return nil
+}
+
+// A run that halted and kept its worktree and head reads run_halted with
+// fresh, terminal and dismiss in every view of it — the run, its history row,
+// its ticket's run and its run events — and stays over; a halted run with no
+// head, or whose worktree was dismissed, carries no action, and the
+// dashboard counts only the runs that do (§6.7).
+func TestHaltedRunOffersRunHalted(t *testing.T) {
+	h := newLandingHost(t)
+	kept, headless, dismissed := "weft/example-fourth-6e4f", "loom/example-headless-1a2b", "warp/example-dismissed-3c4d"
+	for _, id := range []string{kept, headless, dismissed} {
+		h.ticket(id, ticket.StatusReady, 2)
+	}
+	noHead := h.halted(headless)
+	for _, ev := range noHead {
+		if ev["event"] == "graded" {
+			ev["head"] = nil
+		}
+	}
+	h.script(kept, 1, h.halted(kept))
+	h.script(headless, 1, noHead)
+	h.script(dismissed, 1, h.halted(dismissed))
+	before := asOf(t, h.store)
+	runs := map[string]*ledger.WeftRun{}
+	for _, id := range []string{kept, headless, dismissed} {
+		runs[id] = h.waitReaped(h.waitDispatched(entryOf(h.launch(id, "l-"+slugOf(id)))["entry_id"].(string)))
+		if runs[id].Outcome.String != "halted" || runs[id].Disposition != ledger.WeftDispositionRetained {
+			t.Fatalf("halted run of %s = %+v", id, runs[id])
+		}
+	}
+	if runs[headless].Head.Valid || runs[kept].Head.String != fixtureHead {
+		t.Fatalf("heads: kept %v, headless %v", runs[kept].Head, runs[headless].Head)
+	}
+
+	want := map[string]any{"reason": ledger.WeftActionRunHalted, "detail": runHaltedDetail("review", fixtureHead),
+		"options": []any{"fresh", "terminal", "dismiss"}}
+	for _, id := range []string{kept, dismissed} {
+		run := runs[id]
+		doc := h.get("/v2/runs/" + run.ID)
+		runShapeOf(t).check(t, "run", doc)
+		got := doc["run"].(map[string]any)
+		if !reflect.DeepEqual(got["action_required"], want) || got["state"] != "over" || got["phase"] != "ended" ||
+			got["outcome"] != "halted" || got["failed"] != true || got["question"] != nil {
+			t.Errorf("halted run of %s = %v", id, got)
+		}
+		if result := h.get("/v2/runs/" + run.ID + "/result")["result"].(map[string]any); result["failed"] != true {
+			t.Errorf("result of %s = %v", id, result)
+		}
+		if header := h.runHeader(run.ID); header["action_required"] != ledger.WeftActionRunHalted || header["state"] != "over" ||
+			header["failed"] != true {
+			t.Errorf("history row of %s = %v", id, header)
+		}
+		if ref := h.get("/v2/tickets/" + id)["ticket"].(map[string]any)["run"].(map[string]any); ref["action_required"] != ledger.WeftActionRunHalted {
+			t.Errorf("ticket %s's run = %v", id, ref)
+		}
+		if ev := h.lastRunEvent(before, run.ID); ev["action_required"] != ledger.WeftActionRunHalted || ev["state"] != "over" ||
+			ev["failed"] != true {
+			t.Errorf("run event of %s = %v", id, ev)
+		}
+	}
+	h.send(http.MethodPost, "/v2/runs/"+runs[kept].ID+"/resume", "r-kept", revisionBody(runs[kept].Revision)).
+		refused(t, http.StatusConflict, "run_not_resumable")
+
+	noAction := func(id string) {
+		t.Helper()
+		run := h.run(runs[id].ID)
+		if got := h.get("/v2/runs/" + run.ID)["run"].(map[string]any); got["action_required"] != nil || got["state"] != "over" {
+			t.Errorf("run of %s = %v", id, got)
+		}
+		if header := h.runHeader(run.ID); header["action_required"] != nil {
+			t.Errorf("history row of %s = %v", id, header)
+		}
+		if ev := h.lastRunEvent(before, run.ID); ev["action_required"] != nil {
+			t.Errorf("run event of %s = %v", id, ev)
+		}
+	}
+	noAction(headless)
+	actionCount := func() any {
+		return h.get("/v2/dashboard")["dashboard"].(map[string]any)["runs"].(map[string]any)["action_required"]
+	}
+	if n := actionCount(); n != float64(2) {
+		t.Fatalf("dashboard action_required = %v with two runs offering run_halted", n)
+	}
+
+	if err := os.MkdirAll(h.worktree(dismissed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.script(dismissed, 2, maintainedLine(t, "worker-maintained-cleanup.json", nil))
+	h.send(http.MethodPost, "/v2/runs/"+runs[dismissed].ID+"/dismiss", "d-dismissed",
+		dismissBody(runs[dismissed].Revision, runs[dismissed].Worktree)).expect(t, http.StatusAccepted, "dismiss-response.json")
+	waitFor(t, func() bool {
+		run := h.run(runs[dismissed].ID)
+		return run.Disposition == ledger.WeftDispositionCleaned && h.reaped(run)
+	})
+	noAction(dismissed)
+	if n := actionCount(); n != float64(1) {
+		t.Fatalf("dashboard action_required = %v once the dismissed run's worktree is gone", n)
+	}
+	h.settle()
+}
+
+// A halted run's GET /v2/runs/{id} is run-halted.json: the fixture's keys at
+// every position, its state and outcome, and its action with the detail
+// naming this run's halt stage and head. The worker reports the fixture's
+// summary, which the run carries as sent.
+func TestHaltedRunMatchesRunHaltedFixture(t *testing.T) {
+	h := newLandingHost(t)
+	id := "weft/example-fourth-6e4f"
+	h.ticket(id, ticket.StatusReady, 2)
+	fixture := decode(t, fixtureBytes(t, "run-halted.json"))
+	want := fixture.(map[string]any)["run"].(map[string]any)
+	summary := decode(t, fixtureBytes(t, "run-halted.json")).(map[string]any)["run"].(map[string]any)["summary"].(map[string]any)
+	summary["report"].(map[string]any)["ticket"] = id
+	lines := h.halted(id)
+	for _, ev := range lines {
+		if ev["event"] == "summarized" {
+			ev["summary"] = summary
+		}
+	}
+	h.script(id, 1, lines)
+	run := h.waitReaped(h.waitDispatched(entryOf(h.launch(id, "l-halted"))["entry_id"].(string)))
+	doc := h.get("/v2/runs/" + run.ID)
+	learn(fixture).check(t, "run", doc)
+	got := doc["run"].(map[string]any)
+	if !reflect.DeepEqual(got["summary"], summary) {
+		t.Errorf("run.summary = %v, the worker reported %v", got["summary"], summary)
+	}
+	for _, key := range []string{"state", "phase", "outcome", "failed", "stopped", "failure", "disposition", "archive_ref",
+		"supersedes", "superseded_by", "liveness", "question"} {
+		if !reflect.DeepEqual(got[key], want[key]) {
+			t.Errorf("run.%s = %v, run-halted.json has %v", key, got[key], want[key])
+		}
+	}
+	if got["head"] != run.Head.String || got["settlement"].(map[string]any)["state"] != want["settlement"].(map[string]any)["state"] {
+		t.Errorf("run = %v", got)
+	}
+	gotAction, wantAction := got["action_required"].(map[string]any), want["action_required"].(map[string]any)
+	halt := want["halt"].(map[string]any)["stage"].(string)
+	if wantDetail := runHaltedDetail(halt, want["head"].(string)); wantAction["detail"] != wantDetail {
+		t.Fatalf("run-halted.json's detail is %q, not %q", wantAction["detail"], wantDetail)
+	}
+	if gotAction["reason"] != wantAction["reason"] || !reflect.DeepEqual(gotAction["options"], wantAction["options"]) ||
+		gotAction["detail"] != runHaltedDetail(run.HaltStage.String, run.Head.String) {
+		t.Errorf("action_required = %v, run-halted.json has %v", gotAction, wantAction)
+	}
+	h.settle()
+}
+
+// Fresh over a halted run that kept its worktree and head — the run offering
+// it — archives that head under refs/weft/archive/<run> with no force, the
+// archive worker deleting the branch only where it still names the head, then
+// starts the ticket again with a launch, not a resume; the old run reads
+// archived and superseded and offers nothing more (§6.7).
+func TestFreshOfFailedRunStartsFromMain(t *testing.T) {
+	h := newLandingHost(t)
+	id := "weft/example-fourth-6e4f"
+	h.ticket(id, ticket.StatusReady, 2)
+	old := h.haltedRun(id)
+	action, _ := h.get("/v2/runs/" + old.ID)["run"].(map[string]any)["action_required"].(map[string]any)
+	if action["reason"] != ledger.WeftActionRunHalted || !slices.Contains(action["options"].([]any), any("fresh")) {
+		t.Fatalf("halted run's action = %v", action)
+	}
+
+	h.script(id, 2, maintainedLine(t, "worker-maintained-archive.json", map[string]any{
+		"archive_ref": ledger.WeftArchiveRef(old.ID), "head": fixtureHead}))
+	before := asOf(t, h.store)
+	accepted := h.send(http.MethodPost, "/v2/runs/"+old.ID+"/fresh", "f-halted", freshBody(old.Revision, old.Worktree, fixtureHead))
+	accepted.expect(t, http.StatusAccepted, "fresh-response.json")
+	entry := entryOf(accepted)
+	newRun := h.waitDispatched(entry["entry_id"].(string))
+	h.waitReaped(newRun)
+
+	archived := h.run(old.ID)
+	if archived.Disposition != ledger.WeftDispositionArchived || archived.SupersededBy.String != newRun ||
+		archived.ArchiveRef.String != "refs/weft/archive/"+old.ID || archived.Segments[1].Kind != ledger.WeftSegmentArchive {
+		t.Fatalf("archived run = %+v", archived)
+	}
+	started := h.run(newRun)
+	if started.Supersedes.String != old.ID || started.EntryID.String != entry["entry_id"] || started.Segments[0].Kind != "launch" {
+		t.Fatalf("new run = %+v", started)
+	}
+	argv := h.argv()
+	if !strings.Contains(argv, "archive --contract weft-worker/v2 --run "+old.ID+" --segment 2 --ticket "+id) ||
+		!strings.Contains(argv, " --archive-ref refs/weft/archive/"+old.ID+" --head "+fixtureHead) || strings.Contains(argv, "force") ||
+		!strings.Contains(argv, "segment --contract weft-worker/v2 --run "+newRun) || strings.Contains(argv, "--resume") {
+		t.Fatalf("argv = %s", argv)
+	}
+
+	doc := h.get("/v2/runs/" + old.ID)
+	runShapeOf(t).check(t, "run", doc)
+	if got := doc["run"].(map[string]any); got["action_required"] != nil || got["disposition"] != ledger.WeftDispositionArchived ||
+		got["superseded_by"] != newRun || got["archive_ref"] != "refs/weft/archive/"+old.ID {
+		t.Fatalf("archived run = %v", got)
+	}
+	if header := h.runHeader(old.ID); header["action_required"] != nil || header["disposition"] != ledger.WeftDispositionArchived {
+		t.Fatalf("archived run's history row = %v", header)
+	}
+	if ev := h.lastRunEvent(before, old.ID); ev["action_required"] != nil || ev["disposition"] != ledger.WeftDispositionArchived {
+		t.Fatalf("archived run's run event = %v", ev)
+	}
+	if got := h.get("/v2/runs/" + newRun)["run"].(map[string]any); got["supersedes"] != old.ID {
+		t.Fatalf("new run = %v", got)
+	}
+	h.send(http.MethodPost, "/v2/runs/"+old.ID+"/fresh", "f-again", freshBody(archived.Revision, old.Worktree, fixtureHead)).
+		refused(t, http.StatusConflict, "run_over")
+	h.settle()
+}
+
 // A legacy archive imports as history only: archived runs labelled with the
 // archive, readable, never live — every command but a read refuses them —
 // and a second import of the same archive changes nothing (§14.3).

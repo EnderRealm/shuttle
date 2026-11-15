@@ -47,6 +47,9 @@ const (
 	// WeftActionStaleBase is the action a run is held for when its base went
 	// stale under it (§6.7).
 	WeftActionStaleBase = "stale_base"
+	// WeftActionRunHalted is the action a run that halted and kept its
+	// worktree and head offers (§6.7): fresh, since it is not resumable.
+	WeftActionRunHalted = "run_halted"
 
 	weftQueueRevisionKey = "queue_revision"
 )

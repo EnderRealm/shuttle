@@ -17,13 +17,15 @@ var actionOptions = map[string][]string{
 	"stale_base":        {"fresh", "terminal", "dismiss"},
 	"landing_unsettled": {"reconcile", "terminal", "continue"},
 	"branch_exists":     {"fresh"},
+	"run_halted":        {"fresh", "terminal", "dismiss"},
 }
 
 // v2RunRef is the run a catalog entry shows.
 func v2RunRef(run *ledger.WeftRun) map[string]any {
+	action, _ := run.Action()
 	return map[string]any{
 		"run_id": run.ID, "state": runState(run), "phase": ledger.WeftV2Phase(run.Phase),
-		"outcome": nullString(run.Outcome), "action_required": nullString(run.ActionRequired),
+		"outcome": nullString(run.Outcome), "action_required": nullString(action),
 		"landing": run.SettlementState,
 	}
 }
@@ -46,13 +48,14 @@ func v2RunHeader(run *ledger.WeftRun) map[string]any {
 	if run.Question != nil {
 		questionID = run.Question.ID
 	}
+	action, _ := run.Action()
 	return map[string]any{
 		"run_id": run.ID, "ticket": run.Ticket, "project": run.Project,
 		"repository_id": run.RepositoryID, "origin": run.Origin, "recorded_under": run.RecordedUnder,
 		"archive_id": nullString(run.ArchiveID), "state": runState(run),
 		"phase": ledger.WeftV2Phase(run.Phase), "outcome": nullString(run.Outcome),
 		"failed": runFailed(run), "stopped": run.Stopped,
-		"action_required": nullString(run.ActionRequired), "landing": run.SettlementState,
+		"action_required": nullString(action), "landing": run.SettlementState,
 		"disposition": run.Disposition, "segment": segment, "question_id": questionID,
 		"created_at": run.CreatedAt, "updated_at": run.UpdatedAt, "ended_at": nullString(run.EndedAt),
 	}
@@ -78,12 +81,12 @@ type runReader interface {
 // v2Run is the full run (run.json).
 func v2Run(run *ledger.WeftRun, store runReader) (map[string]any, error) {
 	var action, failure any
-	if run.ActionRequired.Valid {
-		options := actionOptions[run.ActionRequired.String]
+	if reason, detail := run.Action(); reason.Valid {
+		options := actionOptions[reason.String]
 		if options == nil {
 			options = []string{}
 		}
-		action = map[string]any{"reason": run.ActionRequired.String, "detail": run.ActionDetail.String, "options": options}
+		action = map[string]any{"reason": reason.String, "detail": detail.String, "options": options}
 	}
 	// The run's failure is its pipeline's: a reconcile, cleanup or archive
 	// segment after it has none of its own to report.
