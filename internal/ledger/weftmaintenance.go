@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -395,6 +396,67 @@ func (t *WeftTx) CleanFinishedRun(runID string, d WeftDispatch) error {
 	return t.cleanFinished([]string{runID}, d)
 }
 
+// EndFinishedParked ends every parked hosted run of projects — of every
+// project when projects is nil — whose ticket finished reads done or closed:
+// nothing is left to answer its question for, so the question is withdrawn
+// and the run is over, stopped but not by the operator, its worktree and
+// branch retained (§6.5). A host cleanup hold does not spare it; the hold
+// bounds cleanup, not the question. It runs before CleanFinished, so the run
+// it ends is evaluated for host cleanup as any other that is over.
+func (t *WeftTx) EndFinishedParked(projects []string, finished func(string) bool) error {
+	if projects != nil && len(projects) == 0 {
+		return nil
+	}
+	query := `SELECT id,ticket FROM weft_runs WHERE origin=? AND phase=?`
+	args := []any{WeftOriginHosted, WeftPhaseParked}
+	if projects != nil {
+		query += ` AND project IN (?` + strings.Repeat(`,?`, len(projects)-1) + `)`
+		for _, p := range projects {
+			args = append(args, p)
+		}
+	}
+	rows, err := t.tx.Query(query+` ORDER BY created_at,id`, args...)
+	if err != nil {
+		return err
+	}
+	var ids, tickets []string
+	for rows.Next() {
+		var id, ticket string
+		if err := rows.Scan(&id, &ticket); err != nil {
+			rows.Close()
+			return err
+		}
+		if finished(ticket) {
+			ids, tickets = append(ids, id), append(tickets, ticket)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for i, id := range ids {
+		summary, err := finishedTicketSummary(tickets[i])
+		if err != nil {
+			return err
+		}
+		if err := endWeftParkedTx(t.tx, id, t.Stamp(), false, summary); err != nil {
+			return err
+		}
+		t.Changes = append(t.Changes, WeftChange{Action: "ended", RunID: id, Kind: "parked", Ticket: tickets[i],
+			Detail: tickets[i] + " is done or closed in tk"})
+	}
+	return nil
+}
+
+// finishedTicketSummary is the summary of a parked run ended because its
+// ticket is done or closed in tk.
+func finishedTicketSummary(ticket string) (string, error) {
+	summary, err := json.Marshal(struct {
+		State  string `json:"state"`
+		Reason string `json:"reason"`
+	}{"unavailable", "ticket " + ticket + " is done or closed in tk"})
+	return string(summary), err
+}
+
 // cleanFinished admits, for each of runs that qualifies and whose ticket
 // d.Finished reads done or closed, the cleanup entry a dismiss would — as
 // the host admits its own, with no request behind it — and dispatches it in
@@ -541,10 +603,13 @@ func refuseCleanupTx(tx *sql.Tx, runID, detail, stamp string) (held bool, err er
 // RecordWeftMaintained records a cleanup or archive worker's terminal event
 // (§11.3). A cleanup done leaves the run cleaned — its history and branch
 // stay; one refused invalidates its entry and holds the run from host
-// cleanup, changing nothing else. A parked run the host cleaned is ended as
-// a stop ends one, its pending question withdrawn: nothing can answer it once
-// its worktree is gone (§6.8). An archive's result is settled at reap, by
-// SettleWeftArchive. held is whether a refusal set the run's hold.
+// cleanup, changing nothing else. A parked run the host cleaned before any
+// catalog pass ended it — a dispatch can admit its cleanup first — is ended
+// as EndFinishedParked ends one, its pending question withdrawn and no
+// operator stop marked: its ticket is done or closed, and nothing can answer
+// it once its worktree is gone (§6.5, §6.8). An archive's result is settled
+// at reap, by SettleWeftArchive. held is whether a refusal set the run's
+// hold.
 func (s *Store) RecordWeftMaintained(runID string, segment int, op, result, detail string) (held bool, err error) {
 	err = s.withTx(func(tx *sql.Tx) error {
 		stamp := weftTimestamp(s.now())
@@ -569,7 +634,11 @@ func (s *Store) RecordWeftMaintained(runID string, segment int, op, result, deta
 			return err
 		}
 		if token == WeftHostToken && run.Phase == WeftPhaseParked {
-			if err := stopWeftParkedTx(tx, runID, stamp); err != nil {
+			summary, err := finishedTicketSummary(run.Ticket)
+			if err != nil {
+				return err
+			}
+			if err := endWeftParkedTx(tx, runID, stamp, false, summary); err != nil {
 				return err
 			}
 		}

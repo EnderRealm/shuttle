@@ -248,7 +248,8 @@ func projectDigest(p *catalogProject, snap *ticket.Snapshot) (string, error) {
 
 // recordCatalog raises catalog_revision for every project whose digest moved,
 // with its catalog event, revalidates those projects' waiting entries against
-// the read (§5.2, §6.3), then evaluates their retained runs for host-started
+// the read (§5.2, §6.3), ends their parked runs whose ticket the read has
+// finished (§6.5), then evaluates their retained runs for host-started
 // cleanup (§6.8), starting the cleanups that dispatched once it commits. The
 // caller holds stateMu for writing.
 func (s *Service) recordCatalog(c *catalog) error {
@@ -288,6 +289,9 @@ func (s *Service) recordCatalogTx(tx *ledger.WeftTx, c *catalog) error {
 	}
 	d := s.dispatchConfig(c)
 	if err := tx.RevalidateEntries(changed, d); err != nil {
+		return err
+	}
+	if err := tx.EndFinishedParked(changed, c.finished); err != nil {
 		return err
 	}
 	return tx.CleanFinished(changed, d)

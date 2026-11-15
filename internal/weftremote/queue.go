@@ -351,7 +351,8 @@ func (s *Service) dispatch() {
 func (s *Service) dispatchWith(c *catalog) {
 	// worker_bin is re-probed when it changed (§2.6), so the capabilities a
 	// client reads follow the installed worker. A re-probe that turns cleanup
-	// served evaluates every retained run, as a restart does (§6.8).
+	// served ends every finished parked run and evaluates every retained run,
+	// as a restart does (§6.5, §6.8).
 	s.segments.refreshWorker()
 	served := s.served("cleanup")
 	prev := s.cleanupServed.Swap(served)
@@ -362,6 +363,9 @@ func (s *Service) dispatchWith(c *catalog) {
 	s.stateMu.Lock()
 	err := s.store.WeftTx(func(t *ledger.WeftTx) error {
 		if turned {
+			if err := t.EndFinishedParked(nil, c.finished); err != nil {
+				return err
+			}
 			if err := t.CleanFinished(nil, d); err != nil {
 				return err
 			}
@@ -389,9 +393,10 @@ func (s *Service) dispatchWith(c *catalog) {
 // daemon has already run (steps 1 and 2) and precede the listener and any
 // dispatch; then the worker probe (§2.6), the retention prune (§8.1) and the
 // Codex allowance probe, which runs in the background (§5.3). The reconciles
-// step 2 claimed start here, with the runs step 5 minted; then every retained
-// run of every project is evaluated for host-started cleanup (§6.8), which
-// picks up runs retained before it shipped and changes missed while the
+// step 2 claimed start here, with the runs step 5 minted; then every parked
+// run whose ticket tk reads finished is ended (§6.5) and every retained run of
+// every project is evaluated for host-started cleanup (§6.8), which picks up
+// runs parked or retained before either shipped and changes missed while the
 // daemon was down, all before dispatch.
 func (s *Service) Restart() error {
 	if err := s.interruptTerminals(); err != nil {
@@ -421,15 +426,17 @@ func (s *Service) Restart() error {
 	// tk read: until then the first dispatch that reads tk sees a turn and
 	// runs it (§6.8).
 	s.cleanupServed.Store(false)
-	if !s.served("cleanup") {
+	c, err := s.readCatalog()
+	if err != nil {
+		s.log.Printf("weft restart host=%s: restart ended no parked run and evaluated no run for host cleanup, tk could not be read: %v", s.hostID, err)
 		return nil
 	}
-	d := s.cleanupDispatch("restart")
-	if d.Finished == nil {
-		return nil
-	}
+	d := s.dispatchConfig(c)
 	s.stateMu.Lock()
 	err = s.store.WeftTx(func(t *ledger.WeftTx) error {
+		if err := t.EndFinishedParked(nil, c.finished); err != nil {
+			return err
+		}
 		if err := t.CleanFinished(nil, d); err != nil {
 			return err
 		}
@@ -440,7 +447,9 @@ func (s *Service) Restart() error {
 	if err != nil {
 		return err
 	}
-	s.cleanupServed.Store(true)
+	if d.Finished != nil {
+		s.cleanupServed.Store(true)
+	}
 	s.logChanges("", changes)
 	s.spawn(spawn)
 	return nil

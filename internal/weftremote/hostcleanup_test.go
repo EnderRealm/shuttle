@@ -3,6 +3,7 @@ package weftremote
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -196,9 +197,10 @@ func (h *queueHost) haltedRun(id string) *ledger.WeftRun {
 // A retained run whose ticket is finished outside Shuttle is cleaned by the
 // host with no request (§6.8): the catalog change admits the cleanup entry a
 // dismiss would, dispatched with it, and its worker removes the worktree
-// without force and keeps the branch. A parked run so cleaned is ended as a
-// stop ends it, its question withdrawn; a run whose landing finishes its
-// ticket is cleaned in the commit that reaps it.
+// without force and keeps the branch. A parked run is ended by the same
+// change, its question withdrawn, and then cleaned as any run that is over; a
+// run whose landing finishes its ticket is cleaned in the commit that reaps
+// it.
 func TestHostCleansRetainedRunOnceTicketFinished(t *testing.T) {
 	h := newHostCleanupHost(t)
 	halted, parked, lands := "weft/example-second-4c2d", "loom/example-parked-1a2b", "warp/example-lands-3c4d"
@@ -278,9 +280,9 @@ func TestHostCleansRetainedRunOnceTicketFinished(t *testing.T) {
 		t.Errorf("log lacks the host-started admission:\n%s", h.logs.String())
 	}
 
-	// A parked run qualifies: it has no process, and its pending settlement
-	// has no worker to intend a step. Cleaned, it is ended stopped and its
-	// question withdrawn.
+	// A parked run of a finished ticket is ended stopped, its question
+	// withdrawn (§6.5), and so qualifies: it has no process, and its landing
+	// was never graded.
 	park := h.parkedRun(parked)
 	h.addWorktree(park)
 	question, err := h.store.PendingWeftQuestion(park.ID)
@@ -400,9 +402,9 @@ func TestHostLeavesRetainedRunWhileTicketUnfinished(t *testing.T) {
 
 // A host-started cleanup of a dirty worktree is refused with git's reason:
 // the entry is invalidated cleanup_refused, the run, its tree and its branch
-// are as they were — a parked run still parked with its question pending —
-// and the hold keeps any later catalog change or restart from queueing it
-// again (§6.8).
+// are as they were — a parked run as the catalog change left it, ended with
+// its question withdrawn (§6.5) — and the hold keeps any later catalog change
+// or restart from queueing it again (§6.8).
 func TestHostCleanupRefusedForDirtyTree(t *testing.T) {
 	h := newHostCleanupHost(t)
 	halted, parked := "weft/example-dirty-1a2b", "loom/example-parked-3c4d"
@@ -418,6 +420,9 @@ func TestHostCleanupRefusedForDirtyTree(t *testing.T) {
 	}
 	h.finish(halted, ticket.StatusDone)
 	h.finish(parked, ticket.StatusDone)
+	// The parked run was ended by the catalog change, before its cleanup was
+	// admitted: one revision for the end, none for the refusal.
+	runs[1].Phase, runs[1].Revision = ledger.WeftPhaseEnded, runs[1].Revision+1
 
 	for _, run := range runs {
 		var entries []hostEntry
@@ -441,7 +446,7 @@ func TestHostCleanupRefusedForDirtyTree(t *testing.T) {
 			t.Fatalf("run %s has no host cleanup hold", run.Ticket)
 		}
 	}
-	if q, err := h.store.PendingWeftQuestion(runs[1].ID); err != nil || q.State != "pending" {
+	if q, err := h.store.LatestWeftQuestion(runs[1].ID); err != nil || q.State != "withdrawn" {
 		t.Fatalf("parked run's question after the refusal = %+v %v", q, err)
 	}
 	if !strings.Contains(h.logs.String(), "host cleanup hold set") {
@@ -471,6 +476,52 @@ func TestHostCleanupRefusedForDirtyTree(t *testing.T) {
 	waitFor(t, func() bool {
 		return h.entry(entryOf(dismissed)["entry_id"].(string))["state"] == "invalidated" && h.reaped(h.run(run.ID))
 	})
+	h.settle()
+}
+
+// A parked run whose waiting answer a dispatch invalidates against its done
+// ticket is host-cleaned in that dispatch, before any catalog pass ends it:
+// its cleanup ends it as the catalog would, stopped but not by the operator
+// (§6.5, §6.8).
+func TestHostCleansParkedRunBeforeCatalogPass(t *testing.T) {
+	h := newHostCleanupHost(t)
+	parked, holder := "weft/example-parked-1a2b", "weft/example-holder-2b3c"
+	for _, id := range []string{parked, holder} {
+		h.ticket(id, ticket.StatusReady, 2)
+	}
+	park := h.parkedRun(parked)
+	h.addWorktree(park)
+	question, err := h.store.PendingWeftQuestion(park.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.script(holder, 1, splice(h.halted(holder), 1, nil))
+	holderRun := h.waitDispatched(entryOf(h.launch(holder, "holds"))["entry_id"].(string))
+	answered := h.send(http.MethodPost, "/v2/runs/"+park.ID+"/answer", "a1", fmt.Sprintf(
+		`{"contract_version":"weft-service/v2","question_id":%q,"answer":"The project."}`, question.ID))
+	answered.expect(t, http.StatusAccepted, "answer-response.json")
+	if reason, _ := waiting(entryOf(answered)); reason != "repository_reserved" {
+		t.Fatalf("answer waits on %s", reason)
+	}
+
+	// Done in tk with no catalog pass: the holder's reap dispatches the
+	// answer against the read, which invalidates it and cleans the run.
+	h.ticket(parked, ticket.StatusDone, 2)
+	h.release(holder)
+	h.waitReaped(holderRun)
+	var cleaned *ledger.WeftRun
+	waitFor(t, func() bool {
+		cleaned = h.run(park.ID)
+		return cleaned.Disposition == ledger.WeftDispositionCleaned && h.reaped(cleaned)
+	})
+	if entries := h.cleanupEntries(park.ID); len(entries) != 1 || entries[0].token != ledger.WeftHostToken {
+		t.Fatalf("cleanup of the parked run = %+v", entries)
+	}
+	summary := `{"state":"unavailable","reason":"ticket ` + parked + ` is done or closed in tk"}`
+	if cleaned.Phase != ledger.WeftPhaseEnded || cleaned.Outcome.String != "stopped" || cleaned.Stopped ||
+		string(cleaned.Summary) != summary || h.registered(park) || !h.branchKept(park) {
+		t.Fatalf("host-cleaned parked run = %+v", cleaned)
+	}
 	h.settle()
 }
 
@@ -585,7 +636,7 @@ func TestHostCleanupRestartPassSurvivesUnreadableTK(t *testing.T) {
 	if entries := h.cleanupEntries(run.ID); len(entries) != 0 {
 		t.Fatalf("a restart that could not read tk queued a cleanup: %+v", entries)
 	}
-	if !strings.Contains(h.logs.String(), "restart evaluated no run for host cleanup, tk could not be read") {
+	if !strings.Contains(h.logs.String(), "restart ended no parked run and evaluated no run for host cleanup, tk could not be read") {
 		t.Fatalf("log lacks the unread restart pass:\n%s", h.logs.String())
 	}
 
@@ -600,4 +651,154 @@ func TestHostCleanupRestartPassSurvivesUnreadableTK(t *testing.T) {
 		t.Fatalf("run cleaned after tk read again = %+v", h.run(run.ID))
 	}
 	h.settle()
+}
+
+// withoutCleanup re-probes the worker as one without the cleanup capability,
+// so nothing the host does removes a run's worktree.
+func (h *queueHost) withoutCleanup() {
+	h.t.Helper()
+	h.capabilities = h.writeVersion("cleanup")
+	at := time.Now().Add(time.Hour)
+	if err := os.Chtimes(h.service.cfg.Weft.WorkerBin, at, at); err != nil {
+		h.t.Fatal(err)
+	}
+	h.service.dispatch()
+	if h.service.served("cleanup") {
+		h.t.Fatal("cleanup is still served by a worker without the cleanup capability")
+	}
+}
+
+func (h *queueHost) dashboardCounts() (blocked, pending any) {
+	h.t.Helper()
+	r := h.send(http.MethodGet, "/v2/dashboard", "", "")
+	r.expect(h.t, http.StatusOK, "dashboard.json")
+	d := r.body["dashboard"].(map[string]any)
+	return d["runs"].(map[string]any)["blocked"], d["questions_pending"]
+}
+
+// A parked run whose ticket is finished outside Shuttle is over (§6.5): the
+// catalog change withdraws its pending question, on the stream, and ends it
+// stopped, though not by the operator, its worktree and branch retained —
+// cleanup is not served, so nothing removes them — and the dashboard stops
+// counting it. An answer for the withdrawn question is refused run_over and
+// queues nothing. A parked run whose ticket is open, ready or backlog is
+// untouched; one whose ticket finished while the daemon was down is ended by
+// the restart.
+func TestParkedRunEndsOnceTicketFinished(t *testing.T) {
+	h := newHostCleanupHost(t)
+	h.withoutCleanup()
+	done, open, ready, backlog := "loom/example-parked-1a2b", "warp/example-open-5e6f", "weft/example-ready-a0b1",
+		"ticket/example-backlog-7c8d"
+	ids := []string{done, open, ready, backlog}
+	runs := map[string]*ledger.WeftRun{}
+	for _, id := range ids {
+		h.ticket(id, ticket.StatusReady, 2)
+		runs[id] = h.parkedRun(id)
+		h.addWorktree(runs[id])
+	}
+	if blocked, pending := h.dashboardCounts(); blocked != float64(4) || pending != float64(4) {
+		t.Fatalf("dashboard before = blocked %v, questions_pending %v", blocked, pending)
+	}
+	question, err := h.store.PendingWeftQuestion(runs[done].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Each project's catalog changes: the unfinished tickets moved to open,
+	// to backlog, and the ready one's priority, then the done one.
+	h.finish(open, ticket.StatusOpen)
+	h.finish(backlog, ticket.StatusBacklog)
+	h.ticket(ready, ticket.StatusReady, 1)
+	if _, err := h.service.syncCatalog(); err != nil {
+		t.Fatal(err)
+	}
+	before := asOf(t, h.store)
+	h.finish(done, ticket.StatusDone)
+
+	ended := h.run(runs[done].ID)
+	summary := `{"state":"unavailable","reason":"ticket ` + done + ` is done or closed in tk"}`
+	if ended.Phase != ledger.WeftPhaseEnded || ended.Outcome.String != "stopped" || ended.Stopped ||
+		string(ended.Summary) != summary || ended.Disposition != ledger.WeftDispositionRetained ||
+		ended.SettlementState != ledger.WeftSettlementNone || len(ended.Segments) != 1 {
+		t.Fatalf("parked run of a done ticket = %+v", ended)
+	}
+	if _, err := os.Stat(ended.Worktree); err != nil || !h.registered(ended) || !h.branchKept(ended) {
+		t.Fatalf("the worktree or branch of the ended run is gone: %v", err)
+	}
+	if q, err := h.store.WeftQuestion(question.ID); err != nil || q.State != "withdrawn" {
+		t.Fatalf("question of the ended run = %+v %v", q, err)
+	}
+	if run := h.get("/v2/runs/" + ended.ID)["run"].(map[string]any); run["state"] != "over" || run["phase"] != "ended" ||
+		run["outcome"] != "stopped" || run["stopped"] != false {
+		t.Fatalf("GET run = %v", run)
+	}
+	var withdrawn, over bool
+	for _, ev := range h.eventsSince(before) {
+		doc := decode(t, ev.Payload).(map[string]any)
+		switch {
+		case ev.Type == "question":
+			q := doc["question"].(map[string]any)
+			withdrawn = withdrawn || (q["question_id"] == question.ID && q["state"] == "withdrawn")
+		case ev.Type == "run" && doc["run_id"] == ended.ID:
+			over = over || (doc["state"] == "over" && doc["outcome"] == "stopped")
+		}
+	}
+	if !withdrawn || !over {
+		t.Fatalf("events after the ticket finished: question withdrawn %v, run over %v", withdrawn, over)
+	}
+	if blocked, pending := h.dashboardCounts(); blocked != float64(3) || pending != float64(3) {
+		t.Fatalf("dashboard after = blocked %v, questions_pending %v", blocked, pending)
+	}
+	if !strings.Contains(h.logs.String(), "run="+ended.ID+": ended parked "+done+" ("+done+" is done or closed in tk)") {
+		t.Errorf("log lacks the ended run:\n%s", h.logs.String())
+	}
+
+	h.send(http.MethodPost, "/v2/runs/"+ended.ID+"/answer", "a-withdrawn", fmt.Sprintf(
+		`{"contract_version":"weft-service/v2","question_id":%q,"answer":"The project."}`, question.ID)).
+		refused(t, http.StatusConflict, "run_over")
+	for _, e := range h.queue()["entries"].([]any) {
+		if e.(map[string]any)["run_id"] == ended.ID && e.(map[string]any)["kind"] == "answer" {
+			t.Fatalf("an answer to the withdrawn question was queued: %v", e)
+		}
+	}
+	if after := h.run(ended.ID); after.Revision != ended.Revision || len(after.Segments) != 1 ||
+		strings.Count(h.argv(), "--run "+ended.ID) != 1 {
+		t.Fatalf("the refused answer moved the run: %+v", after)
+	}
+
+	// A ticket finished while the daemon was down: no catalog change of its
+	// own reaches the host, and the restart's pass ends the run.
+	down := "loom/example-down-9e0f"
+	h.ticket(down, ticket.StatusReady, 2)
+	missed := h.parkedRun(down)
+	h.addWorktree(missed)
+	missedQuestion, err := h.store.PendingWeftQuestion(missed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ticket(down, ticket.StatusDone, 2)
+	h.restart()
+	if h.service.served("cleanup") {
+		t.Fatal("cleanup is served after the restart")
+	}
+	if r := h.run(missed.ID); r.Phase != ledger.WeftPhaseEnded || r.Outcome.String != "stopped" || r.Stopped ||
+		r.Disposition != ledger.WeftDispositionRetained || !h.registered(r) || !h.branchKept(r) {
+		t.Fatalf("parked run ended at restart = %+v", r)
+	}
+	if q, err := h.store.WeftQuestion(missedQuestion.ID); err != nil || q.State != "withdrawn" {
+		t.Fatalf("question of the run ended at restart = %+v %v", q, err)
+	}
+
+	for _, id := range []string{open, ready, backlog} {
+		after := h.run(runs[id].ID)
+		if after.Phase != ledger.WeftPhaseParked || after.Revision != runs[id].Revision || after.Stopped {
+			t.Errorf("parked run of %s = %+v", id, after)
+		}
+		if q, err := h.store.PendingWeftQuestion(after.ID); err != nil || q.State != "pending" {
+			t.Errorf("question of %s = %+v %v", id, q, err)
+		}
+	}
+	if blocked, pending := h.dashboardCounts(); blocked != float64(3) || pending != float64(3) {
+		t.Fatalf("dashboard after the restart = blocked %v, questions_pending %v", blocked, pending)
+	}
 }

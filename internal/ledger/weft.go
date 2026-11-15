@@ -1045,6 +1045,12 @@ func (s *Store) StopWeftParked(runID string) (*WeftRun, error) {
 }
 
 func stopWeftParkedTx(tx *sql.Tx, runID, stamp string) error {
+	return endWeftParkedTx(tx, runID, stamp, true, weftStoppedSummary)
+}
+
+// endWeftParkedTx ends a parked run stopped, its pending question withdrawn,
+// with summary; stopped is whether it carries an operator stop's mark.
+func endWeftParkedTx(tx *sql.Tx, runID, stamp string, stopped bool, summary string) error {
 	run, err := getWeftRunTx(tx, runID)
 	if err != nil {
 		return err
@@ -1065,9 +1071,9 @@ func stopWeftParkedTx(tx *sql.Tx, runID, stamp string) error {
 	if _, err := tx.Exec(`UPDATE weft_questions SET state='withdrawn' WHERE run_id=? AND state='pending'`, runID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome='stopped',stopped=1,
+	if _, err := tx.Exec(`UPDATE weft_runs SET phase=?,outcome='stopped',stopped=?,
 		summary=?,updated_at=?,ended_at=?,revision=revision+1 WHERE id=?`, WeftPhaseEnded,
-		weftStoppedSummary, stamp, stamp, runID); err != nil {
+		stopped, summary, stamp, stamp, runID); err != nil {
 		return err
 	}
 	if _, err := settleUngradedTx(tx, runID); err != nil {
