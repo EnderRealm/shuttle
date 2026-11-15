@@ -274,16 +274,18 @@ func (s *Service) dispatchConfig(c *catalog) ledger.WeftDispatch {
 
 // cleanupDispatch is dispatchConfig over a fresh tk read, for a commit that
 // may make a retained run qualify for host-started cleanup (§6.8) and has no
-// read of its own. While cleanup is not served nothing is read; a read that
-// fails is no trigger. Either way the dispatch base, which cleans nothing, is
-// answered, and a failed read logged against what.
+// read of its own. While cleanup is not served nothing is read. Either way the
+// dispatch base, which cleans nothing, is answered; a read that fails is
+// logged against what and owes the next dispatch's pass over every retained
+// run, which is how the run this commit could not evaluate is reached.
 func (s *Service) cleanupDispatch(what string) ledger.WeftDispatch {
 	if !s.served("cleanup") {
 		return s.segments.dispatchBase()
 	}
 	c, err := s.readCatalog()
 	if err != nil {
-		s.log.Printf("weft cleanup host=%s: %s evaluated no run for host cleanup, tk could not be read: %v", s.hostID, what, err)
+		s.cleanupOwed.Store(true)
+		s.log.Printf("weft cleanup host=%s: %s evaluated no run for host cleanup, tk could not be read; the next dispatch owes the pass: %v", s.hostID, what, err)
 		return s.segments.dispatchBase()
 	}
 	return s.dispatchConfig(c)
@@ -338,26 +340,36 @@ func describeIneligible(id string, reasons []map[string]any) string {
 }
 
 // dispatch is one pass after a commit that may have freed a slot, a
-// reservation or a pause: a segment settled, or the daemon started.
+// reservation or a pause: a segment settled, or the daemon started. An owed
+// cleanup pass is taken before tk is read, so the read it runs under is newer
+// than the miss that owed it; one read too early to see that miss leaves it.
 func (s *Service) dispatch() {
+	owed := s.cleanupOwed.Swap(false)
 	c, err := s.readCatalog()
 	if err != nil {
+		if owed {
+			s.cleanupOwed.Store(true)
+		}
 		s.log.Printf("weft dispatch host=%s: nothing dispatched, tk could not be read: %v", s.hostID, err)
 		return
 	}
-	s.dispatchWith(c)
+	s.dispatchWith(c, owed)
 }
 
-func (s *Service) dispatchWith(c *catalog) {
+// dispatchWith is dispatch against c; owed is a cleanup pass taken before c
+// was read, which this pass runs or puts back.
+func (s *Service) dispatchWith(c *catalog, owed bool) {
 	// worker_bin is re-probed when it changed (§2.6), so the capabilities a
 	// client reads follow the installed worker. A re-probe that turns cleanup
 	// served ends every finished parked run and evaluates every retained run,
-	// as a restart does (§6.5, §6.8).
+	// as a restart does (§6.5, §6.8). While cleanup is not served an owed pass
+	// is dropped: the turn that serves it again runs that pass.
 	s.segments.refreshWorker()
 	served := s.served("cleanup")
 	prev := s.cleanupServed.Swap(served)
 	turned := served && !prev
 	d := s.dispatchConfig(c)
+	owed = owed && d.Finished != nil && !turned
 	var spawn []string
 	var changes []ledger.WeftChange
 	s.stateMu.Lock()
@@ -366,6 +378,8 @@ func (s *Service) dispatchWith(c *catalog) {
 			if err := t.EndFinishedParked(nil, c.finished); err != nil {
 				return err
 			}
+		}
+		if turned || owed {
 			if err := t.CleanFinished(nil, d); err != nil {
 				return err
 			}
@@ -378,9 +392,12 @@ func (s *Service) dispatchWith(c *catalog) {
 	})
 	s.stateMu.Unlock()
 	if err != nil {
-		// The pass the turn owed is retried by the next dispatch.
+		// The pass the turn or a miss owed is retried by the next dispatch.
 		if turned {
 			s.cleanupServed.Store(false)
+		}
+		if owed {
+			s.cleanupOwed.Store(true)
 		}
 		s.log.Printf("weft dispatch host=%s: %v", s.hostID, err)
 		return

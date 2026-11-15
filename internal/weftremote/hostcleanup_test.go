@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -801,4 +802,134 @@ func TestParkedRunEndsOnceTicketFinished(t *testing.T) {
 	if blocked, pending := h.dashboardCounts(); blocked != float64(3) || pending != float64(3) {
 		t.Fatalf("dashboard after the restart = blocked %v, questions_pending %v", blocked, pending)
 	}
+}
+
+// A per-run evaluation whose tk read fails evaluates nothing and owes the
+// pass over every retained run, which the next dispatch that reads tk runs
+// with no restart and no catalog change (§6.8): a run reaped while tk could
+// not be read, its ticket finished, is left retained by the reap and by the
+// dispatch after it that could not read tk either; a parked run stopped while
+// tk could not be read, its ticket finished, is left retained by the stop.
+func TestHostCleanupOwedAfterFailedReapRead(t *testing.T) {
+	h := newHostCleanupHost(t)
+	halted, parked := "weft/example-second-4c2d", "loom/example-parked-1a2b"
+	for _, id := range []string{halted, parked} {
+		h.ticket(id, ticket.StatusReady, 2)
+	}
+	park := h.parkedRun(parked)
+	h.addWorktree(park)
+	// A registered name no project id can be makes every tk read incomplete.
+	// Only tk's file is written: the running host's config is not touched.
+	readable, err := os.ReadFile(h.tkConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreadable := string(readable) + "  Not_A_Project:\n    path: " + filepath.Join(h.code, "weft") + "\n"
+	tk := func(config string) {
+		if err := os.WriteFile(h.tkConfig, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleaned := func(run *ledger.WeftRun) {
+		t.Helper()
+		waitFor(t, func() bool {
+			after := h.run(run.ID)
+			return after.Disposition == ledger.WeftDispositionCleaned && h.reaped(after)
+		})
+		if h.registered(run) || !h.branchKept(run) {
+			t.Fatalf("run cleaned after tk read again = %+v", h.run(run.ID))
+		}
+		if entries := h.cleanupEntries(run.ID); len(entries) != 1 || entries[0].token != ledger.WeftHostToken {
+			t.Fatalf("cleanup of run %s = %+v", run.ID, entries)
+		}
+	}
+
+	h.script(halted, 1, splice(h.halted(halted), 1, nil))
+	runID := h.waitDispatched(entryOf(h.launch(halted, "holds"))["entry_id"].(string))
+	h.addWorktree(h.run(runID))
+	h.ticket(halted, ticket.StatusDone, 2)
+	tk(unreadable)
+	h.release(halted)
+	run := h.waitReaped(runID)
+	waitFor(t, func() bool {
+		logs := h.logs.String()
+		reap := strings.Index(logs, "reap evaluated no run for host cleanup, tk could not be read")
+		return reap >= 0 && strings.Contains(logs[reap:], "nothing dispatched, tk could not be read")
+	})
+	if entries := h.cleanupEntries(runID); len(entries) != 0 || run.Disposition != ledger.WeftDispositionRetained {
+		t.Fatalf("a reap that could not read tk cleaned %+v: %+v", run, entries)
+	}
+	tk(string(readable))
+	h.service.dispatch()
+	cleaned(run)
+	h.settle()
+
+	// The stop is followed by no segment settling and so by no dispatch of
+	// its own: only its failed read owes the pass.
+	h.ticket(parked, ticket.StatusDone, 2)
+	tk(unreadable)
+	h.send(http.MethodPost, "/v2/runs/"+park.ID+"/stop", "stop", revisionBody(h.run(park.ID).Revision)).expect(t, http.StatusOK)
+	if !strings.Contains(h.logs.String(), "stop evaluated no run for host cleanup, tk could not be read") {
+		t.Fatalf("log lacks the unread stop:\n%s", h.logs.String())
+	}
+	if after := h.run(park.ID); after.Phase != ledger.WeftPhaseEnded || after.Disposition != ledger.WeftDispositionRetained ||
+		len(h.cleanupEntries(park.ID)) != 0 {
+		t.Fatalf("a stop that could not read tk left %+v", after)
+	}
+	tk(string(readable))
+	h.service.dispatch()
+	cleaned(park)
+	h.settle()
+}
+
+// A ticket finished by hand between a reap's tk read and its commit, with the
+// catalog pass for that change committed in the window, is still cleaned: the
+// catalog pass skips the run, whose segment is not yet reaped, and the reap
+// commit evaluates it under the stale read, so the dispatch after the commit
+// owes the pass and runs it under a read of its own — with no restart and no
+// further catalog change in the project (§6.8).
+func TestHostCleanupSurvivesFinishDuringReap(t *testing.T) {
+	h := newHostCleanupHost(t)
+	id := "weft/example-second-4c2d"
+	h.ticket(id, ticket.StatusReady, 2)
+	read, finished := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	reapRead := h.service.segments.reapDispatch
+	h.service.segments.reapDispatch = func() ledger.WeftDispatch {
+		d := reapRead()
+		once.Do(func() {
+			close(read)
+			<-finished
+		})
+		return d
+	}
+	h.script(id, 1, splice(h.halted(id), 1, nil))
+	runID := h.waitDispatched(entryOf(h.launch(id, "holds"))["entry_id"].(string))
+	run := h.run(runID)
+	h.addWorktree(run)
+
+	h.release(id)
+	select {
+	case <-read:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reap never read tk")
+	}
+	func() {
+		defer close(finished)
+		h.finish(id, ticket.StatusDone)
+		if entries := h.cleanupEntries(runID); len(entries) != 0 {
+			t.Fatalf("the catalog pass queued a cleanup of a run whose segment is live: %+v", entries)
+		}
+	}()
+	waitFor(t, func() bool {
+		cleaned := h.run(runID)
+		return cleaned.Disposition == ledger.WeftDispositionCleaned && h.reaped(cleaned)
+	})
+	if h.registered(run) || !h.branchKept(run) {
+		t.Fatalf("run cleaned after the reap = %+v", h.run(runID))
+	}
+	if entries := h.cleanupEntries(runID); len(entries) != 1 || entries[0].token != ledger.WeftHostToken {
+		t.Fatalf("cleanup of the run = %+v", entries)
+	}
+	h.settle()
 }

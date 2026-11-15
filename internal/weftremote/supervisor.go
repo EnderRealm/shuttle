@@ -83,6 +83,10 @@ type Supervisor struct {
 	// fresh tk read, so the reaped run is evaluated for host cleanup in that
 	// commit (§6.8). Nil settles under dispatchBase, which cleans nothing.
 	reapDispatch func() ledger.WeftDispatch
+	// reapCommitted runs once a reap commit lands, before settled: a ticket
+	// finished between reapDispatch's read and that commit was evaluated
+	// under the stale read, so the dispatch that follows owes the pass.
+	reapCommitted func()
 	// hostID joins every line logged about a segment (weft-service/v2 §4.2).
 	hostID string
 	// worker is the last probe of worker_bin (§2.6); probeMu serializes
@@ -646,6 +650,9 @@ func (s *Supervisor) settle(run *ledger.WeftRun, segment ledger.WeftSegment, cla
 		s.stateMu.Lock()
 		spawn, changes, err := s.store.SettleWeftArchive(run.ID, segment.Segment, archive, class, detail, d, archiveHead)
 		s.stateMu.Unlock()
+		if err == nil && s.reapCommitted != nil {
+			s.reapCommitted()
+		}
 		for _, c := range changes {
 			s.log.Printf("weft archive %s entry=%s: %s %s (%s)", ids, c.EntryID, c.Action, c.RunID, c.Detail)
 		}
@@ -654,6 +661,9 @@ func (s *Supervisor) settle(run *ledger.WeftRun, segment ledger.WeftSegment, cla
 	s.stateMu.Lock()
 	reconcile, spawn, changes, err := s.store.SettleWeftSegment(run.ID, segment.Segment, class, detail, d)
 	s.stateMu.Unlock()
+	if err == nil && s.reapCommitted != nil {
+		s.reapCommitted()
+	}
 	for _, c := range changes {
 		line := fmt.Sprintf("weft queue %s entry=%s: %s %s %s", ids, c.EntryID, c.Action, c.Kind, c.Ticket)
 		if c.Detail != "" {

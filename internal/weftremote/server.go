@@ -66,6 +66,11 @@ type Service struct {
 	// cleanupServed is whether cleanup was served at the last probe dispatch
 	// read, so a re-probe that turns it served is seen once (§6.8).
 	cleanupServed atomic.Bool
+	// cleanupOwed is a host-cleanup pass over every retained run owed because
+	// a per-run evaluation may have missed one: its tk read failed, or a reap
+	// committed under a read a ticket finished after (§6.8). A dispatch takes
+	// it before its own read, so the pass it runs reads tk after the miss.
+	cleanupOwed atomic.Bool
 	// folders are the folder handles this process minted (§9.2), and terms
 	// the terminal sessions it owns (§9).
 	folders *folderHandles
@@ -120,6 +125,7 @@ func New(cfg *config.Config, store *ledger.Store, token, home string, logger *lo
 	s.segments = NewSupervisor(cfg, store, home, logger, &s.stateMu)
 	s.segments.settled = s.dispatch
 	s.segments.reapDispatch = func() ledger.WeftDispatch { return s.cleanupDispatch("reap") }
+	s.segments.reapCommitted = func() { s.cleanupOwed.Store(true) }
 	s.segments.hostID = hostID
 	return s, nil
 }

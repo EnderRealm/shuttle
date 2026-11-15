@@ -493,11 +493,16 @@ func (s *Service) watchCatalog(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		c, err := s.syncCatalog()
 		// Each pass also dispatches: it is how a pause lifted from another
-		// process — shuttle resume weft-worker — reaches the queue.
+		// process — shuttle resume weft-worker — reaches the queue, and how a
+		// cleanup pass a cancel or stop owed is run with no segment settling.
+		// As in dispatch, the owed pass is taken before tk is read.
+		owed := s.cleanupOwed.Swap(false)
+		c, err := s.syncCatalog()
 		if err == nil {
-			s.dispatchWith(c)
+			s.dispatchWith(c, owed)
+		} else if owed {
+			s.cleanupOwed.Store(true)
 		}
 		// A refusal persists until tk changes; it is logged when it changes,
 		// not on every poll.
