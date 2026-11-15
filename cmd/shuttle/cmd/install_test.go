@@ -148,6 +148,9 @@ func TestInstallDaemonPersistsAndInstallsTheLaunchAgent(t *testing.T) {
 // installed so far, in order.
 func recordInstalls(t *testing.T) func() []string {
 	t.Helper()
+	// Off the host's LaunchAgents, whose plists pin the installed shuttle and
+	// not the binary this stands in.
+	t.Setenv("HOME", t.TempDir())
 	binary := filepath.Join(t.TempDir(), "shuttle")
 	if err := os.WriteFile(binary, []byte("binary"), 0o755); err != nil {
 		t.Fatal(err)
@@ -199,6 +202,123 @@ func TestUpdaterRebootstrapLeavesTheUpdatersJob(t *testing.T) {
 	if got := labels(); !reflect.DeepEqual(got, []string{launchd.DaemonLabel, launchd.WatchdogLabel}) {
 		t.Fatalf("installed = %v", got)
 	}
+}
+
+// Run from a checkout or a `go run` build, the update would install over that
+// binary and the restarts after it would re-pin every job to it. Each command
+// that acts on the installed jobs refuses before any lock, pause or install,
+// and the binary the jobs pin goes through.
+func TestUpdaterTargetsThePinnedBinary(t *testing.T) {
+	shuttleEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	writeBinary := func(path, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installedBinary := filepath.Join(t.TempDir(), "bin", "shuttle")
+	checkoutBinary := filepath.Join(t.TempDir(), "checkout", "shuttle")
+	writeBinary(installedBinary, "installed")
+	writeBinary(checkoutBinary, "checkout")
+	specs, err := launchd.DaemonSpecs(installedBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range specs {
+		path, err := launchd.PlistPath(spec.Label)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeBinary(path, spec.PlistXML())
+	}
+	daemonPlist, err := launchd.PlistPath(launchd.DaemonLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedCheckout, err := filepath.EvalSymlinks(checkoutBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	originalExecutable := currentExecutable
+	originalInstall, originalAwait := installLaunchAgent, awaitLaunchAgent
+	running := checkoutBinary
+	currentExecutable = func() (string, error) { return running, nil }
+	var installed []launchd.Spec
+	installLaunchAgent = func(spec launchd.Spec) error {
+		installed = append(installed, spec)
+		return nil
+	}
+	awaitLaunchAgent = func(string, string) error { return nil }
+	t.Cleanup(func() {
+		currentExecutable = originalExecutable
+		installLaunchAgent, awaitLaunchAgent = originalInstall, originalAwait
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	})
+	execute := func(args ...string) error {
+		var out bytes.Buffer
+		rootCmd.SetOut(&out)
+		rootCmd.SetErr(&out)
+		rootCmd.SetArgs(args)
+		return rootCmd.Execute()
+	}
+
+	for _, args := range [][]string{
+		{"updater", "once"},
+		{"updater", "rebootstrap"},
+		{"weft", "bind", "git@github.com:EnderRealm/ticket.git"},
+		{"weft", "unbind", "ticket"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			installed = nil
+			err := execute(args...)
+			if err == nil {
+				t.Fatal("ran from the checkout, want a refusal")
+			}
+			for _, want := range []string{resolvedCheckout, installedBinary, daemonPlist} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q does not name %s", err, want)
+				}
+			}
+			if len(installed) != 0 {
+				t.Errorf("re-pinned %d jobs: %+v", len(installed), installed)
+			}
+			for path, want := range map[string]string{checkoutBinary: "checkout", installedBinary: "installed"} {
+				if data, err := os.ReadFile(path); err != nil || string(data) != want {
+					t.Errorf("%s = %q (%v), want it untouched", path, data, err)
+				}
+			}
+			store, err := openLedger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := store.RequireUpdatePause(); err == nil {
+				t.Error("the refusal left the update pause standing")
+			}
+		})
+	}
+
+	t.Run("the pinned binary", func(t *testing.T) {
+		installed = nil
+		running = installedBinary
+		if err := execute("updater", "rebootstrap"); err != nil {
+			t.Fatalf("updater rebootstrap: %v", err)
+		}
+		resolvedInstalled, err := filepath.EvalSymlinks(installedBinary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(installed) != 2 || installed[0].Program != resolvedInstalled || installed[1].Program != resolvedInstalled {
+			t.Fatalf("installed = %+v, want the daemon and watchdog under %s", installed, resolvedInstalled)
+		}
+	})
 }
 
 func TestInstallDaemonFailsWhenTheProcessDoesNotStart(t *testing.T) {

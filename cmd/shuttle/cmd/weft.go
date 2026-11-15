@@ -120,6 +120,10 @@ func weftBind(ctx context.Context, out, errOut io.Writer, origin string) error {
 	if !ok {
 		return fmt.Errorf("bind: refusing %s: it names no project tk can resolve (derived name: %q); nothing provisioned, config.json left as it was", origin, name)
 	}
+	// The restart re-pins the daemon's jobs to this binary.
+	if _, err := pinnedExecutable(); err != nil {
+		return fmt.Errorf("bind: %w; nothing provisioned, config.json left as it was", err)
+	}
 	unlock, err := lockUpdater()
 	if err != nil {
 		return fmt.Errorf("bind: %w; nothing provisioned, config.json left as it was", err)
@@ -189,6 +193,10 @@ func weftBind(ctx context.Context, out, errOut io.Writer, origin string) error {
 }
 
 func weftUnbind(ctx context.Context, out io.Writer, name string) error {
+	// The restart re-pins the daemon's jobs to this binary.
+	if _, err := pinnedExecutable(); err != nil {
+		return fmt.Errorf("unbind: %w; config.json left as it was", err)
+	}
 	unlock, err := lockUpdater()
 	if err != nil {
 		return fmt.Errorf("unbind: %w; config.json left as it was", err)

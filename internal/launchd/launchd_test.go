@@ -244,6 +244,50 @@ func TestInstallRemovesAPlistThatFailsLint(t *testing.T) {
 	}
 }
 
+// The program is what a caller holds the running binary to, so a plist it
+// cannot read is an error rather than no pin at all.
+func TestInstalledProgramReadsWhatThePlistPins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(config.EnvHome, t.TempDir())
+	t.Setenv(config.EnvAgentsDir, t.TempDir())
+	path, err := PlistPath(DaemonLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, installed, err := InstalledProgram(DaemonLabel); installed || err != nil {
+		t.Fatalf("no plist: installed=%t err=%v, want neither", installed, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := DaemonSpecs("/Users/someone/.local/bin/shuttle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(specs[0].PlistXML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	program, installed, err := InstalledProgram(DaemonLabel)
+	if err != nil || !installed || program != specs[0].Program {
+		t.Fatalf("rendered plist: program=%q installed=%t err=%v, want %s", program, installed, err, specs[0].Program)
+	}
+
+	if out, err := exec.Command("plutil", "-convert", "binary1", path).CombinedOutput(); err != nil {
+		t.Fatalf("plutil -convert binary1: %v: %s", err, out)
+	}
+	if _, installed, err := InstalledProgram(DaemonLabel); !installed || err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("binary plist: installed=%t err=%v, want an error naming %s", installed, err, path)
+	}
+
+	noProgram := strings.Replace(specs[0].PlistXML(), "<key>ProgramArguments</key>", "<key>Arguments</key>", 1)
+	if err := os.WriteFile(path, []byte(noProgram), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, installed, err := InstalledProgram(DaemonLabel); !installed || err == nil {
+		t.Fatalf("no ProgramArguments: installed=%t err=%v, want an error", installed, err)
+	}
+}
+
 func TestUninstallIsIdempotent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	path, err := PlistPath(DaemonLabel)

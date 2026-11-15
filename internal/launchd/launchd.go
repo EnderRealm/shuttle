@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -235,6 +236,82 @@ func PlistPath(label string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, "Library", "LaunchAgents", label+".plist"), nil
+}
+
+// InstalledProgram is the first ProgramArguments string of label's installed
+// plist, the binary its job runs. No plist is installed=false. A plist that is
+// there but yields no program, a binary-format one included, is an error, so a
+// caller holding a binary to it fails closed.
+func InstalledProgram(label string) (program string, installed bool, err error) {
+	path, err := PlistPath(label)
+	if err != nil {
+		return "", false, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	program, err = plistProgram(data)
+	if err != nil {
+		return "", true, fmt.Errorf("read the program %s pins: %w", path, err)
+	}
+	return program, true, nil
+}
+
+// plistProgram walks the top-level dict of an XML plist for ProgramArguments.
+func plistProgram(data []byte) (string, error) {
+	d := xml.NewDecoder(bytes.NewReader(data))
+	// The top-level dict's children sit at depth 2: inside <plist> and <dict>.
+	depth, wanted := 0, false
+	for {
+		tok, err := d.Token()
+		if err == io.EOF {
+			return "", fmt.Errorf("no ProgramArguments in an XML plist")
+		}
+		if err != nil {
+			return "", err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if depth != 2 {
+				depth++
+				continue
+			}
+			if t.Name.Local == "key" {
+				var key string
+				if err := d.DecodeElement(&key, &t); err != nil {
+					return "", err
+				}
+				wanted = key == "ProgramArguments"
+				continue
+			}
+			if !wanted {
+				depth++
+				continue
+			}
+			var array struct {
+				Items []struct {
+					XMLName xml.Name
+					Value   string `xml:",chardata"`
+				} `xml:",any"`
+			}
+			if t.Name.Local != "array" {
+				return "", fmt.Errorf("ProgramArguments is a <%s>, not an <array>", t.Name.Local)
+			}
+			if err := d.DecodeElement(&array, &t); err != nil {
+				return "", err
+			}
+			if len(array.Items) == 0 || array.Items[0].XMLName.Local != "string" || array.Items[0].Value == "" {
+				return "", fmt.Errorf("ProgramArguments does not start with a program")
+			}
+			return array.Items[0].Value, nil
+		case xml.EndElement:
+			depth--
+		}
+	}
 }
 
 func domain() string {

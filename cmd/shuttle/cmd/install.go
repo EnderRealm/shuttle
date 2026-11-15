@@ -85,10 +85,12 @@ var (
 	installLaunchAgent = launchd.Install
 	awaitLaunchAgent   = launchd.AwaitRunning
 	currentExecutable  = os.Executable
+	installedProgram   = launchd.InstalledProgram
 )
 
-// resolvedExecutable is the running binary's canonical path: what the plists
-// pin, and so where an update installs.
+// resolvedExecutable is the running binary's canonical path: what install
+// pins the plists to. Anything that acts on the installed jobs instead goes
+// through pinnedExecutable, since a checkout or `go run` build is not them.
 func resolvedExecutable() (string, error) {
 	binary, err := currentExecutable()
 	if err != nil {
@@ -96,6 +98,39 @@ func resolvedExecutable() (string, error) {
 	}
 	if resolved, resolveErr := filepath.EvalSymlinks(binary); resolveErr == nil {
 		binary = resolved
+	}
+	return binary, nil
+}
+
+// pinnedExecutable is the running binary, refused unless it is the one every
+// installed shuttle job pins. Run from elsewhere, an update would install over
+// that binary and a restart would re-pin the jobs to it, leaving the installed
+// one stale, or under `go run` pinning a temp file deleted on exit. With no
+// job installed there is no pin to hold it to.
+func pinnedExecutable() (string, error) {
+	binary, err := resolvedExecutable()
+	if err != nil {
+		return "", err
+	}
+	for _, label := range []string{launchd.DaemonLabel, launchd.WatchdogLabel, launchd.UpdaterLabel} {
+		program, installed, err := installedProgram(label)
+		if err != nil {
+			return "", err
+		}
+		if !installed {
+			continue
+		}
+		pinned := program
+		if resolved, resolveErr := filepath.EvalSymlinks(program); resolveErr == nil {
+			pinned = resolved
+		}
+		if pinned != binary {
+			plist, err := launchd.PlistPath(label)
+			if err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("refusing to run as %s: %s pins %s, the installed shuttle; run %s instead", binary, plist, program, program)
+		}
 	}
 	return binary, nil
 }

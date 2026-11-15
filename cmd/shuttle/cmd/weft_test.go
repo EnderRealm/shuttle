@@ -63,6 +63,11 @@ func newWeftHost(t *testing.T, body string) *weftHost {
 	h := &weftHost{t: t}
 	provision, restart, token, read := runProvision, restartDaemon, weftToken, readProjects
 	t.Cleanup(func() { runProvision, restartDaemon, weftToken, readProjects = provision, restart, token, read })
+	// The host's plists pin the installed shuttle, which the test binary is
+	// not. HOME stays put: the loader's checks read the operator's home.
+	program := installedProgram
+	t.Cleanup(func() { installedProgram = program })
+	installedProgram = func(string) (string, bool, error) { return "", false, nil }
 	runProvision = func(_, origin string, stdout, _ io.Writer) error {
 		h.provisioned = append(h.provisioned, origin)
 		if h.duringProvision != nil {

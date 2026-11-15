@@ -36,7 +36,8 @@ Every step, decision and refusal is written to updater.log under the state root.
 // to any extra writers. The interrupt context is what lets a drain end with
 // its pause lifted when the job is stopped.
 func runUpdater(fn func(*updater.Updater, context.Context) error, extra ...io.Writer) error {
-	binary, err := resolvedExecutable()
+	// First, so a refused binary takes no lock and pauses nothing.
+	binary, err := pinnedExecutable()
 	if err != nil {
 		return err
 	}
@@ -100,8 +101,12 @@ var updaterRebootstrapCmd = &cobra.Command{
 
 // rebootstrapDaemon is bootout and bootstrap of the daemon and watchdog jobs
 // under the running binary, which is what restarts the daemon: see
-// launchdServices.Restart for why nothing lighter does.
+// launchdServices.Restart for why nothing lighter does. The binary must be the
+// one the jobs pin, or the restart would re-pin them to it.
 func rebootstrapDaemon() error {
+	if _, err := pinnedExecutable(); err != nil {
+		return err
+	}
 	specs, err := launchSpecs(func(s launchd.Spec) bool { return !isUpdaterSpec(s) })
 	if err != nil {
 		return err

@@ -64,7 +64,9 @@ const (
 type Updater struct {
 	// Home is the state root.
 	Home string
-	// Bin is the install target, the path the plists pin.
+	// Bin is the install target. It is the running binary, which the
+	// command refuses unless it is the path the installed plists pin, so an
+	// install never lands on a checkout or a `go run` build.
 	Bin string
 	// Current is the version this host runs: the binary's version.Current at
 	// start, advanced to a release's tag once its install is confirmed.
