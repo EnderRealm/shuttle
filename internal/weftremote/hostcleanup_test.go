@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,8 +23,9 @@ import (
 // cleanupWorkerScript is the fixture worker with a cleanup that does what
 // weft-worker's does to git: `git worktree remove` without force on the
 // worktree recorded for the ticket, done when git removed it, refused with
-// git's own reason when it would not. Every other subcommand is the fixture
-// worker's.
+// git's own reason when it would not. A worktree already gone from disk or
+// from git is the state cleanup asks for: done, removing nothing. Every other
+// subcommand is the fixture worker's.
 const cleanupWorkerScript = `#!/bin/sh
 control=CONTROL
 if [ "$1" != cleanup ]; then exec INNER "$@"; fi
@@ -40,7 +42,9 @@ while [ "$#" -gt 0 ]; do
 done
 slug=$(printf '%s' "$ticket" | tr / -)
 worktree=$(cat "$control/$slug.worktree")
-if out=$(git -C "$repo" worktree remove "$worktree" 2>&1); then
+if [ ! -d "$worktree" ] || ! git -C "$repo" worktree list --porcelain | grep -q "/$slug\$"; then
+  result=done removed=false detail="\"no worktree is retained for '$ticket'\""
+elif out=$(git -C "$repo" worktree remove "$worktree" 2>&1); then
   result=done removed=true detail=null
 else
   result=refused removed=false
@@ -930,6 +934,129 @@ func TestHostCleanupSurvivesFinishDuringReap(t *testing.T) {
 	}
 	if entries := h.cleanupEntries(runID); len(entries) != 1 || entries[0].token != ledger.WeftHostToken {
 		t.Fatalf("cleanup of the run = %+v", entries)
+	}
+	h.settle()
+}
+
+// A host-started cleanup is held to the repository its run was created in,
+// not to the project's binding now (§6.8): a run retained before its project
+// was bound to another checkout, or to none, is cleaned once its ticket is
+// finished, its branch kept. A run whose own repository no longer resolves is
+// invalidated binding_changed, naming that repository, and is not queued
+// again by a later catalog change.
+func TestHostCleanupAfterRebind(t *testing.T) {
+	h := newHostCleanupHost(t)
+	moved, unbound, gone := "weft/example-moved-1a2b", "loom/example-unbound-3c4d", "ticket/example-gone-5e6f"
+	runs := map[string]*ledger.WeftRun{}
+	for _, id := range []string{moved, unbound, gone} {
+		h.ticket(id, ticket.StatusReady, 2)
+		runs[id] = h.haltedRun(id)
+		h.addWorktree(runs[id])
+	}
+
+	// weft is bound to another checkout and loom to none; ticket's checkout
+	// is moved away from the path its run recorded.
+	h.checkout("weft-moved")
+	h.projects["weft"] = filepath.Join(h.code, "weft-moved")
+	h.writeConfig()
+	repositories := maps.Clone(h.cfg.Weft.Repositories)
+	delete(repositories, "loom")
+	h.cfg.Weft.Repositories = repositories
+	if err := os.Rename(runs[gone].Repo, runs[gone].Repo+"-elsewhere"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := h.service.syncCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := c.byName["weft"]; p.RepositoryID == runs[moved].RepositoryID {
+		t.Fatalf("weft is still bound to %s", p.Repository)
+	}
+	if p := c.byName["loom"]; p.Repository != "" || p.ReasonCode != "no_binding" {
+		t.Fatalf("loom is bound to %q (%s)", p.Repository, p.ReasonCode)
+	}
+
+	for _, id := range []string{moved, unbound, gone} {
+		h.finish(id, ticket.StatusDone)
+	}
+	for _, id := range []string{moved, unbound} {
+		run := runs[id]
+		var cleaned *ledger.WeftRun
+		waitFor(t, func() bool {
+			cleaned = h.run(run.ID)
+			return cleaned.Disposition == ledger.WeftDispositionCleaned && h.reaped(cleaned)
+		})
+		if _, err := os.Stat(run.Worktree); !errors.Is(err, os.ErrNotExist) || h.registered(run) {
+			t.Fatalf("%s's worktree is still there: %v\n%s", id, err, h.git(run.Repo, "worktree", "list"))
+		}
+		if !h.branchKept(run) {
+			t.Fatalf("the cleanup of %s removed branch %s", id, run.Branch)
+		}
+		entries := h.cleanupEntries(run.ID)
+		if len(entries) != 1 || entries[0].token != ledger.WeftHostToken || entries[0].state != "dispatched" || h.hold(run.ID) {
+			t.Fatalf("host cleanup of %s = %+v, hold %v", id, entries, h.hold(run.ID))
+		}
+		if !strings.Contains(h.argv(), "cleanup --contract weft-worker/v2 --run "+run.ID+" ") ||
+			!strings.Contains(h.argv(), "--repo "+run.Repo+" ") {
+			t.Fatalf("%s's cleanup was not launched in %s:\n%s", id, run.Repo, h.argv())
+		}
+	}
+
+	run := runs[gone]
+	entries := h.cleanupEntries(run.ID)
+	if len(entries) != 1 || entries[0].state != "invalidated" || entries[0].reason != ledger.WeftInvalidBinding ||
+		!strings.Contains(entries[0].detail, run.Repo+" ("+run.RepositoryID+"), the repository "+entries[0].id+" was admitted for, no longer resolves") {
+		t.Fatalf("host cleanup of a run whose repository moved = %+v", entries)
+	}
+	if after := h.run(run.ID); after.Disposition != ledger.WeftDispositionRetained || h.hold(run.ID) {
+		t.Fatalf("run whose repository moved = %+v, hold %v", after, h.hold(run.ID))
+	}
+	h.finish(gone, ticket.StatusClosed)
+	if entries := h.cleanupEntries(run.ID); len(entries) != 1 {
+		t.Fatalf("a run whose repository moved was queued again: %+v", entries)
+	}
+	h.settle()
+}
+
+// A retained run whose worktree is already gone — removed with git's record
+// of it, or from disk alone — is cleaned by the host all the same: its worker
+// reports done with nothing removed, and the run settles cleaned, unheld, its
+// branch kept (§6.8).
+func TestHostCleanupWorktreeAlreadyGone(t *testing.T) {
+	h := newHostCleanupHost(t)
+	pruned, deleted := "weft/example-pruned-1a2b", "loom/example-deleted-3c4d"
+	runs := map[string]*ledger.WeftRun{}
+	for _, id := range []string{pruned, deleted} {
+		h.ticket(id, ticket.StatusReady, 2)
+		runs[id] = h.haltedRun(id)
+		h.addWorktree(runs[id])
+	}
+	h.git(runs[pruned].Repo, "worktree", "remove", "--force", runs[pruned].Worktree)
+	if err := os.RemoveAll(runs[deleted].Worktree); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{pruned, deleted} {
+		h.finish(id, ticket.StatusDone)
+	}
+	for _, id := range []string{pruned, deleted} {
+		run := runs[id]
+		var cleaned *ledger.WeftRun
+		waitFor(t, func() bool {
+			cleaned = h.run(run.ID)
+			return cleaned.Disposition == ledger.WeftDispositionCleaned && h.reaped(cleaned)
+		})
+		if len(cleaned.Segments) != 2 || cleaned.Segments[1].Kind != ledger.WeftSegmentCleanup || !h.branchKept(run) {
+			t.Fatalf("host-cleaned run of %s whose worktree was gone = %+v", id, cleaned)
+		}
+		entries := h.cleanupEntries(run.ID)
+		if len(entries) != 1 || entries[0].token != ledger.WeftHostToken || entries[0].state != "dispatched" || h.hold(run.ID) {
+			t.Fatalf("host cleanup of %s = %+v, hold %v", id, entries, h.hold(run.ID))
+		}
+		events, err := os.ReadFile(filepath.Join(cleaned.Segments[1].RunDir.String, "events.ndjson"))
+		if err != nil || !strings.Contains(string(events), `"result":"done","worktree_removed":false`) {
+			t.Fatalf("%s's cleanup events = %s %v", id, events, err)
+		}
 	}
 	h.settle()
 }

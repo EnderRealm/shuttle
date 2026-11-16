@@ -556,7 +556,7 @@ func (t *WeftTx) hostCleanupUnbound(run *WeftRun, d WeftDispatch) (bool, error) 
 		return false, nil
 	}
 	// The cleanup it would admit inherits a trial run's paths, and is held to
-	// them rather than to the host catalog's binding.
+	// them rather than to the run's recorded repository.
 	trial, err := weftRunTrial(t.tx, run.ID)
 	if err != nil {
 		return false, err

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"shuttle/internal/ledger"
+	"shuttle/internal/sandbox"
 )
 
 var (
@@ -294,9 +295,12 @@ func (s *Service) cleanupDispatch(what string) ledger.WeftDispatch {
 // entryCheck is dispatch's and the catalog event's revalidation (§6.3): the
 // project still bound to the repository the entry was admitted for, and the
 // ticket still eligible as tk reads it. A reconcile repairs a landing in the
-// repository the run was recorded in, whatever tk says now; a cleanup needs
-// the binding and not the ticket, which a landing may have made done. A trial
-// entry is held to its own checkout and store instead (§11.7).
+// repository the run was recorded in, whatever tk says now. A cleanup removes
+// its run's worktree from the repository the run was created in, so it is
+// held to that repository still resolving as recorded, not to the project's
+// binding, which may have moved since the run was retained, nor to the
+// project's registration or its ticket, which a landing may have made done
+// (§6.8). A trial entry is held to its own checkout and store instead (§11.7).
 func (s *Service) entryCheck(c *catalog) func(*ledger.WeftEntry) (string, string) {
 	stores := trialStores{}
 	return func(e *ledger.WeftEntry) (string, string) {
@@ -305,6 +309,18 @@ func (s *Service) entryCheck(c *catalog) func(*ledger.WeftEntry) (string, string
 		}
 		if e.Trial.Checkout != "" {
 			return stores.check(e)
+		}
+		if e.Kind == ledger.WeftEntryCleanup {
+			repo, err := sandbox.CanonicalRepository(e.Repository)
+			if err != nil {
+				return ledger.WeftInvalidBinding, fmt.Sprintf("%s (%s), the repository %s was admitted for, no longer resolves: %v",
+					e.Repository, e.RepositoryID, e.ID, err)
+			}
+			if id := sandbox.RepositoryID(repo); id != e.RepositoryID {
+				return ledger.WeftInvalidBinding, fmt.Sprintf("%s (%s), the repository %s was admitted for, now resolves to %s (%s)",
+					e.Repository, e.RepositoryID, e.ID, repo, id)
+			}
+			return "", ""
 		}
 		p := c.byName[e.Project]
 		if p == nil {
@@ -317,9 +333,6 @@ func (s *Service) entryCheck(c *catalog) func(*ledger.WeftEntry) (string, string
 			}
 			return ledger.WeftInvalidBinding, fmt.Sprintf("project %s is now bound to %s, not %s (%s), which %s was admitted for",
 				e.Project, now, e.Repository, e.RepositoryID, e.ID)
-		}
-		if e.Kind == ledger.WeftEntryCleanup {
-			return "", ""
 		}
 		t, ok := c.snap.Get(e.Ticket)
 		if !ok {
