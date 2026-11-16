@@ -599,9 +599,9 @@ func TestServiceDiscoveryMirrorsDevelopmentalSlice(t *testing.T) {
 	var want map[string]any
 	fixtureJSON(t, "service-developmental.json", &want)
 	got, slice := doc["service"].(map[string]any), want["service"].(map[string]any)
-	// output, landing and cleanup are gated by the worker probe (§2.6):
-	// unprobed, each is not served and says what it needs, where the fixture
-	// names the ticket that adds it. Archive import, terminals, the folder
+	// output, landing, cleanup and trial_launch are gated by the worker probe
+	// (§2.6): unprobed, each is not served and says what it needs, where the
+	// fixture names the ticket that adds it. Archive import, terminals, the folder
 	// picker, ticket edits and queue dismissal are the host's own and are
 	// served (§5.4, §6.3, §9, §14.3). The rest is the slice as the fixture declares it.
 	fixtureReasons := map[string]any{}
@@ -611,7 +611,7 @@ func TestServiceDiscoveryMirrorsDevelopmentalSlice(t *testing.T) {
 	for _, c := range got["capabilities"].([]any) {
 		c := c.(map[string]any)
 		switch c["id"] {
-		case "output", "landing", "cleanup":
+		case "output", "landing", "cleanup", "trial_launch":
 			if c["state"] != "not_served" || !strings.Contains(c["reason"].(string), "has not been probed yet") {
 				t.Errorf("unprobed %s = %v", c["id"], c)
 			}

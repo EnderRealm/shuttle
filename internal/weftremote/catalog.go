@@ -79,10 +79,7 @@ func (s *Service) readCatalog() (*catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	problems := snap.Diagnostics()
-	if !snap.Complete && len(problems) == 0 {
-		problems = append(problems, "the snapshot reports itself incomplete")
-	}
+	problems := snapshotProblems(snap)
 	for _, name := range cfg.Names() {
 		if !v2ProjectID.MatchString(name) {
 			problems = append(problems, fmt.Sprintf("%s registers %q, which is not a project id this contract can serve", s.cfg.Paths.TKConfig, name))
@@ -112,6 +109,16 @@ func (s *Service) readCatalog() (*catalog, error) {
 		c.byName[name] = p
 	}
 	return c, nil
+}
+
+// snapshotProblems is why a tk read may not hold every ticket there is, or
+// nothing when it is complete.
+func snapshotProblems(snap *ticket.Snapshot) []string {
+	problems := snap.Diagnostics()
+	if !snap.Complete && len(problems) == 0 {
+		problems = append(problems, "the snapshot reports itself incomplete")
+	}
+	return problems
 }
 
 // repositoriesKey is shuttle's config.json key that binds each hosted project

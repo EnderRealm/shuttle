@@ -50,6 +50,8 @@ type segmentStream struct {
 	// process, which acknowledgements are written to (§7.2).
 	land   bool
 	active *activeSegment
+	// trial is the trial environment the segment was launched with (§11.7).
+	trial ledger.WeftTrial
 	// landCommit and landBase are the graded head and the run's base, the
 	// only commit and base a landing step may be acknowledged for; intent is
 	// the step intended and not yet reported.
@@ -64,10 +66,10 @@ type segmentStream struct {
 type eventHandler func(line []byte) error
 
 func (s *Supervisor) readEvents(run *ledger.WeftRun, segment ledger.WeftSegment, contract string, worker *workerInfo,
-	land bool, active *activeSegment, stdout io.Reader, record io.Writer) workerRead {
+	land bool, trial ledger.WeftTrial, active *activeSegment, stdout io.Reader, record io.Writer) workerRead {
 	r := &segmentStream{
 		s: s, run: run, segment: segment, contract: contract, worker: worker,
-		seq: 1, first: true, chunks: map[ledger.WeftAttempt]int{}, land: land, active: active,
+		seq: 1, first: true, chunks: map[ledger.WeftAttempt]int{}, land: land, active: active, trial: trial,
 	}
 	var handlers map[string]eventHandler
 	switch {
@@ -192,8 +194,9 @@ func (r *segmentStream) helloV1(line []byte) error {
 }
 
 // helloV2 is v1's hello plus what §2.6 and §11.3 add: the version and
-// capabilities the probe found, no landing, no trial environment, and a
-// registered repository — the only launch this host makes.
+// capabilities the probe found, landing as launched, and either a registered
+// repository with no trial environment or, for a trial segment, an
+// unregistered checkout with exactly the paths it was launched with (§11.7).
 func (r *segmentStream) helloV2(line []byte) error {
 	var event helloV2Event
 	if err := decodeEvent(line, &event, "hello"); err != nil {
@@ -211,14 +214,28 @@ func (r *segmentStream) helloV2(line []byte) error {
 	if !event.Land && r.land {
 		return fmt.Errorf("hello does not report land, but the segment was launched with --land")
 	}
-	if event.Environment.TKStoreRoot != nil || event.Environment.WorkEvidenceDir != nil || !event.Registered {
-		return fmt.Errorf("hello reports a trial environment or unregistered checkout no launch named")
+	if r.trial.Checkout == "" {
+		if event.Environment.TKStoreRoot != nil || event.Environment.WorkEvidenceDir != nil || !event.Registered {
+			return fmt.Errorf("hello reports a trial environment or unregistered checkout no launch named")
+		}
+	} else if event.Registered || !samePath(event.Environment.TKStoreRoot, r.trial.TKStoreRoot) ||
+		!samePath(event.Environment.WorkEvidenceDir, r.trial.WorkEvidenceDir) {
+		return fmt.Errorf("hello reports a registered repository or a trial environment other than the one the segment was launched with")
 	}
 	r.workerID, r.landBase = event.WorkerRunID, event.Base
 	r.s.stateMu.Lock()
 	err := r.s.store.RecordWeftLandingHello(r.run.ID, r.segment.Segment, event.WorkerRunID, event.Base, event.Criteria, r.land)
 	r.s.stateMu.Unlock()
 	return err
+}
+
+// samePath is whether a path a worker reported is the one launched, where ""
+// launched none and only a null reports none.
+func samePath(reported *string, launched string) bool {
+	if reported == nil {
+		return launched == ""
+	}
+	return launched != "" && *reported == launched
 }
 
 func (r *segmentStream) checkHello(event helloEvent) error {

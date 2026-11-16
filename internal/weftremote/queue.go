@@ -295,11 +295,16 @@ func (s *Service) cleanupDispatch(what string) ledger.WeftDispatch {
 // project still bound to the repository the entry was admitted for, and the
 // ticket still eligible as tk reads it. A reconcile repairs a landing in the
 // repository the run was recorded in, whatever tk says now; a cleanup needs
-// the binding and not the ticket, which a landing may have made done.
+// the binding and not the ticket, which a landing may have made done. A trial
+// entry is held to its own checkout and store instead (§11.7).
 func (s *Service) entryCheck(c *catalog) func(*ledger.WeftEntry) (string, string) {
+	stores := trialStores{}
 	return func(e *ledger.WeftEntry) (string, string) {
 		if e.Kind == ledger.WeftEntryReconcile {
 			return "", ""
+		}
+		if e.Trial.Checkout != "" {
+			return stores.check(e)
 		}
 		p := c.byName[e.Project]
 		if p == nil {
@@ -498,25 +503,36 @@ func (s *Service) admission(key string) ledger.WeftAdmission {
 func (s *Service) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	s.mutateV2(w, r, func(body []byte, key string) (v2Commit, error) {
 		var req struct {
-			ContractVersion string  `json:"contract_version"`
-			Ticket          string  `json:"ticket"`
-			RepositoryID    *string `json:"repository_id"`
-			Checkout        any     `json:"checkout"`
-			Environment     any     `json:"environment"`
+			ContractVersion string             `json:"contract_version"`
+			Ticket          string             `json:"ticket"`
+			RepositoryID    *string            `json:"repository_id"`
+			Checkout        *folderRef         `json:"checkout"`
+			Environment     *launchEnvironment `json:"environment"`
 		}
 		if err := decodeV2(body, &req, "ticket", "repository_id", "checkout", "environment"); err != nil {
 			return refusedBy(err), nil
 		}
-		if req.Checkout != nil || req.Environment != nil {
+		trial := req.Checkout != nil || req.Environment != nil
+		if trial && !s.served("trial_launch") {
 			message, _ := s.notServedMessage("trial_launch")
 			return refused("capability_not_served", "%s", message), nil
 		}
-		if req.RepositoryID == nil {
+		switch {
+		case trial && req.Checkout == nil:
+			return refused("malformed", "environment is a checkout launch's: name the checkout it runs against"), nil
+		case trial && req.RepositoryID != nil:
+			return refused("malformed", "a launch names repository_id or checkout, not both: a checkout launch's repository is derived from the checkout"), nil
+		case trial && (req.Environment == nil || req.Environment.TKStoreRoot == nil):
+			return refused("malformed", "a checkout launch must name environment.tk_store_root, the store its ticket is read from"), nil
+		case !trial && req.RepositoryID == nil:
 			return refused("malformed", "repository_id is required: only a checkout launch names none"), nil
 		}
 		project, slug, _ := strings.Cut(req.Ticket, "/")
 		if slug == "" || strings.Contains(slug, "/") {
 			return refused("malformed", "ticket must be a qualified project/id"), nil
+		}
+		if trial {
+			return s.trialCommit(req.Ticket, project, req.Checkout, req.Environment, key)
 		}
 		c, err := s.readCatalog()
 		if err != nil {

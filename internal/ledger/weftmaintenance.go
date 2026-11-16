@@ -298,7 +298,11 @@ func (t *WeftTx) revalidateMaintenance(e *WeftEntry, finished func(string) bool)
 	if err != nil || !host {
 		return "", "", err
 	}
-	if !finished(run.Ticket) {
+	done, err := hostFinished(t.tx, run.ID, run.Ticket, finished)
+	if err != nil {
+		return "", "", err
+	}
+	if !done {
 		return WeftInvalidTicket, fmt.Sprintf("%s no longer reads done or closed in tk", run.Ticket), nil
 	}
 	blocked, err := t.hostCleanupBlocked(run, e.ID)
@@ -306,6 +310,18 @@ func (t *WeftTx) revalidateMaintenance(e *WeftEntry, finished func(string) bool)
 		return "", "", err
 	}
 	return WeftInvalidRun, blocked, nil
+}
+
+// hostFinished is whether finished, the host catalog's read, has the run's
+// ticket done or closed. A trial run's ticket is in its own store, which that
+// read never sees (§11.7): a ticket of the same id in the host catalog says
+// nothing about it, so a trial run is never finished here.
+func hostFinished(q querier, runID, ticket string, finished func(string) bool) (bool, error) {
+	trial, err := weftRunTrial(q, runID)
+	if err != nil || trial.Checkout != "" {
+		return false, err
+	}
+	return finished(ticket), nil
 }
 
 // hostStarted is whether the entry is one the host admitted itself.
@@ -419,19 +435,27 @@ func (t *WeftTx) EndFinishedParked(projects []string, finished func(string) bool
 	if err != nil {
 		return err
 	}
-	var ids, tickets []string
+	var parked, parkedTickets []string
 	for rows.Next() {
 		var id, ticket string
 		if err := rows.Scan(&id, &ticket); err != nil {
 			rows.Close()
 			return err
 		}
-		if finished(ticket) {
-			ids, tickets = append(ids, id), append(tickets, ticket)
-		}
+		parked, parkedTickets = append(parked, id), append(parkedTickets, ticket)
 	}
 	if err := rows.Close(); err != nil {
 		return err
+	}
+	var ids, tickets []string
+	for i, id := range parked {
+		done, err := hostFinished(t.tx, id, parkedTickets[i], finished)
+		if err != nil {
+			return err
+		}
+		if done {
+			ids, tickets = append(ids, id), append(tickets, parkedTickets[i])
+		}
 	}
 	for i, id := range ids {
 		summary, err := finishedTicketSummary(tickets[i])
@@ -475,7 +499,14 @@ func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
 		if err != nil {
 			return err
 		}
-		if blocked != "" || !d.Finished(run.Ticket) {
+		if blocked != "" {
+			continue
+		}
+		done, err := hostFinished(t.tx, run.ID, run.Ticket, d.Finished)
+		if err != nil {
+			return err
+		}
+		if !done {
 			continue
 		}
 		unbound, err := t.hostCleanupUnbound(run, d)
@@ -524,8 +555,14 @@ func (t *WeftTx) hostCleanupUnbound(run *WeftRun, d WeftDispatch) (bool, error) 
 	case state != WeftEntryInvalidated || reason.String != WeftInvalidBinding:
 		return false, nil
 	}
+	// The cleanup it would admit inherits a trial run's paths, and is held to
+	// them rather than to the host catalog's binding.
+	trial, err := weftRunTrial(t.tx, run.ID)
+	if err != nil {
+		return false, err
+	}
 	again, _ := d.Check(&WeftEntry{Kind: WeftEntryCleanup, Ticket: run.Ticket, Project: run.Project,
-		RepositoryID: run.RepositoryID, Repository: run.Repo, RunID: sql.NullString{String: run.ID, Valid: true}})
+		RepositoryID: run.RepositoryID, Repository: run.Repo, RunID: sql.NullString{String: run.ID, Valid: true}, Trial: trial})
 	return again == WeftInvalidBinding, nil
 }
 

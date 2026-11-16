@@ -236,6 +236,9 @@ type launch struct {
 	contract  string
 	worker    *workerInfo
 	land      bool
+	// trial is the run's trial environment (§11.7), which its hello must
+	// report back; zero for a run of a registered repository.
+	trial ledger.WeftTrial
 }
 
 func (s *Supervisor) runSegment(runID string) ([]string, error) {
@@ -419,7 +422,9 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		close(stderrDone)
 	}()
 	eventCh := make(chan workerRead, 1)
-	go func() { eventCh <- s.readEvents(run, segment, contract, worker, l.land, active, stdout, eventsFile) }()
+	go func() {
+		eventCh <- s.readEvents(run, segment, contract, worker, l.land, l.trial, active, stdout, eventsFile)
+	}()
 	// The worker is not reaped until its session is swept: its zombie holds
 	// the pid that names the session.
 	exitCh := make(chan error, 1)
@@ -543,8 +548,8 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 
 // preparePipeline is a launch, answer or resume segment's preflight: the
 // segment's agent user and a worker that can launch as it, a worktree that
-// user can reach, the answer file written, and --land passed while the worker
-// can land (§7.1).
+// user can reach, the answer file written, --land passed while the worker
+// can land (§7.1), and a trial run's environment (§11.7).
 func (s *Supervisor) preparePipeline(run *ledger.WeftRun, segment ledger.WeftSegment, runDir string) (*launch, error) {
 	if !segment.AgentUser.Valid {
 		return nil, fmt.Errorf("segment %d holds no agent user: it was claimed before hosted segments ran as agent users", segment.Segment)
@@ -575,7 +580,13 @@ func (s *Supervisor) preparePipeline(run *ledger.WeftRun, segment ledger.WeftSeg
 	if err != nil {
 		return nil, err
 	}
-	l.argv = s.argv(run, segment, l.contract, answerPath, l.land)
+	s.stateMu.RLock()
+	l.trial, err = s.store.WeftRunTrial(run.ID)
+	s.stateMu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	l.argv = s.argv(run, segment, l.contract, answerPath, l.land, l.trial)
 	l.env = s.environ(homeDir, runDir, oauthToken)
 	return l, nil
 }
@@ -615,6 +626,22 @@ func (s *Supervisor) prepareMaintenance(run *ledger.WeftRun, segment ledger.Weft
 		l.argv = append(l.argv, "--worker-run", latestWorkerBefore(run, segment.Segment))
 		if commit, base := reconcileCommit(run); commit != "" {
 			l.argv = append(l.argv, "--commit", commit, "--base", base)
+		}
+		// A trial run's landing marks its ticket done in its own store. A
+		// reconcile is never revalidated at dispatch, and its worker writes
+		// that store as the operator, so the path is held to what was
+		// admitted here: a store moved under a link is another store.
+		s.stateMu.RLock()
+		trial, err := s.store.WeftRunTrial(run.ID)
+		s.stateMu.RUnlock()
+		if err != nil {
+			return nil, err
+		}
+		if trial.TKStoreRoot != "" {
+			if moved := trialPathMoved(trial.TKStoreRoot); moved != "" {
+				return nil, fmt.Errorf("the tk store %s run %s was admitted for %s; the reconcile was not launched", trial.TKStoreRoot, run.ID, moved)
+			}
+			l.argv = append(l.argv, "--tk-store-root", trial.TKStoreRoot)
 		}
 	case ledger.WeftSegmentArchive:
 		s.stateMu.RLock()
@@ -832,9 +859,10 @@ func executable(path string) error {
 }
 
 // argv is a pipeline segment's command line: as its agent user, with --land
-// while the host lands (§7.1, §11.6). It carries no credential: argv is
-// visible to every user on the machine, the agents included.
-func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, contract, answerPath string, land bool) []string {
+// while the host lands, and a trial run's paths as dispatch revalidated them
+// (§7.1, §11.6, §11.7). It carries no credential: argv is visible to every
+// user on the machine, the agents included.
+func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, contract, answerPath string, land bool, trial ledger.WeftTrial) []string {
 	argv := []string{
 		s.cfg.Weft.WorkerBin, "segment", "--contract", contract,
 		"--run", run.ID, "--segment", fmt.Sprint(segment.Segment),
@@ -850,6 +878,12 @@ func (s *Supervisor) argv(run *ledger.WeftRun, segment ledger.WeftSegment, contr
 	}
 	if answerPath != "" && resumed != "" {
 		argv = append(argv, "--answer-file", answerPath)
+	}
+	if trial.TKStoreRoot != "" {
+		argv = append(argv, "--tk-store-root", trial.TKStoreRoot)
+	}
+	if trial.WorkEvidenceDir != "" {
+		argv = append(argv, "--work-evidence-dir", trial.WorkEvidenceDir)
 	}
 	return argv
 }

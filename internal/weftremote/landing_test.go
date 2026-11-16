@@ -52,11 +52,17 @@ func fixtureLines(t *testing.T, name string) workerLines {
 // acknowledgement after each intent.
 func (h *queueHost) landingSegment(ticketID, fixture string) workerLines {
 	h.t.Helper()
+	return h.landingSegmentAt(ticketID, h.worktree(ticketID), fixture)
+}
+
+// landingSegmentAt is landingSegment for a run whose worktree is worktree.
+func (h *queueHost) landingSegmentAt(ticketID, worktree, fixture string) workerLines {
+	h.t.Helper()
 	var out workerLines
 	for _, ev := range fixtureLines(h.t, fixture) {
 		switch ev["event"] {
 		case "hello":
-			ev["worktree"], ev["ticket"], ev["branch"], ev["capabilities"] = h.worktree(ticketID), ticketID, ticketID, h.capabilities
+			ev["worktree"], ev["ticket"], ev["branch"], ev["capabilities"] = worktree, ticketID, ticketID, h.capabilities
 			ev["project"], _, _ = strings.Cut(ticketID, "/")
 		case "summarized":
 			ev["summary"].(map[string]any)["report"].(map[string]any)["ticket"] = ticketID

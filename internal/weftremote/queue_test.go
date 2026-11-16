@@ -62,16 +62,18 @@ func (b *syncBuffer) String() string {
 }
 
 // queueWorkerScript is a weft-worker/v2 worker: its version is the control
-// directory's version.json, and its hello repeats CAPABILITIES. A park asks
-// the structured questions in the ticket's .questions control file when there
-// is one, else the legacy question.
+// directory's version.json, and its hello repeats CAPABILITIES and reports the
+// trial paths it was launched with — or the ticket's .environment control
+// file's environment and registered fields in their place. A park asks the
+// structured questions in the ticket's .questions control file when there is
+// one, else the legacy question.
 const queueWorkerScript = `#!/bin/sh
 control=CONTROL
 case "$1" in
   version) cat "$control/version.json"; exit 0 ;;
   allowance-probe) exit 64 ;;
 esac
-run= segment= ticket= repo= worktreeroot= resume= answerfile=
+run= segment= ticket= repo= worktreeroot= resume= answerfile= tkstore= evidence=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --run) run="$2"; shift 2 ;;
@@ -81,6 +83,8 @@ while [ "$#" -gt 0 ]; do
     --worktree-root) worktreeroot="$2"; shift 2 ;;
     --resume) resume="$2"; shift 2 ;;
     --answer-file) answerfile="$2"; shift 2 ;;
+    --tk-store-root) tkstore="$2"; shift 2 ;;
+    --work-evidence-dir) evidence="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -96,6 +100,13 @@ resumed=null
 if [ -n "$resume" ]; then resumed="\"$resume\""; fi
 answer=null
 if [ -n "$answerfile" ]; then answer="\"$(sed -n 's/.*"question_id":"\([^"]*\)".*/\1/p' "$answerfile")\""; fi
+environment='"environment":{"tk_store_root":null,"work_evidence_dir":null},"registered":true'
+if [ -n "$tkstore" ]; then
+  evidenced=null
+  if [ -n "$evidence" ]; then evidenced="\"$evidence\""; fi
+  environment="\"environment\":{\"tk_store_root\":\"$tkstore\",\"work_evidence_dir\":$evidenced},\"registered\":false"
+fi
+if [ -f "$control/$slug.environment" ]; then environment=$(cat "$control/$slug.environment"); fi
 env="\"contract_version\":\"weft-worker/v2\",\"run_id\":\"$run\",\"segment\":$segment"
 landing='{"state":"not_applicable","step":null,"reason":null,"detail":"landing is not served by this host","branch":null,"commit":null}'
 summary='{"state":"unavailable","reason":"fixture worker"}'
@@ -105,7 +116,7 @@ if [ "$mode" = stale ]; then
 fi
 mkdir -p "$worktree" "$repo/.git/worktrees/$slug"
 printf 'gitdir: %s\n' "$repo/.git/worktrees/$slug" > "$worktree/.git"
-printf '{%s,"worker_run_id":"%s","seq":1,"ts":"2026-10-11T12:00:00.000Z","event":"hello","worker_version":"weft-worker 0.2.0 (weft@dev)","capabilities":CAPABILITIES,"land":false,"environment":{"tk_store_root":null,"work_evidence_dir":null},"registered":true,"ticket":"%s","project":"%s","branch":"%s","worktree":"%s","base":"base","criteria":"criteria","resumed":%s,"inherited":[],"answer":%s,"stages":[]}\n' "$env" "$worker" "$ticket" "$project" "$ticket" "$worktree" "$resumed" "$answer"
+printf '{%s,"worker_run_id":"%s","seq":1,"ts":"2026-10-11T12:00:00.000Z","event":"hello","worker_version":"weft-worker 0.2.0 (weft@dev)","capabilities":CAPABILITIES,"land":false,%s,"ticket":"%s","project":"%s","branch":"%s","worktree":"%s","base":"base","criteria":"criteria","resumed":%s,"inherited":[],"answer":%s,"stages":[]}\n' "$env" "$worker" "$environment" "$ticket" "$project" "$ticket" "$worktree" "$resumed" "$answer"
 if [ "$mode" = hold ]; then
   while [ ! -f "$control/$slug.release" ]; do sleep 0.02; done
   rm -f "$control/$slug.release"

@@ -28,10 +28,10 @@ type capability struct {
 }
 
 // developmentalCapabilities is §2.3's list in the contract's order, as
-// docs/service-v2/service-developmental.json began it (§2.4). output, landing
-// and cleanup are gated by the worker probe instead (workerGate); archive
-// import, terminals, the folder picker, ticket edits and queue dismissal are
-// the host's alone and served.
+// docs/service-v2/service-developmental.json began it (§2.4). output, landing,
+// cleanup and trial_launch are gated by the worker probe instead
+// (workerGate); archive import, terminals, the folder picker, ticket edits and
+// queue dismissal are the host's alone and served.
 var developmentalCapabilities = []capability{
 	{ID: "dashboard"},
 	{ID: "catalog"},
@@ -49,7 +49,7 @@ var developmentalCapabilities = []capability{
 	{ID: "archive"},
 	{ID: "ticket_edit"},
 	{ID: "queue_dismiss"},
-	{ID: "trial_launch", Reason: "not served by this host build: checkout launches arrive with warp/host-weft-worker-cd59"},
+	{ID: "trial_launch"},
 }
 
 // notServedRoutes maps each route of a not-served capability (§3, §4.3) to
@@ -93,6 +93,8 @@ func (s *Service) capabilities() []capability {
 			listed[i].Reason = s.workerGate(worker, "landing needs", "land", "reconcile")
 		case "cleanup":
 			listed[i].Reason = s.workerGate(worker, "dismiss and fresh work need", "cleanup", "archive")
+		case "trial_launch":
+			listed[i].Reason = s.workerGate(worker, "checkout launches need", "trial_environment")
 		}
 	}
 	return listed

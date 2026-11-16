@@ -88,7 +88,14 @@ type WeftEntry struct {
 	CreatedAt, UpdatedAt                                string
 	Revision                                            int64
 	Dismissed                                           bool
+	Trial                                               WeftTrial
 }
+
+// WeftTrial is a trial launch's environment (§11.7): the canonical checkout
+// it was admitted against, the tk store root its ticket is read from and the
+// work evidence directory, "" when the launch named none. Checkout is ""
+// for every entry that is not of a trial run.
+type WeftTrial struct{ Checkout, TKStoreRoot, WorkEvidenceDir string }
 
 // Resource is the entry as every response and queue event carries it.
 func (e *WeftEntry) Resource() map[string]any {
@@ -114,15 +121,34 @@ func (e *WeftEntry) Resource() map[string]any {
 
 const weftEntryColumns = `id,kind,ticket,project,repository_id,repository,selection_id,position,state,
 	waiting_reason,holder_kind,holder_id,invalidated_reason,invalidated_detail,run_id,supersedes,answer_id,
-	created_at,updated_at,revision,dismissed`
+	created_at,updated_at,revision,dismissed,
+	COALESCE(checkout,''),COALESCE(tk_store_root,''),COALESCE(work_evidence_dir,'')`
 
 func scanWeftEntry(sc scanner) (*WeftEntry, error) {
 	var e WeftEntry
 	err := sc.Scan(&e.ID, &e.Kind, &e.Ticket, &e.Project, &e.RepositoryID, &e.Repository, &e.SelectionID,
 		&e.Position, &e.State, &e.WaitingReason, &e.HolderKind, &e.HolderID, &e.InvalidatedReason,
-		&e.InvalidatedDetail, &e.RunID, &e.Supersedes, &e.AnswerID, &e.CreatedAt, &e.UpdatedAt, &e.Revision, &e.Dismissed)
+		&e.InvalidatedDetail, &e.RunID, &e.Supersedes, &e.AnswerID, &e.CreatedAt, &e.UpdatedAt, &e.Revision, &e.Dismissed,
+		&e.Trial.Checkout, &e.Trial.TKStoreRoot, &e.Trial.WorkEvidenceDir)
 	return &e, err
 }
+
+// weftRunTrial is the trial environment of the entry that minted the run, or
+// the zero WeftTrial for a run no trial launch minted.
+func weftRunTrial(q querier, runID string) (WeftTrial, error) {
+	var trial WeftTrial
+	err := q.QueryRow(`SELECT COALESCE(e.checkout,''),COALESCE(e.tk_store_root,''),COALESCE(e.work_evidence_dir,'')
+		FROM weft_runs r JOIN weft_entries e ON e.id=r.entry_id WHERE r.id=?`, runID).
+		Scan(&trial.Checkout, &trial.TKStoreRoot, &trial.WorkEvidenceDir)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WeftTrial{}, nil
+	}
+	return trial, err
+}
+
+// WeftRunTrial is the trial environment every segment of the run is launched
+// with (§11.7): the zero WeftTrial for a run of a registered repository.
+func (s *Store) WeftRunTrial(runID string) (WeftTrial, error) { return weftRunTrial(s.db, runID) }
 
 // WeftCapacity is the cap with the running and waiting counts (§6.1).
 type WeftCapacity struct{ Cap, Running, Waiting int }
@@ -625,6 +651,10 @@ type WeftAdmission struct {
 	Kind, Ticket, Project, RepositoryID, Repository string
 	SelectionID, RunID, AnswerID, Supersedes        string
 	TokenID, RequestKey                             string
+	// Trial is a trial launch's environment; an entry that continues a run
+	// inherits its run's, so each segment of a trial run is revalidated
+	// against the store and checkout it was admitted for.
+	Trial WeftTrial
 }
 
 // Admit applies the per-ticket guard and inserts a launch or frontier entry
@@ -842,11 +872,23 @@ func insertEntryTx(tx *sql.Tx, a WeftAdmission, state string, now time.Time) (st
 	if a.TokenID == WeftHostToken {
 		a.RequestKey = id
 	}
+	run := a.RunID
+	if run == "" {
+		run = a.Supersedes
+	}
+	if a.Trial.Checkout == "" && run != "" {
+		if a.Trial, err = weftRunTrial(tx, run); err != nil {
+			return "", err
+		}
+	}
 	_, err = tx.Exec(`INSERT INTO weft_entries(id,kind,ticket,project,repository_id,repository,selection_id,
-		position,state,run_id,supersedes,answer_id,token_id,request_key,created_at,updated_at,revision)
-		VALUES(?,?,?,?,?,?,?,(SELECT COALESCE(MAX(position),0)+1 FROM weft_entries),?,?,?,?,?,?,?,?,1)`,
+		position,state,run_id,supersedes,answer_id,checkout,tk_store_root,work_evidence_dir,
+		token_id,request_key,created_at,updated_at,revision)
+		VALUES(?,?,?,?,?,?,?,(SELECT COALESCE(MAX(position),0)+1 FROM weft_entries),?,?,?,?,?,?,?,?,?,?,?,1)`,
 		id, a.Kind, a.Ticket, a.Project, a.RepositoryID, a.Repository, nullString(a.SelectionID),
-		state, nullString(a.RunID), nullString(a.Supersedes), nullString(a.AnswerID), a.TokenID, a.RequestKey, stamp, stamp)
+		state, nullString(a.RunID), nullString(a.Supersedes), nullString(a.AnswerID),
+		nullString(a.Trial.Checkout), nullString(a.Trial.TKStoreRoot), nullString(a.Trial.WorkEvidenceDir),
+		a.TokenID, a.RequestKey, stamp, stamp)
 	return id, err
 }
 
@@ -1173,7 +1215,8 @@ type WeftDispatch struct {
 	Check func(*WeftEntry) (reason, detail string)
 	// Finished is whether a ticket reads done or closed through pkg/ticket as
 	// Check's read has it: the trigger of a host-started cleanup (§6.8). Nil
-	// on a host that does not serve cleanup, which cleans no run itself.
+	// on a host that does not serve cleanup, which cleans no run itself. It is
+	// the host catalog's, so it is never consulted for a trial run (hostFinished).
 	Finished func(ticket string) bool
 }
 
