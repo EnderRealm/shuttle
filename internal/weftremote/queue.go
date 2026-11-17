@@ -262,13 +262,13 @@ func decodeV2(body []byte, dst any, keys ...string) error {
 
 // dispatchConfig is dispatch against one tk read: entries are revalidated
 // against it, runs are minted pending their landing while it is served, and
-// while cleanup is served a retained run whose ticket it reads finished is
-// cleaned by the host (§6.8).
+// while cleanup is served a retained run whose ticket it reads finished — a
+// trial run's, in its own store — is cleaned by the host (§6.8, §11.7).
 func (s *Service) dispatchConfig(c *catalog) ledger.WeftDispatch {
 	d := s.segments.dispatchBase()
 	d.Check = s.entryCheck(c)
 	if s.served("cleanup") {
-		d.Finished = c.finished
+		d.Finished, d.TrialFinished = c.finished, c.trials.finished
 	}
 	return d
 }
@@ -302,13 +302,12 @@ func (s *Service) cleanupDispatch(what string) ledger.WeftDispatch {
 // project's registration or its ticket, which a landing may have made done
 // (§6.8). A trial entry is held to its own checkout and store instead (§11.7).
 func (s *Service) entryCheck(c *catalog) func(*ledger.WeftEntry) (string, string) {
-	stores := trialStores{}
 	return func(e *ledger.WeftEntry) (string, string) {
 		if e.Kind == ledger.WeftEntryReconcile {
 			return "", ""
 		}
 		if e.Trial.Checkout != "" {
-			return stores.check(e)
+			return c.trials.check(e)
 		}
 		if e.Kind == ledger.WeftEntryCleanup {
 			repo, err := sandbox.CanonicalRepository(e.Repository)
@@ -393,7 +392,7 @@ func (s *Service) dispatchWith(c *catalog, owed bool) {
 	s.stateMu.Lock()
 	err := s.store.WeftTx(func(t *ledger.WeftTx) error {
 		if turned {
-			if err := t.EndFinishedParked(nil, c.finished); err != nil {
+			if err := t.EndFinishedParked(nil, c.finished, c.trials.finished); err != nil {
 				return err
 			}
 		}
@@ -469,7 +468,7 @@ func (s *Service) Restart() error {
 	d := s.dispatchConfig(c)
 	s.stateMu.Lock()
 	err = s.store.WeftTx(func(t *ledger.WeftTx) error {
-		if err := t.EndFinishedParked(nil, c.finished); err != nil {
+		if err := t.EndFinishedParked(nil, c.finished, c.trials.finished); err != nil {
 			return err
 		}
 		if err := t.CleanFinished(nil, d); err != nil {

@@ -208,7 +208,7 @@ func (t *WeftTx) AdmitFresh(runID string, revision int64, worktree, head string,
 	if err := t.requireIdle(run); err != nil {
 		return nil, err
 	}
-	if err := t.guard(run.Ticket, runID); err != nil {
+	if err := t.runGuard(run); err != nil {
 		return nil, err
 	}
 	if worktree != run.Worktree || (run.Head.Valid && head != run.Head.String) {
@@ -247,10 +247,10 @@ func (s *Store) WeftArchiveHead(runID string) (string, error) {
 
 // revalidateMaintenance is dispatch's recheck of a reconcile, cleanup or
 // fresh entry against the run it acts on as that run is now. A host-started
-// cleanup also re-tests its trigger (§6.8): its ticket through finished, then
-// the rest of what made the run qualify. finished is nil on a host that does
-// not serve cleanup, where the ticket is not re-tested.
-func (t *WeftTx) revalidateMaintenance(e *WeftEntry, finished func(string) bool) (string, string, error) {
+// cleanup also re-tests its trigger (§6.8): its ticket through d's finished
+// reads, then the rest of what made the run qualify. d.Finished is nil on a
+// host that does not serve cleanup, where the ticket is not re-tested.
+func (t *WeftTx) revalidateMaintenance(e *WeftEntry, d WeftDispatch) (string, string, error) {
 	runID := e.RunID.String
 	if e.Kind == WeftEntryFresh {
 		runID = e.Supersedes.String
@@ -291,14 +291,14 @@ func (t *WeftTx) revalidateMaintenance(e *WeftEntry, finished func(string) bool)
 		return WeftInvalidRun, fmt.Sprintf("run %s's worktree is already %s", run.ID, run.Disposition), nil
 	case e.Kind == WeftEntryFresh && run.Disposition == WeftDispositionArchived:
 		return WeftInvalidRun, fmt.Sprintf("run %s is already archived, superseded by %s", run.ID, run.SupersededBy.String), nil
-	case e.Kind != WeftEntryCleanup || finished == nil:
+	case e.Kind != WeftEntryCleanup || d.Finished == nil:
 		return "", "", nil
 	}
 	host, err := hostStarted(t.tx, e.ID)
 	if err != nil || !host {
 		return "", "", err
 	}
-	done, err := hostFinished(t.tx, run.ID, run.Ticket, finished)
+	done, err := runFinished(t.tx, run.ID, run.Ticket, d.Finished, d.TrialFinished)
 	if err != nil {
 		return "", "", err
 	}
@@ -312,16 +312,24 @@ func (t *WeftTx) revalidateMaintenance(e *WeftEntry, finished func(string) bool)
 	return WeftInvalidRun, blocked, nil
 }
 
-// hostFinished is whether finished, the host catalog's read, has the run's
-// ticket done or closed. A trial run's ticket is in its own store, which that
-// read never sees (§11.7): a ticket of the same id in the host catalog says
-// nothing about it, so a trial run is never finished here.
-func hostFinished(q querier, runID, ticket string, finished func(string) bool) (bool, error) {
+// runFinished is whether the run's ticket reads done or closed: through
+// finished, the host catalog's read, for a run of a registered repository,
+// and through trialFinished in the store it was admitted against for a trial
+// run (§11.7), whose ticket the host catalog never holds — a ticket of the
+// same id there says nothing about it. A nil trialFinished reads no trial run
+// finished. No trial store is watched: a trial ticket finished in its own
+// store outside a run is reached at the next restart, cleanup-served turn,
+// owed pass or settle of its run, not on a tk watch pass as a registered
+// run's is.
+func runFinished(q querier, runID, ticket string, finished func(string) bool, trialFinished func(store, ticket string) bool) (bool, error) {
 	trial, err := weftRunTrial(q, runID)
-	if err != nil || trial.Checkout != "" {
+	switch {
+	case err != nil:
 		return false, err
+	case trial.Checkout == "":
+		return finished(ticket), nil
 	}
-	return finished(ticket), nil
+	return trialFinished != nil && trialFinished(trial.TKStoreRoot, ticket), nil
 }
 
 // hostStarted is whether the entry is one the host admitted itself.
@@ -413,13 +421,16 @@ func (t *WeftTx) CleanFinishedRun(runID string, d WeftDispatch) error {
 }
 
 // EndFinishedParked ends every parked hosted run of projects — of every
-// project when projects is nil — whose ticket finished reads done or closed:
+// project when projects is nil — whose ticket finished reads done or closed,
+// or trialFinished in its own store for a trial run (runFinished):
 // nothing is left to answer its question for, so the question is withdrawn
 // and the run is over, stopped but not by the operator, its worktree and
 // branch retained (§6.5). A host cleanup hold does not spare it; the hold
 // bounds cleanup, not the question. It runs before CleanFinished, so the run
-// it ends is evaluated for host cleanup as any other that is over.
-func (t *WeftTx) EndFinishedParked(projects []string, finished func(string) bool) error {
+// it ends is evaluated for host cleanup as any other that is over. A trial
+// store is not watched, so a parked trial run whose ticket finishes in it is
+// ended by the next restart or cleanup-served turn, not a tk watch pass.
+func (t *WeftTx) EndFinishedParked(projects []string, finished func(string) bool, trialFinished func(store, ticket string) bool) error {
 	if projects != nil && len(projects) == 0 {
 		return nil
 	}
@@ -449,7 +460,7 @@ func (t *WeftTx) EndFinishedParked(projects []string, finished func(string) bool
 	}
 	var ids, tickets []string
 	for i, id := range parked {
-		done, err := hostFinished(t.tx, id, parkedTickets[i], finished)
+		done, err := runFinished(t.tx, id, parkedTickets[i], finished, trialFinished)
 		if err != nil {
 			return err
 		}
@@ -482,8 +493,9 @@ func finishedTicketSummary(ticket string) (string, error) {
 }
 
 // cleanFinished admits, for each of runs that qualifies and whose ticket
-// d.Finished reads done or closed, the cleanup entry a dismiss would — as
-// the host admits its own, with no request behind it — and dispatches it in
+// reads done or closed through d (runFinished), the cleanup entry a dismiss
+// would — as the host admits its own, with no request behind it, carrying a
+// trial run's environment as insertEntryTx inherits it — and dispatches it in
 // this transaction. A nil d.Finished is a host that does not serve cleanup,
 // which cleans nothing itself.
 func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
@@ -502,7 +514,7 @@ func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
 		if blocked != "" {
 			continue
 		}
-		done, err := hostFinished(t.tx, run.ID, run.Ticket, d.Finished)
+		done, err := runFinished(t.tx, run.ID, run.Ticket, d.Finished, d.TrialFinished)
 		if err != nil {
 			return err
 		}

@@ -52,12 +52,13 @@ type catalogProject struct {
 }
 
 // catalog is one complete tk read: every registered project with its tickets,
-// off one snapshot.
+// off one snapshot, and the trial stores read beside it, each once (§11.7).
 type catalog struct {
 	store    *ticket.MultiStore
 	snap     *ticket.Snapshot
 	projects []*catalogProject
 	byName   map[string]*catalogProject
+	trials   trialStores
 }
 
 // incompleteReadError is a tk read that may not hold every ticket there is.
@@ -94,7 +95,7 @@ func (s *Service) readCatalog() (*catalog, error) {
 		byNamespace[ns] = append(byNamespace[ns], t)
 	}
 	homes := homeDirectories()
-	c := &catalog{store: store, snap: snap, byName: map[string]*catalogProject{}}
+	c := &catalog{store: store, snap: snap, byName: map[string]*catalogProject{}, trials: trialStores{}}
 	for _, name := range cfg.Names() {
 		p := bindProject(name, s.cfg.Weft.Repositories[name], homes)
 		p.Tickets = byNamespace[name]
@@ -298,7 +299,7 @@ func (s *Service) recordCatalogTx(tx *ledger.WeftTx, c *catalog) error {
 	if err := tx.RevalidateEntries(changed, d); err != nil {
 		return err
 	}
-	if err := tx.EndFinishedParked(changed, c.finished); err != nil {
+	if err := tx.EndFinishedParked(changed, c.finished, c.trials.finished); err != nil {
 		return err
 	}
 	return tx.CleanFinished(changed, d)
@@ -345,7 +346,7 @@ func (s *Service) readCatalogView() (*catalogView, error) {
 		return nil, err
 	}
 	v := &catalogView{catalog: c, runs: map[string][]*ledger.WeftRun{}}
-	runs, err := s.store.WeftRuns("", "")
+	runs, err := s.store.QueryWeftRuns(ledger.WeftRunQuery{Host: true})
 	if err != nil {
 		return nil, err
 	}

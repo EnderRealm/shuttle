@@ -133,13 +133,38 @@ func trialPathMoved(path string) string {
 	return ""
 }
 
-// trialStores are the trial stores one revalidation pass has read, by root,
-// so a store is read once however many of its entries wait.
+// trialStores are the trial stores one pass has read, by root, so a store is
+// read once however many of its entries wait or runs are evaluated.
 type trialStores map[string]trialRead
 
 type trialRead struct {
 	snap *ticket.Snapshot
 	err  error
+}
+
+func (m trialStores) read(root string) trialRead {
+	read, ok := m[root]
+	if !ok {
+		read.snap, read.err = readTrialStore(root)
+		m[root] = read
+	}
+	return read
+}
+
+// finished is catalog.finished for a trial run's ticket (§6.8, §11.7): done
+// or closed in the store at root, the path its run was admitted against. A
+// store that no longer canonicalizes to that path is another store, and one
+// that cannot be read, or a ticket not in it, is no trigger.
+func (m trialStores) finished(root, id string) bool {
+	if trialPathMoved(root) != "" {
+		return false
+	}
+	read := m.read(root)
+	if read.err != nil {
+		return false
+	}
+	t, ok := read.snap.Get(id)
+	return ok && (t.Status == ticket.StatusDone || t.Status == ticket.StatusClosed)
 }
 
 // check is a trial entry's revalidation (§11.7, §6.3): each directory its
@@ -165,11 +190,7 @@ func (m trialStores) check(e *ledger.WeftEntry) (string, string) {
 		return "", ""
 	}
 	root := e.Trial.TKStoreRoot
-	read, ok := m[root]
-	if !ok {
-		read.snap, read.err = readTrialStore(root)
-		m[root] = read
-	}
+	read := m.read(root)
 	if read.err != nil {
 		return ledger.WeftInvalidTicket, fmt.Sprintf("the tk store at %s cannot be read: %v", root, read.err)
 	}

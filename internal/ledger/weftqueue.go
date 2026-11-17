@@ -150,6 +150,14 @@ func weftRunTrial(q querier, runID string) (WeftTrial, error) {
 // with (§11.7): the zero WeftTrial for a run of a registered repository.
 func (s *Store) WeftRunTrial(runID string) (WeftTrial, error) { return weftRunTrial(s.db, runID) }
 
+// weftRunStore is SQL for the tk store a weft_runs row's ticket is read from:
+// its minting entry's tk_store_root, or "" for the host catalog — a run no
+// trial launch minted, v1's and an imported archive's included. A ticket id
+// names one ticket only within one store, so the per-ticket guard keys on
+// both (§6.2, §11.7) — but for a run of the same repository, whose worktree
+// and branch are derived from the repository and ticket alone.
+const weftRunStore = `COALESCE((SELECT tk_store_root FROM weft_entries WHERE id=weft_runs.entry_id),'')`
+
 // WeftCapacity is the cap with the running and waiting counts (§6.1).
 type WeftCapacity struct{ Cap, Running, Waiting int }
 
@@ -661,12 +669,12 @@ type WeftAdmission struct {
 // at the next position. It is left waiting with no reason: Dispatch, in the
 // same transaction, either dispatches it or says what it waits on.
 func (t *WeftTx) Admit(a WeftAdmission) (*WeftEntry, error) {
-	if err := t.guard(a.Ticket, ""); err != nil {
+	if err := t.guard(a.Ticket, a.Trial.TKStoreRoot, a.RepositoryID, ""); err != nil {
 		return nil, err
 	}
 	var prior, branch string
-	err := t.tx.QueryRow(`SELECT id,branch FROM weft_runs WHERE ticket=? AND origin=? AND disposition<>?
-		ORDER BY created_at DESC,id DESC LIMIT 1`, a.Ticket, WeftOriginHosted, WeftDispositionArchived).Scan(&prior, &branch)
+	err := t.tx.QueryRow(`SELECT id,branch FROM weft_runs WHERE ticket=? AND (`+weftRunStore+`=? OR repository_id=?) AND origin=? AND disposition<>?
+		ORDER BY created_at DESC,id DESC LIMIT 1`, a.Ticket, a.Trial.TKStoreRoot, a.RepositoryID, WeftOriginHosted, WeftDispositionArchived).Scan(&prior, &branch)
 	switch {
 	case err == nil:
 		return nil, refuse("prior_run", "%s has run %s, which retains branch %s; start that run fresh rather than launching over it",
@@ -703,11 +711,15 @@ func (t *WeftTx) AdmitFrontier(project string, items []WeftAdmission) (string, [
 }
 
 // guard is §6.2's per-ticket guard: no other run of the ticket starting,
-// running, parked or settling, and no entry of it waiting or archiving.
-func (t *WeftTx) guard(ticket, runID string) error {
+// running, parked or settling, and no entry of it waiting or archiving. The
+// ticket is the one in store, a trial's tk_store_root or "" for the host
+// catalog: the same id in another store is another ticket (§11.7). In
+// repositoryID it is the same one whatever its store, since a run there
+// takes the worktree and branch the repository and ticket id derive.
+func (t *WeftTx) guard(ticket, store, repositoryID, runID string) error {
 	var other, phase string
-	err := t.tx.QueryRow(`SELECT id,phase FROM weft_runs WHERE ticket=? AND id<>? AND phase IN (?,?,?,?)
-		ORDER BY created_at LIMIT 1`, ticket, runID, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked, WeftPhaseSettling).Scan(&other, &phase)
+	err := t.tx.QueryRow(`SELECT id,phase FROM weft_runs WHERE ticket=? AND (`+weftRunStore+`=? OR repository_id=?) AND id<>? AND phase IN (?,?,?,?)
+		ORDER BY created_at LIMIT 1`, ticket, store, repositoryID, runID, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked, WeftPhaseSettling).Scan(&other, &phase)
 	switch {
 	case err == nil:
 		return refuse("ticket_in_flight", "%s has run %s, which is %s", ticket, other, WeftV2Phase(phase))
@@ -715,8 +727,8 @@ func (t *WeftTx) guard(ticket, runID string) error {
 		return err
 	}
 	var entry, kind, state string
-	err = t.tx.QueryRow(`SELECT id,kind,state FROM weft_entries WHERE ticket=? AND state IN (?,?)
-		AND kind IN (?,?,?,?,?) ORDER BY position LIMIT 1`, ticket, WeftEntryWaiting, WeftEntryArchiving,
+	err = t.tx.QueryRow(`SELECT id,kind,state FROM weft_entries WHERE ticket=? AND (COALESCE(tk_store_root,'')=? OR repository_id=?) AND state IN (?,?)
+		AND kind IN (?,?,?,?,?) ORDER BY position LIMIT 1`, ticket, store, repositoryID, WeftEntryWaiting, WeftEntryArchiving,
 		WeftEntryLaunch, WeftEntryFrontier, WeftEntryAnswer, WeftEntryResume, WeftEntryFresh).Scan(&entry, &kind, &state)
 	switch {
 	case err == nil:
@@ -727,13 +739,24 @@ func (t *WeftTx) guard(ticket, runID string) error {
 	return nil
 }
 
+// runGuard is guard for a request that continues or supersedes run, over the
+// ticket in the store and repository the run was admitted against.
+func (t *WeftTx) runGuard(run *WeftRun) error {
+	trial, err := weftRunTrial(t.tx, run.ID)
+	if err != nil {
+		return err
+	}
+	return t.guard(run.Ticket, trial.TKStoreRoot, run.RepositoryID, run.ID)
+}
+
 // EditGuard is §5.4's guard on a ticket edit: §6.2's with no run excepted,
 // reaching every run whose settlement is reconciling and every waiting or
 // archiving entry but a cleanup, which writes no ticket status. Each of those
-// may still write the ticket's status, so a hand edit never races it.
+// may still write the ticket's status, so a hand edit never races it. An edit
+// is of the host catalog's ticket, which no trial run or entry writes.
 func (t *WeftTx) EditGuard(ticket string) error {
 	var run, phase, settlement string
-	err := t.tx.QueryRow(`SELECT id,phase,settlement_state FROM weft_runs WHERE ticket=? AND (phase IN (?,?,?,?) OR settlement_state=?)
+	err := t.tx.QueryRow(`SELECT id,phase,settlement_state FROM weft_runs WHERE ticket=? AND `+weftRunStore+`='' AND (phase IN (?,?,?,?) OR settlement_state=?)
 		ORDER BY created_at LIMIT 1`, ticket, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked, WeftPhaseSettling,
 		WeftSettlementReconciling).Scan(&run, &phase, &settlement)
 	switch {
@@ -745,7 +768,7 @@ func (t *WeftTx) EditGuard(ticket string) error {
 		return err
 	}
 	var entry, kind, state string
-	err = t.tx.QueryRow(`SELECT id,kind,state FROM weft_entries WHERE ticket=? AND state IN (?,?) AND kind<>?
+	err = t.tx.QueryRow(`SELECT id,kind,state FROM weft_entries WHERE ticket=? AND COALESCE(tk_store_root,'')='' AND state IN (?,?) AND kind<>?
 		ORDER BY position LIMIT 1`, ticket, WeftEntryWaiting, WeftEntryArchiving, WeftEntryCleanup).Scan(&entry, &kind, &state)
 	switch {
 	case err == nil:
@@ -807,7 +830,7 @@ func (t *WeftTx) RecordAnswer(runID, questionID, text string, answers json.RawMe
 	if question.RunID != runID || question.State != "pending" {
 		return nil, nil, notPending(question, runID)
 	}
-	if err := t.guard(run.Ticket, runID); err != nil {
+	if err := t.runGuard(run); err != nil {
 		return nil, nil, err
 	}
 	segment, err := nextSegmentTx(t.tx, runID)
@@ -967,7 +990,7 @@ func (t *WeftTx) AdmitResume(runID string, revision int64, worktreeExists func(s
 			return nil, refuse("run_not_resumable", "run %s is %s (%s) and is not resumable", runID, WeftV2Phase(run.Phase), run.Outcome.String)
 		}
 	}
-	if err := t.guard(run.Ticket, runID); err != nil {
+	if err := t.runGuard(run); err != nil {
 		return nil, err
 	}
 	for _, seg := range run.Segments {
@@ -1216,8 +1239,15 @@ type WeftDispatch struct {
 	// Finished is whether a ticket reads done or closed through pkg/ticket as
 	// Check's read has it: the trigger of a host-started cleanup (§6.8). Nil
 	// on a host that does not serve cleanup, which cleans no run itself. It is
-	// the host catalog's, so it is never consulted for a trial run (hostFinished).
+	// the host catalog's, so it is never consulted for a trial run (runFinished).
 	Finished func(ticket string) bool
+	// TrialFinished is Finished for a trial run (§11.7): whether the ticket
+	// reads done or closed in the tk store at store, the root its run was
+	// admitted against. Nil reads no trial run finished. No trial store is
+	// watched, so a trial ticket finished in its own store outside a run is
+	// reached at the next restart, cleanup-served turn, owed pass or settle
+	// of its run, not on a tk watch pass as a registered run's is.
+	TrialFinished func(store, ticket string) bool
 }
 
 // Dispatch walks the waiting entries in position order (§6.3). One whose
@@ -1354,7 +1384,7 @@ func (t *WeftTx) revalidate(e *WeftEntry, d WeftDispatch) (string, string, error
 	}
 	switch e.Kind {
 	case WeftEntryReconcile, WeftEntryCleanup, WeftEntryFresh:
-		return t.revalidateMaintenance(e, d.Finished)
+		return t.revalidateMaintenance(e, d)
 	case WeftEntryAnswer, WeftEntryResume:
 	default:
 		return "", "", nil

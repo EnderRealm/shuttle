@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -500,5 +501,257 @@ func TestTrialLaunchHostCatalogIsolated(t *testing.T) {
 	}
 	if _, err := os.Stat(run.Worktree); err != nil {
 		t.Fatalf("the trial worktree is gone: %v", err)
+	}
+}
+
+// Two cells may run one qualified ticket id at once (§6.2, §11.7): the
+// per-ticket guard and prior_run hold a ticket within the store it is read
+// from, so each cell's launch is admitted and dispatches on its own, and the
+// host catalog's ticket of that id and a trial's never refuse each other,
+// in flight or retained. Within one store both still hold.
+func TestTrialLaunchSameTicketTwoCells(t *testing.T) {
+	h := probed(t)
+	const (
+		shared   = "weft/twin-0001"
+		hostHeld = "weft/host-held-0002"
+	)
+	launched := func(r response) *ledger.WeftRun {
+		t.Helper()
+		r.expect(t, http.StatusAccepted)
+		return h.waitPhase(h.waitDispatched(entryOf(r)["entry_id"].(string)), ledger.WeftPhaseParked)
+	}
+	stop := func(run *ledger.WeftRun) {
+		t.Helper()
+		h.send(http.MethodPost, "/v2/runs/"+run.ID+"/stop", "stop-"+run.ID, revisionBody(h.run(run.ID).Revision)).expect(t, http.StatusOK)
+		h.waitPhase(run.ID, ledger.WeftPhaseEnded)
+	}
+	inCell := func(run *ledger.WeftRun, c trialCell) {
+		t.Helper()
+		if run.Repo != c.checkout || run.RepositoryID != c.repositoryID() || argvValue(recordedArgv(t, run.Segments[0].RunDir.String), "--tk-store-root") != c.store {
+			t.Fatalf("run %s = repo %s (%s), argv %q; want the cell at %s with store %s", run.ID, run.Repo, run.RepositoryID,
+				recordedArgv(t, run.Segments[0].RunDir.String), c.checkout, c.store)
+		}
+	}
+
+	first, second := h.trialCell("c-0050", shared), h.trialCell("c-0051", shared)
+	a := launched(h.send(http.MethodPost, "/v2/launches", "twin-a", first.request(t, shared)))
+	b := launched(h.send(http.MethodPost, "/v2/launches", "twin-b", second.request(t, shared)))
+	if a.ID == b.ID {
+		t.Fatalf("both cells' launches dispatched run %s", a.ID)
+	}
+	inCell(a, first)
+	inCell(b, second)
+	if h.run(a.ID).Phase != ledger.WeftPhaseParked {
+		t.Fatalf("the second cell's run reached the first's: %+v", h.run(a.ID))
+	}
+
+	// Within one store the guard holds: a parked run of the ticket refuses
+	// another launch of it, and once retained it is prior_run.
+	if message := h.send(http.MethodPost, "/v2/launches", "twin-a-again", first.request(t, shared)).
+		refused(t, http.StatusConflict, "ticket_in_flight"); !strings.Contains(message, a.ID) {
+		t.Fatalf("ticket_in_flight = %s, want it to name %s", message, a.ID)
+	}
+	stop(a)
+	if message := h.send(http.MethodPost, "/v2/launches", "twin-a-prior", first.request(t, shared)).
+		refused(t, http.StatusConflict, "prior_run"); !strings.Contains(message, a.ID) {
+		t.Fatalf("prior_run = %s, want it to name %s", message, a.ID)
+	}
+
+	// The host catalog's ticket of the id reads eligible with no run, and
+	// launches over a retained trial run and a parked one.
+	h.ticket(shared, ticket.StatusReady, 2)
+	detail := h.get("/v2/tickets/" + shared)["ticket"].(map[string]any)
+	if detail["eligibility"].(map[string]any)["state"] != "eligible" || detail["run"] != nil || len(detail["runs"].([]any)) != 0 {
+		t.Fatalf("host catalog ticket over the trials' runs = %v", detail)
+	}
+	host := launched(h.launch(shared, "twin-host"))
+	if host.Repo != h.repository("weft") {
+		t.Fatalf("host run = %+v", host)
+	}
+
+	// A trial launches over the host's run of the id, parked or retained,
+	// while the host's own guard still holds for the host's ticket.
+	h.ticket(hostHeld, ticket.StatusReady, 2)
+	retained := launched(h.launch(hostHeld, "held-host"))
+	stop(retained)
+	third := h.trialCell("c-0052", shared, hostHeld)
+	inCell(launched(h.send(http.MethodPost, "/v2/launches", "twin-third", third.request(t, shared))), third)
+	inCell(launched(h.send(http.MethodPost, "/v2/launches", "held-third", third.request(t, hostHeld))), third)
+	if message := h.launch(hostHeld, "held-host-again").refused(t, http.StatusConflict, "prior_run"); !strings.Contains(message, retained.ID) {
+		t.Fatalf("host prior_run = %s, want it to name %s", message, retained.ID)
+	}
+	if message := h.launch(shared, "twin-host-again").refused(t, http.StatusConflict, "ticket_in_flight"); !strings.Contains(message, host.ID) {
+		t.Fatalf("host ticket_in_flight = %s, want it to name %s", message, host.ID)
+	}
+}
+
+// gitCheckout makes the cell's checkout a real git repository with one
+// commit, so a cleanup worker's `git worktree remove` runs in it.
+func (h *queueHost) gitCheckout(c trialCell) {
+	h.t.Helper()
+	if err := os.RemoveAll(filepath.Join(c.checkout, ".git")); err != nil {
+		h.t.Fatal(err)
+	}
+	h.git(c.checkout, "init", "-q", "-b", "main")
+	h.git(c.checkout, "commit", "-q", "--allow-empty", "-m", "base")
+}
+
+// A trial run whose ticket is done in its own store is host-cleaned as a
+// registered run is (§6.5, §6.8, §11.7): its finished state is read from the
+// store it was admitted against. The host catalog's ticket of the same id
+// finishing neither ends nor cleans it. Once its own store reads it done —
+// the host's ticket ready again, so nothing but that store can say so — the
+// restart's pass ends the parked run, its question withdrawn, and admits the
+// host-started cleanup, which carries the run's environment and removes the
+// worktree from the cell's checkout, keeping the branch.
+func TestTrialLaunchCleanedFromOwnStore(t *testing.T) {
+	h := newHostCleanupHost(t)
+	const shared = "weft/own-store-0001"
+	h.ticket(shared, ticket.StatusReady, 2)
+	cell := h.trialCell("c-0060", shared)
+	h.gitCheckout(cell)
+	parked := decode(t, fixtureBytes(t, "worker-parked.json")).(map[string]any)
+	parked["worker_run_id"] = fixtureWorkerRun
+	parked["summary"].(map[string]any)["report"].(map[string]any)["ticket"] = shared
+	h.script(shared, 1, workerLines{h.trialLanding(cell, shared)[0], parked})
+	runID := h.waitDispatched(entryOf(h.send(http.MethodPost, "/v2/launches", "own-store", cell.request(t, shared)))["entry_id"].(string))
+	run := h.waitPhase(runID, ledger.WeftPhaseParked)
+	if run.Repo != cell.checkout {
+		t.Fatalf("trial run = %+v", run)
+	}
+	h.addWorktree(run)
+	question := run.Question.ID
+
+	h.finish(shared, ticket.StatusDone)
+	h.service.dispatch()
+	h.settle()
+	if got := h.run(runID); got.Phase != ledger.WeftPhaseParked || got.Question == nil || got.Question.State != "pending" || len(h.cleanupEntries(runID)) != 0 {
+		t.Fatalf("the host ticket finishing reached the trial run: %+v, cleanups %+v", got, h.cleanupEntries(runID))
+	}
+
+	h.ticket(shared, ticket.StatusReady, 2)
+	writeTicketIn(t, cell.store, "weft", &ticket.Ticket{
+		ID: "own-store-0001", Status: ticket.StatusDone, Type: ticket.TypeFeature, Priority: 2, Title: "Trial own-store-0001", Body: criterionBody,
+		Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Updated: time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
+	})
+	h.restart()
+	var cleaned *ledger.WeftRun
+	waitFor(t, func() bool {
+		cleaned = h.run(runID)
+		return cleaned.Disposition == ledger.WeftDispositionCleaned && h.reaped(cleaned)
+	})
+	if cleaned.Phase != ledger.WeftPhaseEnded || cleaned.Outcome.String != "stopped" {
+		t.Fatalf("host-cleaned trial run = %+v", cleaned)
+	}
+	if _, err := os.Stat(run.Worktree); !errors.Is(err, os.ErrNotExist) || h.registered(run) {
+		t.Fatalf("the trial worktree is still there: %v\n%s", err, h.git(run.Repo, "worktree", "list"))
+	}
+	if !h.branchKept(run) {
+		t.Fatalf("the cleanup removed branch %s", run.Branch)
+	}
+	if q, err := h.store.WeftQuestion(question); err != nil || q.State != "withdrawn" {
+		t.Fatalf("question of the cleaned trial run = %+v %v", q, err)
+	}
+	entries := h.cleanupEntries(runID)
+	if len(entries) != 1 || entries[0].token != ledger.WeftHostToken || entries[0].state != "dispatched" {
+		t.Fatalf("host-started cleanup = %+v", entries)
+	}
+	if got := h.trialColumns(entries[0].id); !reflect.DeepEqual(got[:3], []string{cell.checkout, cell.store, cell.evidence}) {
+		t.Fatalf("cleanup entry's trial columns = %q", got)
+	}
+	if !strings.Contains(h.argv(), "cleanup --contract weft-worker/v2 --run "+runID+" ") || !strings.Contains(h.argv(), "--repo "+cell.checkout+" ") {
+		t.Fatalf("argv = %s", h.argv())
+	}
+	h.settle()
+}
+
+// A trial run whose landing finishes its ticket in its own store is cleaned
+// in the commit that reaps it, as a registered run's is (§6.8, §11.7): no
+// restart and no tk watch pass, which never reads a trial store, is needed.
+// The ticket is in no host project, so only the cell's store can say it is
+// done.
+func TestTrialLaunchCleanedOnSettle(t *testing.T) {
+	h := newHostCleanupHost(t)
+	const lands = "evalcell/lands-8192"
+	cell := h.trialCell("c-0061", lands)
+	h.gitCheckout(cell)
+	lines := h.trialLanding(cell, lands)
+	h.script(lands, 1, splice(lines, indexOf(lines, "ended"), nil))
+	runID := h.waitDispatched(entryOf(h.send(http.MethodPost, "/v2/launches", "lands", cell.request(t, lands)))["entry_id"].(string))
+	waitFor(t, func() bool {
+		r := h.run(runID)
+		return r.Phase == ledger.WeftPhaseSettling && len(r.Steps) == 3 && r.Steps[2].Result.String == "done"
+	})
+	run := h.run(runID)
+	h.addWorktree(run)
+	writeTicketIn(t, cell.store, "evalcell", &ticket.Ticket{
+		ID: "lands-8192", Status: ticket.StatusDone, Type: ticket.TypeFeature, Priority: 2, Title: "Trial lands-8192", Body: criterionBody,
+		Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Updated: time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
+	})
+	if entries := h.cleanupEntries(runID); len(entries) != 0 {
+		t.Fatalf("a landing trial run with its worker live was queued for cleanup: %+v", entries)
+	}
+	h.release(lands)
+	var cleaned *ledger.WeftRun
+	waitFor(t, func() bool {
+		cleaned = h.run(runID)
+		return cleaned.Disposition == ledger.WeftDispositionCleaned && h.reaped(cleaned)
+	})
+	if cleaned.SettlementState != ledger.WeftSettlementLanded || h.registered(run) || !h.branchKept(run) {
+		t.Fatalf("landed trial run = %+v", cleaned)
+	}
+	entries := h.cleanupEntries(runID)
+	if len(entries) != 1 || entries[0].token != ledger.WeftHostToken {
+		t.Fatalf("landed trial run's cleanup = %+v", entries)
+	}
+	if got := h.trialColumns(entries[0].id); !reflect.DeepEqual(got[:3], []string{cell.checkout, cell.store, cell.evidence}) {
+		t.Fatalf("cleanup entry's trial columns = %q", got)
+	}
+	h.settle()
+}
+
+// Two stores' launches of one ticket id naming the same checkout are one
+// ticket to the guard (§6.2, §11.7): the worktree and branch a run takes
+// derive from the repository and ticket id alone, so the second is refused
+// ticket_in_flight while the first's run is in flight and prior_run while it
+// is retained, and never runs in or cleans the first's worktree.
+func TestTrialLaunchSameCheckoutTwoStores(t *testing.T) {
+	h := probed(t)
+	const shared = "weft/one-checkout-0001"
+	first, second := h.trialCell("c-0070", shared), h.trialCell("c-0071", shared)
+	// second's store and evidence directory, first's checkout.
+	sharing := strings.Replace(second.request(t, shared), second.handles["checkout"], first.handles["checkout"], 1)
+	if sharing == second.request(t, shared) {
+		t.Fatal("the request still names the second cell's checkout")
+	}
+	r := h.send(http.MethodPost, "/v2/launches", "first", first.request(t, shared))
+	r.expect(t, http.StatusAccepted)
+	run := h.waitPhase(h.waitDispatched(entryOf(r)["entry_id"].(string)), ledger.WeftPhaseParked)
+
+	if message := h.send(http.MethodPost, "/v2/launches", "sharing-in-flight", sharing).
+		refused(t, http.StatusConflict, "ticket_in_flight"); !strings.Contains(message, run.ID) {
+		t.Fatalf("ticket_in_flight = %s, want it to name %s", message, run.ID)
+	}
+	h.send(http.MethodPost, "/v2/runs/"+run.ID+"/stop", "stop", revisionBody(h.run(run.ID).Revision)).expect(t, http.StatusOK)
+	h.waitPhase(run.ID, ledger.WeftPhaseEnded)
+	if message := h.send(http.MethodPost, "/v2/launches", "sharing-retained", sharing).
+		refused(t, http.StatusConflict, "prior_run"); !strings.Contains(message, run.ID) {
+		t.Fatalf("prior_run = %s, want it to name %s", message, run.ID)
+	}
+	var runs, entries int
+	if err := h.db().QueryRow(`SELECT count(*) FROM weft_runs WHERE ticket=?`, shared).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db().QueryRow(`SELECT count(*) FROM weft_entries WHERE ticket=?`, shared).Scan(&entries); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 1 || entries != 1 {
+		t.Fatalf("%d runs and %d entries of %s, want only the first cell's", runs, entries, shared)
+	}
+	if got := h.run(run.ID); got.Disposition != ledger.WeftDispositionRetained {
+		t.Fatalf("the first cell's run = %+v", got)
+	}
+	if _, err := os.Stat(run.Worktree); err != nil {
+		t.Fatalf("the first cell's worktree is gone: %v", err)
 	}
 }

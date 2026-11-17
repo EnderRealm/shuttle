@@ -292,20 +292,22 @@ func appendCatalogEventTx(tx *sql.Tx, project string, revision int64, stamp stri
 // every recorded project whose host-held eligibility inputs tx moved: what a
 // catalog read judges a ticket by beside tk — each run in flight and its
 // phase, each hosted run ended and not archived and the branch it retains,
-// and each entry waiting or archiving. Nothing else a run or entry carries is
-// digested, so a write that changes no ticket's eligibility leaves the
-// revision where it was. A row with no host digest yet — one SyncWeftCatalog
-// has just recorded in this transaction, or the migration to schema 7 is
-// digesting — has it recorded without a raise. A project with host rows but
-// no catalog row is skipped: the first tk read records it.
+// and each entry waiting or archiving — all of the host catalog's tickets
+// only, since a trial's run or entry is of a ticket in its own store
+// (§11.7). Nothing else a run or entry carries is digested, so a write that
+// changes no ticket's eligibility leaves the revision where it was. A row
+// with no host digest yet — one SyncWeftCatalog has just recorded in this
+// transaction, or the migration to schema 7 is digesting — has it recorded
+// without a raise. A project with host rows but no catalog row is skipped:
+// the first tk read records it.
 func syncWeftHostCatalogTx(tx *sql.Tx, now time.Time) error {
 	rows, err := tx.Query(`
-		SELECT project,ticket,'in_flight',id,phase FROM weft_runs WHERE phase IN (?,?,?,?)
+		SELECT project,ticket,'in_flight',id,phase FROM weft_runs WHERE phase IN (?,?,?,?) AND `+weftRunStore+`=''
 		UNION ALL
 		SELECT project,ticket,'prior_run',id,branch FROM weft_runs
-			WHERE origin=? AND phase=? AND COALESCE(disposition,'')<>?
+			WHERE origin=? AND phase=? AND COALESCE(disposition,'')<>? AND `+weftRunStore+`=''
 		UNION ALL
-		SELECT project,ticket,'entry',id,kind||'/'||state FROM weft_entries WHERE state IN (?,?)
+		SELECT project,ticket,'entry',id,kind||'/'||state FROM weft_entries WHERE state IN (?,?) AND COALESCE(tk_store_root,'')=''
 		ORDER BY 1,2,3,4,5`,
 		WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked, WeftPhaseSettling,
 		WeftOriginHosted, WeftPhaseEnded, WeftDispositionArchived,
@@ -448,8 +450,9 @@ type WeftEntryRef struct {
 	ID, Kind, State, Ticket string
 }
 
-// WeftPendingEntries maps each ticket to its latest entry still waiting or
-// archiving.
+// WeftPendingEntries maps each of the host catalog's tickets to its latest
+// entry still waiting or archiving; a trial's entry is of a ticket in its own
+// store (§11.7).
 func (s *Store) WeftPendingEntries() (map[string]WeftEntryRef, error) {
 	return weftPendingEntries(s.db)
 }
@@ -458,7 +461,7 @@ func (t *WeftTx) PendingEntries() (map[string]WeftEntryRef, error) { return weft
 
 func weftPendingEntries(q querier) (map[string]WeftEntryRef, error) {
 	rows, err := q.Query(`SELECT id,kind,state,ticket FROM weft_entries
-		WHERE state IN ('waiting','archiving') ORDER BY position`)
+		WHERE state IN ('waiting','archiving') AND COALESCE(tk_store_root,'')='' ORDER BY position`)
 	if err != nil {
 		return nil, err
 	}
@@ -475,10 +478,12 @@ func weftPendingEntries(q querier) (map[string]WeftEntryRef, error) {
 }
 
 // WeftRunQuery filters history. Before names the run a page ends at: the
-// page holds the runs after it, newest first.
+// page holds the runs after it, newest first. Host keeps only the runs of
+// the host catalog's tickets, none a trial launch minted (§11.7).
 type WeftRunQuery struct {
 	Ticket, State, Origin, Before string
 	Limit                         int
+	Host                          bool
 }
 
 // QueryWeftRuns reads runs newest first, ties broken by id so a page boundary
@@ -487,9 +492,9 @@ func (s *Store) QueryWeftRuns(q WeftRunQuery) ([]*WeftRun, error) {
 	return queryWeftRuns(s.db, q)
 }
 
-// WeftRuns is the ticket's runs, newest first.
+// WeftRuns is the runs of the host catalog's ticket, newest first.
 func (t *WeftTx) WeftRuns(ticket string) ([]*WeftRun, error) {
-	return queryWeftRuns(t.tx, WeftRunQuery{Ticket: ticket})
+	return queryWeftRuns(t.tx, WeftRunQuery{Ticket: ticket, Host: true})
 }
 
 func queryWeftRuns(db querier, q WeftRunQuery) ([]*WeftRun, error) {
@@ -511,6 +516,9 @@ func queryWeftRuns(db querier, q WeftRunQuery) ([]*WeftRun, error) {
 	if q.Origin != "" {
 		where = append(where, "origin=?")
 		args = append(args, q.Origin)
+	}
+	if q.Host {
+		where = append(where, weftRunStore+"=''")
 	}
 	if q.Before != "" {
 		where = append(where, "(created_at,id)<(SELECT created_at,id FROM weft_runs WHERE id=?)")
