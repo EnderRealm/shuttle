@@ -309,6 +309,45 @@ func TestResizeKeepsStateSnapshotable(t *testing.T) {
 	roundTrip(t, "grown on the alternate screen", a)
 }
 
+// A shrink while a full-screen program holds the alternate screen drops the
+// primary's rows above the primary's own cursor, not the alternate's, so the
+// prompt line and the cursor it restores to survive the program's exit.
+func TestResizeDuringAlternateScreenKeepsPrimary(t *testing.T) {
+	a := feed(20, 10, "\x1b[5;1Hmiddle\x1b[10;1H$ prompt", "\x1b[?1049h\x1b[Halt top")
+	a.Resize(20, 6)
+	roundTrip(t, "shrunk on the alternate screen", a)
+	if a.ScrollbackLines() != 4 {
+		t.Fatalf("scrollback = %d, want the 4 rows above the primary's cursor", a.ScrollbackLines())
+	}
+	a.Write([]byte("\x1b[?1049l"))
+	if got := text(a.primary[5]); got != "$ prompt" {
+		t.Fatalf("primary cursor line = %q", got)
+	}
+	if got := text(a.primary[0]); got != "middle" {
+		t.Fatalf("primary top line = %q", got)
+	}
+	if a.x != 8 || a.y != 5 {
+		t.Fatalf("restored cursor = %d,%d, want 8,5", a.x, a.y)
+	}
+	roundTrip(t, "left the alternate screen", a)
+}
+
+// A DECSC saved on the primary below the rows a shrink drops restores to the
+// row its line moved to.
+func TestResizeShiftsASavedCursorWithItsLine(t *testing.T) {
+	a := feed(20, 10, "\x1b[7;1Hsaved here\x1b[7;3H\x1b7\x1b[10;1Hbottom")
+	a.Resize(20, 6)
+	roundTrip(t, "shrunk with a saved cursor", a)
+	a.Write([]byte("\x1b8"))
+	if a.x != 2 || a.y != 2 {
+		t.Fatalf("restored cursor = %d,%d, want 2,2", a.x, a.y)
+	}
+	if got := text(a.primary[a.y]); got != "saved here" {
+		t.Fatalf("restored cursor line = %q", got)
+	}
+	roundTrip(t, "restored", a)
+}
+
 // Randomized streams of the sequences the emulator models, cut at random
 // points: whatever state they reach, the snapshot reproduces it.
 var randomPieces = []string{

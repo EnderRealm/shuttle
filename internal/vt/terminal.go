@@ -291,22 +291,28 @@ func (t *Terminal) Resize(cols, rows int) {
 			t.scrollback[i] = t.scrollback[i].trimmed()
 		}
 	}
-	for _, s := range []*[]*line{&t.primary, &t.alternate} {
+	// Each screen drops the rows above its own cursor: the active cursor for
+	// the active screen, the saved one for the other, so a shrink while the
+	// alternate screen is up keeps the primary's prompt line.
+	active := t.screenIndex()
+	var drops [2]int
+	for i, s := range []*[]*line{&t.primary, &t.alternate} {
 		lines := *s
 		for _, l := range lines {
 			l.resize(cols, attr{})
 		}
 		if rows < len(lines) {
-			drop := 0
-			if t.y >= rows {
-				drop = t.y - rows + 1
+			cur := t.save[i].y
+			if i == active {
+				cur = t.y
 			}
-			if s == &t.primary {
-				for _, l := range lines[:drop] {
+			drops[i] = max(0, cur-rows+1)
+			if i == 0 {
+				for _, l := range lines[:drops[i]] {
 					t.pushScrollback(l)
 				}
 			}
-			lines = lines[drop : drop+rows]
+			lines = lines[drops[i] : drops[i]+rows]
 		}
 		for len(lines) < rows {
 			lines = append(lines, newLine(cols, attr{}))
@@ -320,7 +326,7 @@ func (t *Terminal) Resize(cols, rows int) {
 	t.x = min(t.x, cols-1)
 	for i := range t.save {
 		t.save[i].x = min(t.save[i].x, cols-1)
-		t.save[i].y = min(t.save[i].y, rows-1)
+		t.save[i].y = min(max(0, t.save[i].y-drops[i]), rows-1)
 	}
 	t.top, t.bot = 0, rows-1
 	t.pending = false
