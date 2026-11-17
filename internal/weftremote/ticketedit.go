@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
+	"strings"
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
@@ -130,14 +132,28 @@ func (s *Service) editTicket(tx *ledger.WeftTx, c *catalog, id string, req ticke
 			return false, err
 		}
 		project, _ := ticket.ParseNamespacedID(id)
+		var foreign []string
 		for _, child := range snap.Children(id) {
 			ns, _ := ticket.ParseNamespacedID(child.ID)
-			if ns != project || child.Status == ticket.StatusDone || child.Status == ticket.StatusClosed {
+			if child.Status == ticket.StatusDone || child.Status == ticket.StatusClosed {
+				continue
+			}
+			if ns != project {
+				foreign = append(foreign, child.ID)
 				continue
 			}
 			if err := tx.EditGuard(child.ID); err != nil {
 				return false, err
 			}
+		}
+		// tk refuses to abandon an epic over another project's unfinished
+		// work, with an error no caller can tell from a failed write; the
+		// same rule is held here so the client gets the refusal and its remedy.
+		if len(foreign) > 0 {
+			slices.Sort(foreign)
+			return false, &ledger.WeftRefusal{Code: "malformed", Message: fmt.Sprintf(
+				"%s has unfinished children in other projects (%s): close or reparent them first, then close the epic",
+				id, strings.Join(foreign, ", "))}
 		}
 	}
 	closed, err := ticket.SaveEdit(c.store, t, req.Status != nil)

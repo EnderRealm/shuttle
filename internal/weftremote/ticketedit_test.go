@@ -349,3 +349,90 @@ func TestTicketEditEpicCloseHoldsChildRuns(t *testing.T) {
 		t.Errorf("the refused abandon moved the stream from %d to %d", seq, s.asOf())
 	}
 }
+
+// tk will not abandon an epic over another project's unfinished work, so a
+// close of one with such a child is refused as a malformed value, naming the
+// children, and stored for replay like any refusal.
+func TestEditRefusesEpicCloseWithForeignChildren(t *testing.T) {
+	s, _ := newEditStudio(t)
+	tickets := filepath.Join(s.central, "tickets")
+	dirs, err := os.ReadDir(tickets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := "required_features: [" + ticket.FeatureCrossProjectParents + "]\nnamespaces:\n"
+	for _, d := range dirs {
+		catalog += "  " + d.Name() + ": {kind: project}\n"
+	}
+	if err := os.WriteFile(ticket.CatalogPath(s.central), []byte(catalog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fixture's foreign children are written under their own ids; its
+	// epic has children with runs in flight here, so this epic stands in.
+	epic := "weft/container-0003"
+	created := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	writeTicketIn(t, s.central, "weft", &ticket.Ticket{
+		ID: bare(epic), Status: ticket.StatusOpen, Type: ticket.TypeEpic, Priority: 2, Title: "Container",
+		Created: created, Updated: created,
+	})
+	for _, c := range []struct {
+		id     string
+		status ticket.Status
+	}{
+		{"weft/contained-0001", ticket.StatusReady},
+		{"loom/example-cache-5e6f", ticket.StatusOpen},
+		{"warp/example-lens-2b3c", ticket.StatusReady},
+		{"ticket/example-legacy-2d3e", ticket.StatusDone},
+	} {
+		project, _, _ := strings.Cut(c.id, "/")
+		writeTicketIn(t, s.central, project, &ticket.Ticket{
+			ID: bare(c.id), Status: c.status, Type: ticket.TypeFeature, Priority: 2, Title: "Child",
+			Parent: epic, Body: criterionBody, Created: created, Updated: created,
+		})
+	}
+	s.sync()
+
+	files := func() map[string]string {
+		out := map[string]string{}
+		err := filepath.WalkDir(tickets, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			doc, err := os.ReadFile(path)
+			out[path] = string(doc)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	var want map[string]any
+	fixtureJSON(t, "error-ticket-edit-foreign-children.json", &want)
+	wantMessage := strings.ReplaceAll(want["error"].(map[string]any)["message"].(string), "weft/example-epic-1a2b", epic)
+
+	status := s.get("/v2/tickets/" + epic)["ticket"].(map[string]any)["status"].(string)
+	body := editBody("closed", nil, status, 2)
+	before, seq := files(), s.asOf()
+	r := s.edit(epic, "close-foreign", body)
+	message := r.refused(t, http.StatusBadRequest, "malformed")
+	learn(decode(t, fixtureBytes(t, "error-ticket-edit-foreign-children.json"))).check(t, "foreign children", r.body)
+	if message != wantMessage {
+		t.Errorf("message %q, error-ticket-edit-foreign-children.json has %q", message, wantMessage)
+	}
+	if after := files(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the refused abandon rewrote a ticket file")
+	}
+	if s.asOf() != seq {
+		t.Errorf("the refused abandon moved the stream from %d to %d", seq, s.asOf())
+	}
+
+	again := s.edit(epic, "close-foreign", body)
+	if !again.replayed || again.code != r.code || again.raw != r.raw {
+		t.Fatalf("replay = %v %d %s, first answer %d %s", again.replayed, again.code, again.raw, r.code, r.raw)
+	}
+	if after := files(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("the replayed abandon rewrote a ticket file")
+	}
+}
