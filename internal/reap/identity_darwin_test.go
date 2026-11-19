@@ -99,7 +99,7 @@ func TestGroupMembersListsTheGroupWithStartTimes(t *testing.T) {
 const pWexit = 0x00002000
 
 // procStates names P_stat (SIDL..SZOMB in sys/proc.h).
-var procStates = map[int8]string{1: "SIDL", 2: "SRUN", 3: "SSLEEP", sstop: "SSTOP", szomb: "SZOMB"}
+var procStates = map[int8]string{sidl: "SIDL", 2: "SRUN", 3: "SSLEEP", sstop: "SSTOP", szomb: "SZOMB"}
 
 // describePID is the kernel's view of pid at this moment, for a failure message
 // whose expected outcome was missed on a lookup error: whether the process is a
@@ -163,4 +163,23 @@ func TestDescribePID(t *testing.T) {
 	if !strings.Contains(got, "(SZOMB), exiting true") || strings.Contains(got, "re-read: answers") {
 		t.Fatalf("zombie: %s", got)
 	}
+}
+
+// sidl is a process the kernel is still creating (SIDL in sys/proc.h): a child
+// in this state is one whose parent's fork has not finished.
+const sidl = 1
+
+// hasForked reports whether pid has a child the kernel has finished creating,
+// which is when pid's own fork has returned.
+func hasForked(pid int) (bool, error) {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return false, fmt.Errorf("kern.proc.all: %w", err)
+	}
+	for _, kp := range procs {
+		if int(kp.Eproc.Ppid) == pid && kp.Proc.P_stat != sidl && kp.Proc.P_stat != szomb {
+			return true, nil
+		}
+	}
+	return false, nil
 }

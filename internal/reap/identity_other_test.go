@@ -5,3 +5,5 @@ package reap
 // describePID has no kernel view to give on a platform whose process identity
 // this package cannot read.
 func describePID(int) string { return "kernel view unavailable on this platform" }
+
+func hasForked(int) (bool, error) { return false, errNoIdentity }

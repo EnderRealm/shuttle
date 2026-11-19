@@ -53,7 +53,9 @@ func claim(t *testing.T, s *ledger.Store, slot string, at time.Time, pid int, ru
 // spawn starts a process that outlives the test unless something kills it. It
 // is reaped in the background because production's target is the orphan of a
 // dead daemon, reaped by init, while a test's is this process's own child and
-// would otherwise linger as a zombie that kill 0 still finds.
+// would otherwise linger as a zombie that kill 0 still finds. It returns once
+// the kernel answers for the process with a stable identity: its argv carried,
+// and any job its script backgrounds forked.
 func spawn(t *testing.T, argv []string, setpgid bool) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -96,7 +98,35 @@ func spawn(t *testing.T, argv []string, setpgid bool) *exec.Cmd {
 	// After the cleanup is registered, so a wait that gives up does not leave
 	// the process it was waiting on with nothing to reap it.
 	waitArgv(t, pid, argv)
+	if len(argv) > 2 && argv[0] == "sh" && argv[1] == "-c" && strings.Contains(argv[2], " &") {
+		waitFork(t, pid)
+	}
 	return cmd
+}
+
+// waitFork blocks until a leader whose script backgrounds a job has a child the
+// kernel has finished creating. kern.procargs2 on a shell that is mid-fork
+// transiently fails with EINVAL even after its argv has been read, so a test
+// that hands the pass the leader before the fork lands gets a lookup error,
+// held as unresolved, instead of the answer it set up. A parent pid is waited on
+// rather than a second group member because a fixture started without Setpgid
+// shares this test's group.
+func waitFork(t *testing.T, pid int) {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		forked, err := hasForked(pid)
+		if err == nil && forked {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %d never forked the job its script backgrounds (last lookup error: %v)", pid, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // waitArgv blocks until the kernel answers for the process with the argv this
