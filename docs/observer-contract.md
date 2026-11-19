@@ -30,7 +30,7 @@ guessed at from its shape.
 | Experiment | a change's declared effect, its activation, the window and opportunity it needs, and the readings and baseline it will be judged by | a person, a worker or the observer, recorded in `author` | into the notebook from its author |
 | Bundle | recorded fact: readings over an explicit window, from named sources, out of a named snapshot, with what could not be read | the observer | written into the notebook |
 | Assessment | one outcome and one prose interpretation, carrying the bundle it was drawn from; an unprompted assessment also carries the finding that opens its entry | the observer | written into the notebook |
-| Action | ticket-facing feedback under a stable id: a `ticket-note` on the entry's ticket, a `ticket-reopen` of it, or a `ticket-open` carrying the title of a ticket to create | the observer | out toward the ticket store, as a proposal (§11) |
+| Action | ticket-facing feedback under a stable id: a `ticket-note` on the entry's ticket, a `ticket-reopen` or `ticket-release` of it, or a `ticket-open` carrying the title of a ticket to create | the observer | out toward the ticket store, as a proposal (§11) |
 | Receipt | what became of an action, under that same id | the observer, recording what the far store did | back from that store: `applied`, `refused` or `failed`, with its reference |
 
 `author` is a kind from a fixed vocabulary — `human`, `worker`, `observer` — and an
@@ -369,7 +369,7 @@ in model-authored output or the agent prompt:
 ```
 
 `tickets` is the observer's ticket write scope and is optional. `projects` names
-the tk projects its notes and reopens may land in; `discovery_project`, one of
+the tk projects its notes, reopens and releases may land in; `discovery_project`, one of
 them, is where a discovery is created; `max_discoveries` caps the tickets one
 run may create, and `0` refuses discoveries outright. When the block is present
 `paths.tk_config` must be an absolute path to a loadable tk config, since the
@@ -447,22 +447,30 @@ alone; nothing in source prose, ticket text or a writer's `source` label can
 widen it, target another ticket, or stand in for a person's decision.
 
 - **Authorization.** Exactly one assessment in the run must be about the
-  action's entry, and `insufficient-evidence` authorizes nothing. A note or
-  reopen must name a standing question's own ticket — the experiment's, else
-  the question's — in a configured project; a finding opened this run has no
-  ticket and takes no note. A note follows a confirmation or an absence and
-  never changes status. A reopen needs `effect-absent-with-sufficient-opportunity`,
-  a live experiment, and the §3 sufficiency rule re-run by shuttle against the
-  snapshot entry; a pending activation, an incompatible baseline, a short
-  window or too few opportunities refuses it. A discovery needs a finding, a
-  title, and room under `max_discoveries`. An action is applied only after
-  its authorizing assessment's record receipt — the request id the notebook
-  admitted it under — is in `applied.json`; without one the action is held
-  as failed, never written.
+  action's entry, and `insufficient-evidence` authorizes nothing. A note,
+  reopen or release must name a standing question's own ticket — the
+  experiment's, else the question's — in a configured project; a finding
+  opened this run has no ticket and takes no note. A note follows a
+  confirmation or an absence and never changes status. A reopen needs
+  `effect-absent-with-sufficient-opportunity`, a live experiment, and the §3
+  sufficiency rule re-run by shuttle against the snapshot entry; a pending
+  activation, an incompatible baseline, a short window or too few
+  opportunities refuses it. A release needs `effect-observed` — the event the
+  ticket was parked on occurred — and nothing else from the assessment. On a
+  parked ticket an absence never releases and never closes: however long it is
+  sustained, it only adds a note, and the ticket stays for a person to decide. A
+  discovery needs a finding, a title, and room under `max_discoveries`. An
+  action is applied only after its authorizing assessment's record receipt —
+  the request id the notebook admitted it under — is in `applied.json`;
+  without one the action is held as failed, never written.
 - **Order.** Authorize; read the store once (a reopen needs its ticket `done` —
-  `closed` is a decision and is not reopened; a discovery looks for the ticket
-  already holding its finding key, else a related one); claim in the notebook;
-  write to tk; settle the receipt. What was read — the ticket precondition, or
+  `closed` is a decision and is not reopened; a release needs its ticket
+  `backlog` with a non-blank `waiting_on`, and not an epic, whose status is
+  derived from its children; a ticket already holding a receipt under the
+  reopen or release id is left to tk, which replays an identical write and
+  refuses a different one; a discovery looks for the ticket already holding
+  its finding key, else a related one); claim in the notebook; write to tk;
+  settle the receipt. What was read — the ticket precondition, or
   the prior or related ticket — is persisted with the claim's request id before
   the claim is attempted, and every retry of the claim and the write is held
   against exactly that value, never a re-read, so a ticket edited after the
@@ -482,6 +490,13 @@ widen it, target another ticket, or stand in for a person's decision.
   second proposal carrying a different note is refused by the ticket itself,
   across questions and runs, and the refusal is recorded. The cap is durable in
   the ticket and replicates with it.
+- **The release cap.** Every release is written under the fixed tk action id
+  `observer-release`, through tk's `release` transition: it clears
+  `waiting_on`, moves the `backlog` ticket to `ready`, and lands the note and
+  the receipt in the same write. The cap is the reopen cap's: a second release
+  proposal on the ticket carries a different note and is refused by the
+  ticket's own receipt, even after a person parks it again, and the refusal is
+  recorded.
 - **Discovery.** A finding key already claimed in the project is answered by
   the key — the same content replays, different content is refused. Otherwise
   the discovery project is searched for a related ticket: one whose title
@@ -517,8 +532,11 @@ widen it, target another ticket, or stand in for a person's decision.
   that lost a response, or died between stages, is resumed from the recorded
   stage by `ReconcileObserverActions`: a claim or settle replays under its id,
   a tk write that landed is answered `Replayed`, and a conflict — a moved
-  precondition, a different note under the reopen id — is recorded as refused
-  rather than written over. The destination is bound at the decision: the
+  precondition, a different note under the reopen or release id — is recorded
+  as refused rather than written over. A release reconciles on the same terms:
+  a lost claim or settle, or a run that died after the claim or after the
+  release landed, resumes from its stage and leaves the ticket released once
+  under `observer-release`. The destination is bound at the decision: the
   tk store root and, for a discovery, the project are persisted with the
   record before the claim, and a resume whose registration now names another
   store or `discovery_project` does not redirect the write; it records the

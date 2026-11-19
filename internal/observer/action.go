@@ -7,16 +7,17 @@ import (
 	"unicode/utf8"
 )
 
-// Action kinds. All three are proposals about a ticket and none writes one: the
+// Action kinds. All four are proposals about a ticket and none writes one: the
 // notebook admits the proposal and records its receipt, and the store that owns
 // tickets is a different store with its own failure mode. That is why admission
-// and the write are ordered rather than transactional. A reopen is its own kind
-// rather than a consequence of an outcome, so the guarded proposal is explicit
-// in the record and never implied from an assessment.
+// and the write are ordered rather than transactional. A reopen and a release
+// are their own kinds rather than consequences of an outcome, so the guarded
+// proposal is explicit in the record and never implied from an assessment.
 const (
-	ActionTicketNote   = "ticket-note"
-	ActionTicketOpen   = "ticket-open"
-	ActionTicketReopen = "ticket-reopen"
+	ActionTicketNote    = "ticket-note"
+	ActionTicketOpen    = "ticket-open"
+	ActionTicketReopen  = "ticket-reopen"
+	ActionTicketRelease = "ticket-release"
 )
 
 // maxTitleRunes bounds the title a ticket-open proposal carries. It becomes
@@ -82,8 +83,8 @@ func (a *Action) validate() error {
 		return err
 	}
 	switch a.Kind {
-	case ActionTicketNote, ActionTicketReopen:
-		// A note or a reopen goes on an existing ticket.
+	case ActionTicketNote, ActionTicketReopen, ActionTicketRelease:
+		// A note, a reopen or a release goes on an existing ticket.
 		if a.Ticket == "" {
 			return fieldErr("ticket", "required for %s", a.Kind)
 		}
@@ -110,7 +111,7 @@ func (a *Action) validate() error {
 			}
 		}
 	default:
-		return fieldErr("kind", "%q, one of %s, %s, %s", a.Kind, ActionTicketNote, ActionTicketOpen, ActionTicketReopen)
+		return fieldErr("kind", "%q, one of %s, %s, %s, %s", a.Kind, ActionTicketNote, ActionTicketOpen, ActionTicketReopen, ActionTicketRelease)
 	}
 	if a.Body == "" {
 		return fieldErr("body", "required")
