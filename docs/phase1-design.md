@@ -49,6 +49,7 @@ shuttle/
   internal/agentdef/             AGENT.md + agent.json loading and validation
   internal/schedule/             cron slots, timezone, jitter, catch-up, overlap
   internal/ledger/               runs.db (modernc.org/sqlite), state machine, incidents
+  internal/failure/              the §7.6 failure classes, a leaf every producer and the ledger share
   internal/runner/               one run end to end: dir, providers, prompt, runtime, outputs, delivery
   internal/provider/             input providers (one package each under provider/)
   internal/runtime/claude/       argv builder, stream parser, process control

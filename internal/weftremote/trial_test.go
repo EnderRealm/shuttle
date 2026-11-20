@@ -17,6 +17,7 @@ import (
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/sandbox"
 )
@@ -342,8 +343,8 @@ func TestTrialLaunchDispatch(t *testing.T) {
 	} {
 		h.writeControl(slugOf(c.ticket)+".environment", []byte(c.environment))
 		failed := h.waitReaped(entryOf(c.launch("hello-" + c.ticket))["run_id"].(string))
-		if got := failed.Segments[0].Failure.String; got != ledger.ClassProtocol {
-			t.Fatalf("%s with hello %s: segment failure %q, want %s", c.ticket, c.environment, got, ledger.ClassProtocol)
+		if got := failed.Segments[0].Failure.String; got != failure.Protocol {
+			t.Fatalf("%s with hello %s: segment failure %q, want %s", c.ticket, c.environment, got, failure.Protocol)
 		}
 	}
 	if n := strings.Count(h.logs.String(), "hello reports a registered repository or a trial environment other than the one the segment was launched with"); n != 2 {
@@ -442,7 +443,7 @@ func TestTrialLaunchDispatchReconcile(t *testing.T) {
 		run = h.run(runID)
 		return len(run.Segments) == 2 && h.reaped(run) && run.SettlementState != ledger.WeftSettlementReconciling
 	})
-	if seg := run.Segments[1]; seg.Kind != ledger.WeftSegmentReconcile || seg.Failure.String != ledger.ClassPreflight ||
+	if seg := run.Segments[1]; seg.Kind != ledger.WeftSegmentReconcile || seg.Failure.String != failure.Preflight ||
 		run.SettlementState != ledger.WeftSettlementNotLanded {
 		t.Fatalf("reconcile over a redirected store = %+v", run)
 	}

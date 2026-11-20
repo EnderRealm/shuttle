@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 )
 
@@ -967,7 +968,7 @@ func TestAuthPauseOutlivesAnUpdateDrain(t *testing.T) {
 	go func() { done <- h.u.Tick(context.Background()) }()
 	waitUntil(t, "the update pause", func() bool { return h.agent().Paused })
 
-	if _, err := h.store.FailWeftSegment(hosted.ID, 1, ledger.ClassAuth, "credential rejected"); err != nil {
+	if _, err := h.store.FailWeftSegment(hosted.ID, 1, failure.Auth, "credential rejected"); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err == nil || !strings.Contains(err.Error(), "no longer stands") {

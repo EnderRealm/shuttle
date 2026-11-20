@@ -13,6 +13,7 @@ import (
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/observer"
 )
@@ -304,7 +305,7 @@ exit 1
 	}
 	_, err := (&AuthTick{}).Check(context.Background(), p, d, dir)
 	var check *CheckError
-	if !errors.As(err, &check) || check.Class != ledger.ClassAuth {
+	if !errors.As(err, &check) || check.Class != failure.Auth {
 		t.Fatalf("auth: %v", err)
 	}
 	store, err := ledger.Open(filepath.Join(dir, "runs.db"))

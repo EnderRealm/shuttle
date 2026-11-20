@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/schedule"
 )
@@ -98,7 +99,7 @@ func TestResumeCommandAllowsNextSlotAfterFiveFailures(t *testing.T) {
 		if err != nil || reason != "" || r == nil {
 			t.Fatalf("claim: %s/%v", reason, err)
 		}
-		if err := store.Fail(r.ID, ledger.ClassDied, "exit 1", ledger.Result{}); err != nil {
+		if err := store.Fail(r.ID, failure.Died, "exit 1", ledger.Result{}); err != nil {
 			t.Fatal(err)
 		}
 	}

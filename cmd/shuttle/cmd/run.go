@@ -14,6 +14,7 @@ import (
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/provider"
 	"shuttle/internal/runner"
@@ -107,7 +108,7 @@ pipeline and waits for its terminal ledger state.`,
 		}
 		pipeline, err := buildPipeline(store, log.New(cmd.ErrOrStderr(), "", log.LstdFlags))
 		if err != nil {
-			_ = store.Fail(run.ID, ledger.ClassPreflight, err.Error(), ledger.Result{})
+			_ = store.Fail(run.ID, failure.Preflight, err.Error(), ledger.Result{})
 			return err
 		}
 		ctx, stop := manualRunContext(cmd.Context())

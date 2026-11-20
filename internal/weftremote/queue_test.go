@@ -19,6 +19,7 @@ import (
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/sandbox"
 )
@@ -1219,7 +1220,7 @@ func TestRestartKeepsTheQueueAndRelaunchesNothing(t *testing.T) {
 	}
 	run := h.run(runID)
 	if run.Phase != ledger.WeftPhaseEnded || run.Outcome.String != "failed" || len(run.Segments) != 1 ||
-		run.Segments[0].Failure.String != ledger.ClassUnknown {
+		run.Segments[0].Failure.String != failure.Unknown {
 		t.Fatalf("interrupted run = %+v", run)
 	}
 	if e := h.entry(interrupted["entry_id"].(string)); e["state"] != "dispatched" || e["run_id"] != runID {

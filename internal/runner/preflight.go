@@ -12,8 +12,8 @@ import (
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/keychain"
-	"shuttle/internal/ledger"
 	"shuttle/internal/provider"
 	"shuttle/internal/provider/loomsessions"
 	"shuttle/internal/provider/priorreports"
@@ -55,7 +55,7 @@ func (p Preflight) Check(ctx context.Context, def *agentdef.Definition, runDir s
 			ctxErr = f()
 		}
 		if ctxErr != nil {
-			return &CheckError{Name: name, Class: ledger.ClassPreflight, Err: ctxErr}
+			return &CheckError{Name: name, Class: failure.Preflight, Err: ctxErr}
 		}
 		return nil
 	}

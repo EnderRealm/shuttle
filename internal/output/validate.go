@@ -12,12 +12,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"shuttle/internal/ledger"
+	"shuttle/internal/failure"
 )
 
 const (
 	// Class is the §7.6 failure class an out/ failure is recorded under.
-	Class = ledger.ClassOutput
+	Class = failure.Output
 
 	// ReportFile and ManifestFile are the only two entries out/ may hold
 	// (§9.1); the run contract in §7.3 names them to the model.

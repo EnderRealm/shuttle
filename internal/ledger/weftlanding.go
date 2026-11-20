@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"time"
+
+	"shuttle/internal/failure"
 )
 
 // Landing settlement (weft-service/v2 §7). The host never takes a landing
@@ -770,7 +772,7 @@ func closeUngradedTx(tx *sql.Tx, runID, haltDetail string) error {
 		return err
 	}
 	_, err := tx.Exec(`UPDATE weft_segments SET failure=COALESCE(failure,?) WHERE run_id=? AND segment=(SELECT MAX(segment)
-		FROM weft_segments WHERE run_id=? AND kind IN `+weftPipelineKinds+`)`, ClassUnknown, runID, runID)
+		FROM weft_segments WHERE run_id=? AND kind IN `+weftPipelineKinds+`)`, failure.Unknown, runID, runID)
 	return err
 }
 

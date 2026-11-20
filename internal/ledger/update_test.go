@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"shuttle/internal/failure"
 )
 
 // hostEvents is each host event's dispatch and reason, oldest first.
@@ -126,7 +128,7 @@ func TestHostEventFollowsEveryPauseWrite(t *testing.T) {
 	if err := s.MarkWeftRunning(run.ID, 1, 1, "weft-worker/v2"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.FailWeftSegment(run.ID, 1, ClassAuth, "the credential was refused"); err != nil {
+	if _, err := s.FailWeftSegment(run.ID, 1, failure.Auth, "the credential was refused"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Resume(WeftAgent); err != nil {
@@ -151,7 +153,7 @@ func TestHostEventIgnoresOtherAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	for n := 1; n <= maxFailureStreak; n++ {
-		failNth(t, s, n, ClassDied)
+		failNth(t, s, n, failure.Died)
 	}
 	if got := hostEvents(t, s); len(got) != 0 {
 		t.Fatalf("host events = %v", got)

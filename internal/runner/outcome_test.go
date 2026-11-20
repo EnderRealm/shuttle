@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 )
 
@@ -40,7 +41,7 @@ func TestConfiguredTerminalOutcomesNotifyAndPersistCooldown(t *testing.T) {
 	}
 	fail := func() {
 		t.Helper()
-		if err := store.Fail(claim(), ledger.ClassDied, "exit 1", ledger.Result{}); err != nil {
+		if err := store.Fail(claim(), failure.Died, "exit 1", ledger.Result{}); err != nil {
 			t.Fatal(err)
 		}
 	}

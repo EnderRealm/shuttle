@@ -15,6 +15,7 @@ import (
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/output"
 	"shuttle/internal/provider"
@@ -275,7 +276,7 @@ func TestPipelinePreflightFailureSpendsNothingAndUsesFailurePolicy(t *testing.T)
 		t.Fatalf("model was called before preflight completed: %v", err)
 	}
 	row, _ := f.store.Get(run.ID)
-	if row.Status != ledger.StatusFailed || row.FailureClass.String != ledger.ClassPreflight ||
+	if row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Preflight ||
 		row.CostUSD.Valid || !row.RunDir.Valid {
 		t.Fatalf("row = %+v", row)
 	}
@@ -321,7 +322,7 @@ func TestPipelineEmailPreflightFollowsNoDeliver(t *testing.T) {
 			t.Fatalf("model was called before preflight completed: %v", err)
 		}
 		row, _ := f.store.Get(run.ID)
-		if row.Status != ledger.StatusFailed || row.FailureClass.String != ledger.ClassPreflight || row.CostUSD.Valid {
+		if row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Preflight || row.CostUSD.Valid {
 			t.Fatalf("row = %+v", row)
 		}
 	})
@@ -349,10 +350,10 @@ func TestPipelineClassifiesProviderOutputAndRuntimeFailures(t *testing.T) {
 		provider  bool
 		wantCalls int
 	}{
-		{name: "provider", mode: "success", class: ledger.ClassProvider, provider: true, wantCalls: 1},
-		{name: "output", mode: "output-missing", class: ledger.ClassOutput, wantCalls: 2},
-		{name: "runtime", mode: "died", class: ledger.ClassDied, wantCalls: 2},
-		{name: "timeout", mode: "timeout", class: ledger.ClassStuck, wantCalls: 2},
+		{name: "provider", mode: "success", class: failure.Provider, provider: true, wantCalls: 1},
+		{name: "output", mode: "output-missing", class: failure.Output, wantCalls: 2},
+		{name: "runtime", mode: "died", class: failure.Died, wantCalls: 2},
+		{name: "timeout", mode: "timeout", class: failure.Stuck, wantCalls: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

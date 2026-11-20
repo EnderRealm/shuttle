@@ -17,6 +17,7 @@ import (
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
 	"shuttle/internal/deliver"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	observercontract "shuttle/internal/observer"
 	"shuttle/internal/output"
@@ -347,17 +348,17 @@ func TestObserverRunRecordsEachOutcomeDistinctly(t *testing.T) {
 		},
 		{
 			name: "invalid payload", collector: "collector-invalid", model: silent,
-			status: ledger.StatusFailed, class: ledger.ClassProvider, collection: "invalid-payload",
+			status: ledger.StatusFailed, class: failure.Provider, collection: "invalid-payload",
 			assessed: "not-run", notebooked: "not-run", detail: "collector payload",
 		},
 		{
 			name: "failed collection", collector: "collector-fail", model: silent,
-			status: ledger.StatusFailed, class: ledger.ClassProvider, collection: "collection-failed",
+			status: ledger.StatusFailed, class: failure.Provider, collection: "collection-failed",
 			assessed: "not-run", notebooked: "not-run", detail: "domain store is locked",
 		},
 		{
 			name: "failed notebook snapshot", collector: "collector", notebook: "collector-fail", model: silent,
-			status: ledger.StatusFailed, class: ledger.ClassProvider, collection: "notebook-failed",
+			status: ledger.StatusFailed, class: failure.Provider, collection: "notebook-failed",
 			assessed: "not-run", notebooked: "not-run", detail: "notebook snapshot",
 		},
 		{
@@ -367,7 +368,7 @@ func TestObserverRunRecordsEachOutcomeDistinctly(t *testing.T) {
 		{
 			name: "invalid model output", collector: "collector",
 			model:  map[string]any{"silent": true, "assessments": []any{map[string]any{"contract_version": "observer/v1"}}, "actions": []any{}},
-			status: ledger.StatusFailed, class: ledger.ClassOutput, collection: "observed",
+			status: ledger.StatusFailed, class: failure.Output, collection: "observed",
 			assessed: "invalid", notebooked: "not-run", detail: "assessments[0]",
 		},
 	} {
@@ -557,7 +558,7 @@ func TestObserverRunSurfacesAConcurrentWorkerEditInsteadOfOverwriting(t *testing
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
-	if row.Status != ledger.StatusFailed || row.FailureClass.String != ledger.ClassOutput {
+	if row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Output {
 		t.Fatalf("row = %+v", row)
 	}
 	var state observerNotebookState
@@ -661,7 +662,7 @@ func TestObserverDefinitionsKeepSeparateScopes(t *testing.T) {
 		t.Fatalf("cross-scope err = %v", err)
 	}
 	row, err := f.store.Get(run.ID)
-	if err != nil || row.FailureClass.String != ledger.ClassOutput {
+	if err != nil || row.FailureClass.String != failure.Output {
 		t.Fatalf("cross-scope row = %+v, %v", row, err)
 	}
 	var state observerNotebookState

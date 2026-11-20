@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"shuttle/internal/failure"
 )
 
 // claim claims a slot and fails the test if the slot was already taken.
@@ -127,7 +129,7 @@ func TestStateMachine(t *testing.T) {
 			return s.Complete(id, Result{})
 		},
 		StatusFailed: func(s *Store, id string) error {
-			return s.Fail(id, ClassDied, "exit 1", Result{})
+			return s.Fail(id, failure.Died, "exit 1", Result{})
 		},
 	}
 	tests := []struct {
@@ -190,7 +192,7 @@ func TestSetRunDirRetainsPreflightArtifactsOnAClaim(t *testing.T) {
 	if err := s.SetRunDir(run.ID, "/tmp/run-before-launch"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Fail(run.ID, ClassPreflight, "missing requirement", Result{}); err != nil {
+	if err := s.Fail(run.ID, failure.Preflight, "missing requirement", Result{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.Get(run.ID)
@@ -217,7 +219,7 @@ func driveTo(t *testing.T, s *Store, id, status string) {
 	case StatusCompleted:
 		err = s.Complete(id, Result{})
 	case StatusFailed:
-		err = s.Fail(id, ClassDied, "exit 1", Result{})
+		err = s.Fail(id, failure.Died, "exit 1", Result{})
 	case StatusUnknown:
 		err = s.MarkUnknown(id)
 	default:
@@ -240,7 +242,7 @@ func TestInFlightListsClaimedAndRunningInOrder(t *testing.T) {
 		t.Fatalf("complete: %v", err)
 	}
 	failed := claim(t, s, "daily", "2026-09-05T04:30:00-07:00")
-	if err := s.Fail(failed.ID, ClassDied, "exit 1", Result{}); err != nil {
+	if err := s.Fail(failed.ID, failure.Died, "exit 1", Result{}); err != nil {
 		t.Fatalf("fail: %v", err)
 	}
 	if _, _, err := s.Skip("daily", slot(t, "2026-09-06T04:30:00-07:00"), TriggerCron, SkipMissed); err != nil {

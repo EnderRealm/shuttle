@@ -15,6 +15,7 @@ import (
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	observercontract "shuttle/internal/observer"
 	"shuttle/internal/provider/tkconfig"
@@ -891,7 +892,7 @@ func TestObserverReleaseRefusals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if row.Status != ledger.StatusFailed || row.FailureClass.String != ledger.ClassOutput {
+			if row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Output {
 				t.Fatalf("row = %+v", row)
 			}
 			if outcome := readObserverResult(t, row.RunDir.String); outcome.NotebookStatus != "conflict-or-failure" || !strings.Contains(outcome.Detail, test.detail) {
@@ -934,7 +935,7 @@ func TestObserverReleaseRefusals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if converged.Status != ledger.StatusCompleted || converged.FailureClass.String != ledger.ClassOutput || !converged.Silent {
+			if converged.Status != ledger.StatusCompleted || converged.FailureClass.String != failure.Output || !converged.Silent {
 				t.Fatalf("row after reconciliation = %+v, want it completed with its failure class kept", converged)
 			}
 			reconciled := readObserverResult(t, row.RunDir.String)
@@ -1204,7 +1205,7 @@ func TestObserverActionsReconcileAfterLostResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if row.Status != ledger.StatusFailed || row.FailureClass.String != ledger.ClassOutput {
+			if row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Output {
 				t.Fatalf("row = %+v", row)
 			}
 			outcome := readObserverResult(t, row.RunDir.String)
@@ -1247,7 +1248,7 @@ func TestObserverActionsReconcileAfterLostResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if converged.Status != ledger.StatusCompleted || converged.FailureClass.String != ledger.ClassOutput || !converged.Silent {
+			if converged.Status != ledger.StatusCompleted || converged.FailureClass.String != failure.Output || !converged.Silent {
 				t.Fatalf("row after reconciliation = %+v, want it completed with its failure class kept", converged)
 			}
 			reconciled := readObserverResult(t, row.RunDir.String)
@@ -1395,7 +1396,7 @@ func TestObserverClaimFailureDrivesTheRemainingActions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.Status != ledger.StatusFailed || row.FailureClass.String != ledger.ClassOutput {
+	if row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Output {
 		t.Fatalf("row = %+v", row)
 	}
 	if first, second := to.tk.get(t, to.ticketID), to.tk.get(t, other.Ticket); len(first.Notes) != 0 || len(second.Notes) != 1 {
@@ -1599,7 +1600,7 @@ func TestObserverDiscoveryCapIsReservedAtTheDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.Status != ledger.StatusFailed || row.FailureClass.String != ledger.ClassOutput {
+	if row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Output {
 		t.Fatalf("row = %+v", row)
 	}
 	if to.tk.count(t, tkProject) != 1 {

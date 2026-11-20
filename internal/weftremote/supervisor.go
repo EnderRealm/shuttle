@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/keychain"
 	"shuttle/internal/ledger"
 	"shuttle/internal/reap"
@@ -266,7 +267,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	}
 	runDir := segment.RunDir.String
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	if refusal := s.worktreeMoved(run, segment); refusal != "" {
 		// The worker would act on another worktree than the one the operator
@@ -290,31 +291,31 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		l, err = s.preparePipeline(run, segment, runDir)
 	}
 	if err != nil {
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	argv, env, contract, worker := l.argv, l.env, l.contract, l.worker
 	if err := writeRunRecord(runDir, run, segment, contract, argv, env, 0); err != nil {
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	eventsFile, err := os.OpenFile(filepath.Join(runDir, "events.ndjson"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	defer eventsFile.Close()
 	stderrFile, err := os.OpenFile(filepath.Join(runDir, "stderr.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	defer stderrFile.Close()
 	commandsFile, err := os.OpenFile(filepath.Join(runDir, "commands.ndjson"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	defer commandsFile.Close()
 
 	gateReader, gateWriter, err := os.Pipe()
 	if err != nil {
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	defer gateWriter.Close()
 	gatedArgv := append([]string{"-c", `IFS= read -r _ <&3 || exit 125; exec "$@"`, "shuttle-worker-gate"}, argv...)
@@ -328,13 +329,13 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		gateReader.Close()
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	stdout, stdoutChild, err := os.Pipe()
 	if err != nil {
 		gateReader.Close()
 		stdin.Close()
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	stderr, stderrChild, err := os.Pipe()
 	if err != nil {
@@ -342,7 +343,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		stdin.Close()
 		stdout.Close()
 		stdoutChild.Close()
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	cmd.Stdout = stdoutChild
 	cmd.Stderr = stderrChild
@@ -353,7 +354,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		stdoutChild.Close()
 		stderr.Close()
 		stderrChild.Close()
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	gateReader.Close()
 	if err := writeRunRecord(runDir, run, segment, contract, argv, env, cmd.Process.Pid); err != nil {
@@ -364,7 +365,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		stderr.Close()
 		stderrChild.Close()
 		_ = cmd.Wait()
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	afterWorkerSpawn()
 	// The child inherited these write ends. Closing the parent's copies makes
@@ -402,7 +403,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	if err != nil {
 		gateWriter.Close()
 		_ = cmd.Wait()
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, err)
+		return s.failBeforeSpawn(run, segment, failure.Preflight, err)
 	}
 	landing := ""
 	if l.land {
@@ -413,7 +414,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	if _, err := gateWriter.Write([]byte("run\n")); err != nil {
 		gateWriter.Close()
 		_ = cmd.Wait()
-		return s.failBeforeSpawn(run, segment, ledger.ClassPreflight, fmt.Errorf("release worker start gate: %w", err))
+		return s.failBeforeSpawn(run, segment, failure.Preflight, fmt.Errorf("release worker start gate: %w", err))
 	}
 	gateWriter.Close()
 	stderrDone := make(chan struct{})
@@ -453,12 +454,12 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 		case read = <-eventCh:
 			gotRead = true
 			if read.err != nil && !gotWait {
-				failClass, failDetail = ledger.ClassProtocol, read.err.Error()
+				failClass, failDetail = failure.Protocol, read.err.Error()
 				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 				killC = time.After(5 * time.Second)
 			}
 		case <-timeoutC:
-			failClass = ledger.ClassStuck
+			failClass = failure.Stuck
 			failDetail = fmt.Sprintf("segment_timeout_seconds %d elapsed", timeoutSeconds)
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			killC = time.After(5 * time.Second)
@@ -473,7 +474,7 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 			killC = nil
 		case <-active.force:
 			if failClass == "" {
-				failClass, failDetail = ledger.ClassStuck, "worker did not stop within 15 seconds"
+				failClass, failDetail = failure.Stuck, "worker did not stop within 15 seconds"
 			}
 			if !gotRead {
 				_ = stdout.Close()
@@ -509,20 +510,20 @@ func (s *Supervisor) runSegment(runID string) ([]string, error) {
 	}
 	exitCode := exitCode(waitErr)
 	if failClass == "" && read.err != nil {
-		failClass, failDetail = ledger.ClassProtocol, read.err.Error()
+		failClass, failDetail = failure.Protocol, read.err.Error()
 	}
 	if failClass == "" && !read.terminal {
 		switch {
 		case exitCode == 0:
-			failClass, failDetail = ledger.ClassNoResult, "worker exited 0 with no terminal event"
+			failClass, failDetail = failure.NoResult, "worker exited 0 with no terminal event"
 		case exitCode == 64:
-			failClass, failDetail = ledger.ClassProtocol, "worker exited 64 with no terminal event"
+			failClass, failDetail = failure.Protocol, "worker exited 64 with no terminal event"
 		default:
-			failClass, failDetail = ledger.ClassDied, fmt.Sprintf("worker exited %d with no terminal event", exitCode)
+			failClass, failDetail = failure.Died, fmt.Sprintf("worker exited %d with no terminal event", exitCode)
 		}
 	}
 	if failClass == "" && exitCode != 0 {
-		failClass, failDetail = ledger.ClassDied, fmt.Sprintf("worker exited %d after a terminal event", exitCode)
+		failClass, failDetail = failure.Died, fmt.Sprintf("worker exited %d after a terminal event", exitCode)
 	}
 	if failClass != "" {
 		s.log.Printf("weft segment %s: failed %s, exit %d: %s",

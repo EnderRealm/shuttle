@@ -14,6 +14,7 @@ import (
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/output"
 	"shuttle/internal/provider"
@@ -99,16 +100,16 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 	}
 	slot, err := time.Parse(time.RFC3339, row.ScheduledFor)
 	if err != nil {
-		return nil, p.fail(nil, row.ID, ledger.ClassPreflight, fmt.Errorf("scheduled_for %q: %w", row.ScheduledFor, err), ledger.Result{}, resultRecord{})
+		return nil, p.fail(nil, row.ID, failure.Preflight, fmt.Errorf("scheduled_for %q: %w", row.ScheduledFor, err), ledger.Result{}, resultRecord{})
 	}
 	started := p.now()
 	run, err := prepare(def, slot, row.ID, row.TriggerKind, false, opts.UnsafeNoSandbox, opts.NoDeliver, p.Config, p.Home)
 	if err != nil {
-		return nil, p.fail(nil, row.ID, ledger.ClassPreflight, err, ledger.Result{}, resultRecord{StartedAt: stamp(started)})
+		return nil, p.fail(nil, row.ID, failure.Preflight, err, ledger.Result{}, resultRecord{StartedAt: stamp(started)})
 	}
 	record := resultRecord{StartedAt: stamp(started)}
 	if err := p.Ledger.SetRunDir(row.ID, run.Dir); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
+		return nil, p.fail(run, row.ID, failure.Preflight, err, ledger.Result{}, record)
 	}
 	preflight := Preflight{
 		Config: p.Config, Home: p.Home, HomeDir: p.HomeDir, PATH: p.PATH,
@@ -122,7 +123,7 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 		auth = &AuthTick{}
 	}
 	if _, err := auth.Check(ctx, preflight, def, run.Dir); err != nil {
-		class := ledger.ClassPreflight
+		class := failure.Preflight
 		var check *CheckError
 		if errors.As(err, &check) && check.Class != "" {
 			class = check.Class
@@ -133,15 +134,15 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 		return p.runObserver(ctx, preflight, def, row, run, opts, record, slot)
 	}
 	if err := run.collect(ctx, def, p.Config, p.Home, p.logger(), slot); err != nil {
-		class := ledger.ClassProvider
+		class := failure.Provider
 		var providerErr *provider.Error
 		if !errors.As(err, &providerErr) {
-			class = ledger.ClassPreflight
+			class = failure.Preflight
 		}
 		return nil, p.fail(run, row.ID, class, err, ledger.Result{}, record)
 	}
 	if err := run.render(def); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
+		return nil, p.fail(run, row.ID, failure.Preflight, err, ledger.Result{}, record)
 	}
 
 	_, result, record, class, err := p.executeRuntime(ctx, preflight, def, row, run, opts, record)
@@ -151,7 +152,7 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 
 	validated, err := output.Validate(filepath.Join(run.Dir, "out"))
 	if err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 	result.Silent = validated.Silent
 	record.Silent = boolPointer(validated.Silent)
@@ -162,7 +163,7 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 			Dir: file.Dir, Label: run.Window.Label, RunID: row.ID,
 		}, validated, p.logger())
 		if err != nil {
-			return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+			return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 		}
 	} else if !validated.Silent {
 		applied.Subject = validated.Subject
@@ -171,15 +172,15 @@ func (p *Pipeline) Run(ctx context.Context, def *agentdef.Definition, row *ledge
 		applied.DeliveryStatus = ledger.DeliverySkipped
 	}
 	if err := p.Ledger.SetDelivery(row.ID, applied.DeliveryStatus, ""); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 	if err := p.recordApplied(row.ID, run.Dir, applied); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 	record.Status = ledger.StatusCompleted
 	record.EndedAt = stamp(p.now())
 	if err := writeResult(run.Dir, record); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 	if err := p.Ledger.Complete(row.ID, result); err != nil {
 		return nil, err
@@ -204,13 +205,13 @@ func (p *Pipeline) executeRuntime(
 ) (*claude.Outcome, ledger.Result, resultRecord, string, error) {
 	key, err := preflight.key(p.Config.Anthropic.KeychainItem)
 	if err != nil {
-		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+		return nil, ledger.Result{}, record, failure.Preflight, err
 	}
 	var launcher []string
 	if !opts.UnsafeNoSandbox {
 		launcher, err = sandbox.Launcher(preflight.sandbox(def, run.Dir))
 		if err != nil {
-			return nil, ledger.Result{}, record, ledger.ClassSandbox, err
+			return nil, ledger.Result{}, record, failure.Sandbox, err
 		}
 	}
 	runtimeOptions := claude.Options{
@@ -226,20 +227,20 @@ func (p *Pipeline) executeRuntime(
 	}
 	run.record.Argv, err = claude.Argv(runtimeOptions)
 	if err != nil {
-		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+		return nil, ledger.Result{}, record, failure.Preflight, err
 	}
 	if err := run.writeRecord(); err != nil {
-		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+		return nil, ledger.Result{}, record, failure.Preflight, err
 	}
 
 	transcript, err := os.OpenFile(filepath.Join(run.Dir, transcriptFile), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+		return nil, ledger.Result{}, record, failure.Preflight, err
 	}
 	stderr, err := os.OpenFile(filepath.Join(run.Dir, stderrFile), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		_ = transcript.Close()
-		return nil, ledger.Result{}, record, ledger.ClassPreflight, err
+		return nil, ledger.Result{}, record, failure.Preflight, err
 	}
 	runtimeOptions.Started = func(pid int) error {
 		run.record.PID = pid
@@ -252,13 +253,13 @@ func (p *Pipeline) executeRuntime(
 	transcriptCloseErr := transcript.Close()
 	stderrCloseErr := stderr.Close()
 	if launchErr != nil {
-		return nil, ledger.Result{}, record, ledger.ClassDied, launchErr
+		return nil, ledger.Result{}, record, failure.Died, launchErr
 	}
 	result := ledgerResult(outcome)
 	record = recordFromOutcome(record, outcome)
 	for _, evidenceErr := range []error{outcome.TranscriptErr, outcome.StderrErr, transcriptCloseErr, stderrCloseErr} {
 		if evidenceErr != nil {
-			return outcome, result, record, ledger.ClassDied, fmt.Errorf("retain runtime evidence: %w", evidenceErr)
+			return outcome, result, record, failure.Died, fmt.Errorf("retain runtime evidence: %w", evidenceErr)
 		}
 	}
 	if outcome.Class != "" {

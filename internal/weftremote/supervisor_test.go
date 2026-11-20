@@ -17,6 +17,7 @@ import (
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
 	"shuttle/internal/config"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/sandbox"
 )
@@ -203,7 +204,7 @@ func TestSupervisorRefusesLaunchWhenOAuthItemIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Phase != ledger.WeftPhaseEnded || got.Outcome.String != "failed" ||
-		got.Segments[0].Failure.String != ledger.ClassPreflight {
+		got.Segments[0].Failure.String != failure.Preflight {
 		t.Fatalf("run = %+v", got)
 	}
 	row, err := f.store.Get(got.Segments[0].LedgerRunID)
@@ -234,10 +235,10 @@ func TestSupervisorClassifiesWorkerProcessFailures(t *testing.T) {
 		class   string
 		timeout int
 	}{
-		{name: "zero without terminal", script: "#!/bin/sh\n" + workerGuard + "exit 0\n", class: ledger.ClassNoResult},
-		{name: "nonzero without terminal", script: "#!/bin/sh\n" + workerGuard + "exit 3\n", class: ledger.ClassDied},
-		{name: "protocol", script: "#!/bin/sh\n" + workerGuard + "printf 'not-json\\n'\n", class: ledger.ClassProtocol},
-		{name: "timeout", script: "#!/bin/sh\n" + workerGuard + "sleep 300\n", class: ledger.ClassStuck, timeout: 1},
+		{name: "zero without terminal", script: "#!/bin/sh\n" + workerGuard + "exit 0\n", class: failure.NoResult},
+		{name: "nonzero without terminal", script: "#!/bin/sh\n" + workerGuard + "exit 3\n", class: failure.Died},
+		{name: "protocol", script: "#!/bin/sh\n" + workerGuard + "printf 'not-json\\n'\n", class: failure.Protocol},
+		{name: "timeout", script: "#!/bin/sh\n" + workerGuard + "sleep 300\n", class: failure.Stuck, timeout: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 )
 
@@ -81,7 +82,7 @@ func TestLedgerCommandsIgnoreAMalformedConfig(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := store.Fail(run.ID, ledger.ClassDied, "exit 1", ledger.Result{}); err != nil {
+	if err := store.Fail(run.ID, failure.Died, "exit 1", ledger.Result{}); err != nil {
 		t.Fatal(err)
 	}
 	incidents, err := store.OpenIncidents()
@@ -95,7 +96,7 @@ func TestLedgerCommandsIgnoreAMalformedConfig(t *testing.T) {
 		t.Fatalf("runs = %q, %v", out, err)
 	}
 	out, err = execStdout(t, "show", run.ID)
-	if err != nil || !strings.Contains(out, run.ID) || !strings.Contains(out, ledger.ClassDied) {
+	if err != nil || !strings.Contains(out, run.ID) || !strings.Contains(out, failure.Died) {
 		t.Fatalf("show = %q, %v", out, err)
 	}
 	if _, err := execStdout(t, "ack", strconv.FormatInt(incidents[0].ID, 10)); err != nil {
@@ -127,7 +128,7 @@ func TestRunsAlignsColumns(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := store.Fail(run.ID, ledger.ClassDied, "exit 1", ledger.Result{}); err != nil {
+	if err := store.Fail(run.ID, failure.Died, "exit 1", ledger.Result{}); err != nil {
 		t.Fatal(err)
 	}
 

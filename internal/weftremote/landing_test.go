@@ -14,6 +14,7 @@ import (
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 )
 
@@ -321,7 +322,7 @@ func TestLostLandingReconcilesAtEveryStep(t *testing.T) {
 				run = h.run(runID)
 				return len(run.Segments) == 2 && run.SettlementState == ledger.WeftSettlementReconciling
 			})
-			if run.Phase != ledger.WeftPhaseSettling || run.Segments[0].Failure.String != ledger.ClassDied ||
+			if run.Phase != ledger.WeftPhaseSettling || run.Segments[0].Failure.String != failure.Died ||
 				run.Segments[1].Kind != ledger.WeftSegmentReconcile || holderOf(h.repositoryOf("weft")) != "settlement "+runID {
 				t.Fatalf("lost landing = %+v", run)
 			}
@@ -793,7 +794,7 @@ func TestReconcileRefusesMarkDoneBeforePush(t *testing.T) {
 	})
 	run = h.run(runID)
 	if run.SettlementState != ledger.WeftSettlementNotLanded || run.SettlementReason.String != ledger.WeftLandUnreconciled ||
-		run.SettlementStep.String != "push" || run.Segments[1].Failure.String != ledger.ClassProtocol ||
+		run.SettlementStep.String != "push" || run.Segments[1].Failure.String != failure.Protocol ||
 		run.ActionRequired.String != ledger.WeftActionLandingUnsettled || h.repositoryOf("weft")["dispatch"] != "paused" {
 		t.Fatalf("protocol-failed reconcile = %+v", run)
 	}
@@ -1436,7 +1437,7 @@ func TestReconcileIntentBeforeObservedIsRefused(t *testing.T) {
 	})
 	run = h.run(runID)
 	if run.SettlementState != ledger.WeftSettlementNotLanded || run.SettlementReason.String != ledger.WeftLandUnreconciled ||
-		run.SettlementStep.String != "push" || run.Steps[1].Result.Valid || run.Segments[1].Failure.String != ledger.ClassProtocol ||
+		run.SettlementStep.String != "push" || run.Steps[1].Result.Valid || run.Segments[1].Failure.String != failure.Protocol ||
 		h.repositoryOf("weft")["dispatch"] != "paused" {
 		t.Fatalf("a reconcile that intended before observing = %+v", run)
 	}
@@ -1516,7 +1517,7 @@ func TestUngradedLandingRunsDoNotStayPending(t *testing.T) {
 	h.service.segments.findKey = func(item string) (string, error) { return "", fmt.Errorf("keychain item %q: not found", item) }
 	failed := h.waitReaped(h.waitDispatched(entryOf(h.launch(failing, "preflight"))["entry_id"].(string)))
 	h.service.segments.findKey = findKey
-	if failed.Segments[0].Failure.String != ledger.ClassPreflight || failed.SettlementState != ledger.WeftSettlementNone ||
+	if failed.Segments[0].Failure.String != failure.Preflight || failed.SettlementState != ledger.WeftSettlementNone ||
 		failed.SettlementDetail.String != "the run ended before it was graded, so nothing lands" {
 		t.Fatalf("preflight-failed run = %+v", failed)
 	}
@@ -1705,7 +1706,7 @@ func TestStoppedLandingStaysStoppedThroughItsReconcile(t *testing.T) {
 		return len(run.Segments) == 2 && run.Phase == ledger.WeftPhaseEnded && h.reaped(run)
 	})
 	run := h.holdsStoppedLanding(runID, "fast_forward")
-	if run.Segments[0].Failure.String != ledger.ClassDied || run.Segments[1].Kind != ledger.WeftSegmentReconcile {
+	if run.Segments[0].Failure.String != failure.Died || run.Segments[1].Kind != ledger.WeftSegmentReconcile {
 		t.Fatalf("segments = %+v", run.Segments)
 	}
 	for segment := 1; segment <= 2; segment++ {
@@ -1943,7 +1944,7 @@ func TestReconcileIntentNeedsEveryEarlierStep(t *testing.T) {
 		t.Fatalf("mark_done was acknowledged with the fast-forward not done: %v", got)
 	}
 	if run.SettlementState != ledger.WeftSettlementNotLanded || run.SettlementReason.String != ledger.WeftLandUnreconciled ||
-		run.SettlementStep.String != ledger.WeftStepFastForward || run.Segments[1].Failure.String != ledger.ClassProtocol ||
+		run.SettlementStep.String != ledger.WeftStepFastForward || run.Segments[1].Failure.String != failure.Protocol ||
 		len(run.Steps) != 2 || run.ActionRequired.String != ledger.WeftActionLandingUnsettled ||
 		h.repositoryOf("weft")["dispatch"] != "paused" {
 		t.Fatalf("mark_done before the fast-forward = %+v", run)
@@ -1987,7 +1988,7 @@ func TestUngradedReconcileLeavesNoStepsInTheResumesWay(t *testing.T) {
 	})
 	run = h.run(runID)
 	if run.Outcome.String != "failed" || run.SettlementState != ledger.WeftSettlementNone || len(run.Steps) != 0 ||
-		run.Segments[0].Failure.String != ledger.ClassDied || run.ActionRequired.Valid {
+		run.Segments[0].Failure.String != failure.Died || run.ActionRequired.Valid {
 		t.Fatalf("ungraded reconcile = %+v", run)
 	}
 	// The worktree the lost segment left, as a worker leaves it.
@@ -2056,7 +2057,7 @@ func TestReconcileObservationOverridesAnEarlierResult(t *testing.T) {
 				return
 			}
 			if run.SettlementState != ledger.WeftSettlementNotLanded || run.SettlementReason.String != ledger.WeftLandUnreconciled ||
-				run.SettlementStep.String != "push" || run.Segments[1].Failure.String != ledger.ClassProtocol ||
+				run.SettlementStep.String != "push" || run.Segments[1].Failure.String != failure.Protocol ||
 				len(run.Steps) != 2 || run.Steps[1].Observed.String != "unknown" || h.repositoryOf("weft")["dispatch"] != "paused" {
 				t.Fatalf("mark_done on an unknown push = %+v", run)
 			}
@@ -2096,7 +2097,7 @@ func TestReconcileNeverTakesAnUnknownStep(t *testing.T) {
 				t.Fatalf("a step observed unknown was acknowledged: %v", got)
 			}
 			if run.SettlementState != ledger.WeftSettlementNotLanded || run.SettlementReason.String != ledger.WeftLandUnreconciled ||
-				run.SettlementStep.String != tt.intend || run.Segments[1].Failure.String != ledger.ClassProtocol ||
+				run.SettlementStep.String != tt.intend || run.Segments[1].Failure.String != failure.Protocol ||
 				run.ActionRequired.String != ledger.WeftActionLandingUnsettled || h.repositoryOf("weft")["dispatch"] != "paused" {
 				t.Fatalf("%s = %+v", tt.name, run)
 			}
@@ -2207,7 +2208,7 @@ func TestReconcileWithoutCommitTakesNoStep(t *testing.T) {
 			}
 			if run.Outcome.String != "finished" || run.SettlementState != ledger.WeftSettlementNotLanded ||
 				run.SettlementReason.String != ledger.WeftLandUnreconciled || run.SettlementStep.String != ledger.WeftStepFastForward ||
-				run.Segments[0].Failure.String != ledger.ClassDied || run.Segments[1].Failure.String != ledger.ClassProtocol ||
+				run.Segments[0].Failure.String != failure.Died || run.Segments[1].Failure.String != failure.Protocol ||
 				len(run.Steps) != 0 || run.ActionRequired.String != ledger.WeftActionLandingUnsettled ||
 				h.repositoryOf("weft")["dispatch"] != "paused" {
 				t.Fatalf("reconcile without a commit = %+v", run)
@@ -2241,7 +2242,7 @@ func TestParkedAfterAGradeIsReconciled(t *testing.T) {
 		return len(run.Segments) == 2 && run.SettlementState == ledger.WeftSettlementReconciling && run.Segments[0].Failure.Valid
 	})
 	if run.Phase != ledger.WeftPhaseSettling || run.Question != nil || run.Segments[0].Terminal.Valid ||
-		run.Segments[0].Failure.String != ledger.ClassProtocol || run.Segments[1].Kind != ledger.WeftSegmentReconcile ||
+		run.Segments[0].Failure.String != failure.Protocol || run.Segments[1].Kind != ledger.WeftSegmentReconcile ||
 		holderOf(h.repositoryOf("weft")) != "settlement "+runID {
 		t.Fatalf("parked after a grade = %+v", run)
 	}
@@ -2300,7 +2301,7 @@ func TestReconcileObservingAnotherGradeIsUnreconciled(t *testing.T) {
 	run = h.run(runID)
 	if run.Outcome.String != "finished" || run.SettlementState != ledger.WeftSettlementNotLanded ||
 		run.SettlementReason.String != ledger.WeftLandUnreconciled || run.SettlementStep.String != ledger.WeftStepPush ||
-		run.Segments[1].Failure.String != ledger.ClassProtocol || run.Segments[1].Terminal.Valid || len(run.Steps) != 1 ||
+		run.Segments[1].Failure.String != failure.Protocol || run.Segments[1].Terminal.Valid || len(run.Steps) != 1 ||
 		run.Steps[0].Result.String != "done" || run.Steps[0].Observed.Valid || run.SettlementCommit.String != fixtureHead ||
 		run.ActionRequired.String != ledger.WeftActionLandingUnsettled || h.repositoryOf("weft")["dispatch"] != "paused" {
 		t.Fatalf("reconcile observing halted = %+v", run)
@@ -2334,7 +2335,7 @@ func TestFinishedGradeEndedNotApplicableIsReconciled(t *testing.T) {
 		return len(run.Segments) == 2 && run.SettlementState == ledger.WeftSettlementReconciling && run.Segments[0].Failure.Valid
 	})
 	if run.Phase != ledger.WeftPhaseSettling || run.Outcome.String != "finished" || run.Segments[0].Terminal.Valid ||
-		run.Segments[0].Failure.String != ledger.ClassProtocol || run.Segments[1].Kind != ledger.WeftSegmentReconcile ||
+		run.Segments[0].Failure.String != failure.Protocol || run.Segments[1].Kind != ledger.WeftSegmentReconcile ||
 		holderOf(h.repositoryOf("weft")) != "settlement "+runID {
 		t.Fatalf("finished grade ended not_applicable = %+v", run)
 	}
@@ -2382,7 +2383,7 @@ func TestReconcileOfAFinishedGradeReportingNoLandingIsUnreconciled(t *testing.T)
 	run = h.run(runID)
 	if run.Outcome.String != "finished" || run.SettlementState != ledger.WeftSettlementNotLanded ||
 		run.SettlementReason.String != ledger.WeftLandUnreconciled || run.SettlementStep.String != ledger.WeftStepFastForward ||
-		run.Segments[0].Failure.String != ledger.ClassDied || run.Segments[1].Failure.String != ledger.ClassProtocol ||
+		run.Segments[0].Failure.String != failure.Died || run.Segments[1].Failure.String != failure.Protocol ||
 		run.Segments[1].Terminal.Valid || run.ActionRequired.String != ledger.WeftActionLandingUnsettled ||
 		run.SettlementCommit.String != fixtureHead || h.repositoryOf("weft")["dispatch"] != "paused" {
 		t.Fatalf("reconciled not_applicable after a finished grade = %+v", run)
@@ -2573,7 +2574,7 @@ func TestArchiveFailingBeforeSpawnIsRefused(t *testing.T) {
 	}
 	run := h.run(old.ID)
 	if run.Disposition != ledger.WeftDispositionRetained || len(run.Segments) != 2 ||
-		run.Segments[1].Failure.String != ledger.ClassPreflight || strings.Contains(h.argv(), "archive --contract") {
+		run.Segments[1].Failure.String != failure.Preflight || strings.Contains(h.argv(), "archive --contract") {
 		t.Fatalf("run after an archive failed before spawn = %+v\n%s", run, h.argv())
 	}
 	if c := h.queue()["capacity"].(map[string]any); c["running"] != float64(0) || h.repositoryOf("weft")["reservation"] != nil {
@@ -2611,13 +2612,13 @@ func TestLiveArchiveWorkerLostIsRefused(t *testing.T) {
 	h.settle()
 	invalid := h.entry(entry)["invalidated"].(map[string]any)
 	detail, _ := invalid["detail"].(string)
-	if invalid["reason"] != "archive_refused" || !strings.Contains(detail, ledger.ClassDied) ||
+	if invalid["reason"] != "archive_refused" || !strings.Contains(detail, failure.Died) ||
 		!strings.Contains(detail, ledger.WeftArchiveRef(old.ID)) {
 		t.Fatalf("lost archive = %v", invalid)
 	}
 	run := h.run(old.ID)
 	if run.Disposition != ledger.WeftDispositionRetained || run.SupersededBy.Valid || len(run.Segments) != 2 ||
-		run.Segments[1].Kind != ledger.WeftSegmentArchive || run.Segments[1].Failure.String != ledger.ClassDied ||
+		run.Segments[1].Kind != ledger.WeftSegmentArchive || run.Segments[1].Failure.String != failure.Died ||
 		strings.Count(h.argv(), "archive --contract") != 1 {
 		t.Fatalf("run after a lost archive = %+v\n%s", run, h.argv())
 	}
@@ -2703,7 +2704,7 @@ func TestLostReconcileKeepsItsReading(t *testing.T) {
 	run = h.run(runID)
 	if run.Outcome.String != "finished" || run.SettlementState != ledger.WeftSettlementNotLanded ||
 		run.SettlementReason.String != ledger.WeftLandUnreconciled || run.SettlementStep.String != ledger.WeftStepPush ||
-		len(run.Steps) != 1 || run.Steps[0].Observed.String != "done" || run.Segments[1].Failure.String != ledger.ClassDied ||
+		len(run.Steps) != 1 || run.Steps[0].Observed.String != "done" || run.Segments[1].Failure.String != failure.Died ||
 		run.SettlementCommit.Valid || run.ActionRequired.String != ledger.WeftActionLandingUnsettled ||
 		h.repositoryOf("weft")["dispatch"] != "paused" {
 		t.Fatalf("lost reconcile after reading finished = %+v", run)
@@ -2786,7 +2787,7 @@ func TestNotLandedOfAnotherCommitIsRefused(t *testing.T) {
 		return len(run.Segments) == 2 && run.SettlementState == ledger.WeftSettlementLanded && h.reaped(run)
 	})
 	run = h.run(runID)
-	if run.Segments[0].Failure.String != ledger.ClassProtocol || run.Segments[0].Terminal.Valid || run.SettlementCommit.String != head {
+	if run.Segments[0].Failure.String != failure.Protocol || run.Segments[0].Terminal.Valid || run.SettlementCommit.String != head {
 		t.Fatalf("not_landed of another commit = %+v", run)
 	}
 	if !strings.Contains(h.logs.String(), "ended reports a landing not landed of a commit other than the graded head") {
@@ -2857,7 +2858,7 @@ func TestGradedBeforeSummaryRecordsHead(t *testing.T) {
 			return len(run.Segments) == 2 && run.SettlementState == ledger.WeftSettlementLanded && h.reaped(run)
 		})
 		run = h.run(runID)
-		if run.Head.String != fixtureHead || run.Segments[0].Failure.String != ledger.ClassDied ||
+		if run.Head.String != fixtureHead || run.Segments[0].Failure.String != failure.Died ||
 			run.Segments[1].Kind != ledger.WeftSegmentReconcile || run.SettlementCommit.String != fixtureHead {
 			t.Fatalf("reconciled run = %+v", run)
 		}
@@ -2908,7 +2909,7 @@ func TestGradedAfterSummaryStillRead(t *testing.T) {
 			return len(run.Segments) == 2 && run.Phase == ledger.WeftPhaseEnded && h.reaped(run)
 		})
 		run = h.run(runID)
-		if run.Segments[0].Failure.String != ledger.ClassProtocol || len(h.commands(id, 1)) != 0 {
+		if run.Segments[0].Failure.String != failure.Protocol || len(h.commands(id, 1)) != 0 {
 			t.Fatalf("summarized after a summary-carrying graded = %+v", run)
 		}
 		if !strings.Contains(h.logs.String(), "summarized after the segment's summary was already reported") {

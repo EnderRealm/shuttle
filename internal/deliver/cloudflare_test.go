@@ -52,7 +52,7 @@ func ok(result string) reply {
 	return reply{http.StatusOK, `{"success":true,"errors":[],"messages":[],"result":` + result + `}`}
 }
 
-func failure(status, code int, message string) reply {
+func apiError(status, code int, message string) reply {
 	body, _ := json.Marshal(map[string]any{
 		"success": false, "messages": []any{}, "result": nil,
 		"errors": []map[string]any{{"code": code, "message": message}},
@@ -76,15 +76,15 @@ func TestCloudflareSendClassifiesEachResponse(t *testing.T) {
 			attempts: 1, status: 200, errText: []string{"HTTP 200", "permanent bounce", testRecipient}},
 		{name: "unconfirmed recipient", replies: []reply{ok(`{"delivered":[],"queued":[],"permanent_bounces":[]}`)},
 			attempts: 1, status: 200, errText: []string{"neither delivered nor queued", testRecipient}},
-		{name: "429 then success", replies: []reply{failure(429, 10004, "rate limited"), ok(`{"delivered":["` + testRecipient + `"],"queued":[],"permanent_bounces":[]}`)},
+		{name: "429 then success", replies: []reply{apiError(429, 10004, "rate limited"), ok(`{"delivered":["` + testRecipient + `"],"queued":[],"permanent_bounces":[]}`)},
 			attempts: 2, waits: 1, status: 200},
-		{name: "429 twice", replies: []reply{failure(429, 10004, "rate limited")},
+		{name: "429 twice", replies: []reply{apiError(429, 10004, "rate limited")},
 			attempts: 2, waits: 1, status: 429, errText: []string{"HTTP 429", "rate limited"}},
-		{name: "500", replies: []reply{failure(500, 10002, "internal error")},
+		{name: "500", replies: []reply{apiError(500, 10002, "internal error")},
 			attempts: 2, waits: 1, status: 500, errText: []string{"HTTP 500", "internal error"}},
-		{name: "401", replies: []reply{failure(401, 10000, "Authentication error")},
+		{name: "401", replies: []reply{apiError(401, 10000, "Authentication error")},
 			attempts: 1, status: 401, errText: []string{"HTTP 401", "Authentication error"}, auth: true},
-		{name: "403", replies: []reply{failure(403, 10000, "Forbidden")},
+		{name: "403", replies: []reply{apiError(403, 10000, "Forbidden")},
 			attempts: 1, status: 403, errText: []string{"HTTP 403", "Forbidden"}, auth: true},
 	}
 	for _, tt := range tests {

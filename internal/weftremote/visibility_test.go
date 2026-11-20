@@ -26,6 +26,7 @@ import (
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/sandbox"
 )
@@ -720,7 +721,7 @@ func TestWorkerProbeGatesOutputAndTheAgentUserLaunch(t *testing.T) {
 		t.Helper()
 		h.ticket(ticketID, ticket.StatusReady, 2)
 		run := h.waitReaped(h.waitDispatched(entryOf(h.launch(ticketID, "launch-"+ticketID))["entry_id"].(string)))
-		if got := run.Segments[0]; got.Failure.String != ledger.ClassPreflight || got.WorkerContract.Valid {
+		if got := run.Segments[0]; got.Failure.String != failure.Preflight || got.WorkerContract.Valid {
 			t.Fatalf("a segment of a worker without agent_user = %+v, want it refused at its preflight", got)
 		}
 	}
@@ -1119,7 +1120,7 @@ func TestV2SegmentRefusals(t *testing.T) {
 			if err := h.store.Resume(ledger.WeftAgent); err != nil {
 				t.Fatal(err)
 			}
-			if run.Outcome.String != "failed" || run.Segments[0].Failure.String != ledger.ClassProtocol ||
+			if run.Outcome.String != "failed" || run.Segments[0].Failure.String != failure.Protocol ||
 				!strings.Contains(run.HaltDetail.String, tt.detail) {
 				t.Fatalf("run = outcome %s failure %s detail %q, want protocol %q",
 					run.Outcome.String, run.Segments[0].Failure.String, run.HaltDetail.String, tt.detail)
@@ -1217,7 +1218,7 @@ func TestOutputCaptureFailureIsLogged(t *testing.T) {
 	h.exec(`CREATE TRIGGER refuse_output BEFORE INSERT ON weft_output BEGIN SELECT RAISE(ABORT, 'output store refused the write'); END`)
 	h.release(id)
 	run := h.waitReaped(runID)
-	if run.Segments[0].Failure.String != ledger.ClassProtocol || !strings.Contains(run.HaltDetail.String, "capture output chunk 1") {
+	if run.Segments[0].Failure.String != failure.Protocol || !strings.Contains(run.HaltDetail.String, "capture output chunk 1") {
 		t.Fatalf("run = failure %s detail %q", run.Segments[0].Failure.String, run.HaltDetail.String)
 	}
 	line := fmt.Sprintf("weft output host=%s run=%s ledger=%s segment=1 stage=work occurrence=1 attempt=1: capture of chunk 1 failed: ",

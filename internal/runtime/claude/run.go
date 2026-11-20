@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"shuttle/internal/ledger"
+	"shuttle/internal/failure"
 )
 
 // killGrace is the §7.4 pause between SIGTERM and SIGKILL: the CLI exits 143
@@ -238,17 +238,17 @@ func Run(ctx context.Context, o Options, transcript, stderrW io.Writer) (*Outcom
 	}
 	switch {
 	case stuckDetail != "":
-		out.Class = ledger.ClassStuck
+		out.Class = failure.Stuck
 		out.Detail = stuckDetail
 	case stream.Result != nil && stream.Result.Success():
 		// Class stays empty: this is the only path that succeeded.
 	case stream.Result != nil:
 		switch {
 		case stream.AuthFailed:
-			out.Class = ledger.ClassAuth
+			out.Class = failure.Auth
 			out.Detail = authDetail
 		case stream.Result.Subtype == subtypeMaxTurns || stream.Result.Subtype == subtypeMaxBudget:
-			out.Class = ledger.ClassBudget
+			out.Class = failure.Budget
 			out.Detail = withTail("result subtype "+stream.Result.Subtype, tail)
 		default:
 			// §7.6 has no class for a terminal result carrying an error that is
@@ -256,17 +256,17 @@ func Run(ctx context.Context, o Options, transcript, stderrW io.Writer) (*Outcom
 			// rather than a fallthrough. The detail names the subtype and the
 			// stderr tail only — an exit code here would contradict died's
 			// definition, which is a non-zero exit with no result at all.
-			out.Class = ledger.ClassDied
+			out.Class = failure.Died
 			out.Detail = withTail("unrecognised failing result subtype "+stream.Result.Subtype, tail)
 		}
 	case stream.AuthFailed:
-		out.Class = ledger.ClassAuth
+		out.Class = failure.Auth
 		out.Detail = authDetail
 	case exitCode == 0:
-		out.Class = ledger.ClassNoResult
+		out.Class = failure.NoResult
 		out.Detail = withTail("exit 0 with no result", tail)
 	default:
-		out.Class = ledger.ClassDied
+		out.Class = failure.Died
 		out.Detail = withTail(fmt.Sprintf("exit %d with no result", exitCode), tail)
 	}
 	return out, nil

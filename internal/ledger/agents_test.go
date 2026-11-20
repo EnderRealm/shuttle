@@ -3,6 +3,8 @@ package ledger
 import (
 	"fmt"
 	"testing"
+
+	"shuttle/internal/failure"
 )
 
 // failNth claims the nth daily slot and fails it with the given class.
@@ -18,7 +20,7 @@ func failNth(t *testing.T, s *Store, n int, class string) string {
 func TestFailureStreakPausesAtFive(t *testing.T) {
 	s := newStore(t)
 	for n := 1; n <= 5; n++ {
-		failNth(t, s, n, ClassDied)
+		failNth(t, s, n, failure.Died)
 		agent, err := s.Agent("daily")
 		if err != nil {
 			t.Fatalf("agent: %v", err)
@@ -43,8 +45,8 @@ func TestFailureStreakPausesAtFive(t *testing.T) {
 
 func TestCompletionResetsStreak(t *testing.T) {
 	s := newStore(t)
-	failNth(t, s, 1, ClassDied)
-	failNth(t, s, 2, ClassProvider)
+	failNth(t, s, 1, failure.Died)
+	failNth(t, s, 2, failure.Provider)
 	run := claim(t, s, "daily", "2026-09-03T04:30:00-07:00")
 	if err := s.Complete(run.ID, Result{}); err != nil {
 		t.Fatalf("complete: %v", err)
@@ -63,7 +65,7 @@ func TestCompletionResetsStreak(t *testing.T) {
 
 func TestUnknownAndSkippedLeaveTheStreakAlone(t *testing.T) {
 	s := newStore(t)
-	failNth(t, s, 1, ClassDied)
+	failNth(t, s, 1, failure.Died)
 
 	// A restart over an in-flight run, and a slot that was never launched:
 	// neither is evidence the agent is broken (§6.2).
@@ -89,7 +91,7 @@ func TestUnknownAndSkippedLeaveTheStreakAlone(t *testing.T) {
 
 func TestAuthFailurePausesOnTheFirstOccurrence(t *testing.T) {
 	s := newStore(t)
-	failNth(t, s, 1, ClassAuth)
+	failNth(t, s, 1, failure.Auth)
 	agent, err := s.Agent("daily")
 	if err != nil {
 		t.Fatalf("agent: %v", err)
@@ -102,7 +104,7 @@ func TestAuthFailurePausesOnTheFirstOccurrence(t *testing.T) {
 func TestResumeClearsThePauseAndTheStreak(t *testing.T) {
 	s := newStore(t)
 	for n := 1; n <= 5; n++ {
-		failNth(t, s, n, ClassDied)
+		failNth(t, s, n, failure.Died)
 	}
 	if err := s.Resume("daily"); err != nil {
 		t.Fatalf("resume: %v", err)

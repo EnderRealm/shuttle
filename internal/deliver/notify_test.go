@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 )
 
@@ -35,7 +36,7 @@ func TestIncidentNotificationCooldownAckAndRecovery(t *testing.T) {
 	}
 	fail := func() ledger.Event {
 		t.Helper()
-		ev, e := store.FailEvent(claim(), ledger.ClassDied, "exit 137 at /run/1", ledger.Result{})
+		ev, e := store.FailEvent(claim(), failure.Died, "exit 137 at /run/1", ledger.Result{})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -96,7 +97,7 @@ func TestIncidentNotificationCooldownAckAndRecovery(t *testing.T) {
 
 func TestNotificationFailureDoesNotConsumeCooldown(t *testing.T) {
 	n := &Notifier{StatePath: filepath.Join(t.TempDir(), "notify.state"), Enabled: true, Cooldown: time.Hour, Send: func(context.Context, string, string) error { return fmt.Errorf("delivery failed") }}
-	ev := ledger.Event{Agent: "daily", RunID: "run", Class: ledger.ClassAuth, NewIncident: true}
+	ev := ledger.Event{Agent: "daily", RunID: "run", Class: failure.Auth, NewIncident: true}
 	if sent, err := n.Notify(context.Background(), ev); sent || err == nil {
 		t.Fatalf("notify: %t/%v", sent, err)
 	}
@@ -111,7 +112,7 @@ func TestLiveNotifications(t *testing.T) {
 		t.Skip("set SHUTTLE_LIVE_NOTIFY=1 to observe macOS failure/recovery notifications")
 	}
 	n := &Notifier{StatePath: filepath.Join(t.TempDir(), "notify.state"), Enabled: true, Cooldown: time.Hour}
-	ev := ledger.Event{Agent: "notification-check", RunID: "local-check", Class: ledger.ClassPreflight, Signature: "preflight: notification delivery check", IncidentID: 1, NewIncident: true}
+	ev := ledger.Event{Agent: "notification-check", RunID: "local-check", Class: failure.Preflight, Signature: "preflight: notification delivery check", IncidentID: 1, NewIncident: true}
 	if sent, err := n.Notify(context.Background(), ev); !sent || err != nil {
 		t.Fatalf("failure: %t/%v", sent, err)
 	}

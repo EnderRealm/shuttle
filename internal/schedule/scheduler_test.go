@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"shuttle/internal/agentdef"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 )
 
@@ -189,7 +190,7 @@ func TestTick(t *testing.T) {
 			setup: func(t *testing.T, h *harness) {
 				// The first auth failure pauses the agent (§6.3).
 				run := h.claim(t, "daily", "2026-09-01T04:30:00-07:00")
-				if err := h.store.Fail(run.ID, ledger.ClassAuth, "authentication_failed", ledger.Result{}); err != nil {
+				if err := h.store.Fail(run.ID, failure.Auth, "authentication_failed", ledger.Result{}); err != nil {
 					t.Fatalf("fail: %v", err)
 				}
 			},
@@ -402,7 +403,7 @@ func TestGatedSlotsAreRecordedOncePerSlot(t *testing.T) {
 	h := newHarness(t, "2026-09-02T09:06:00-07:00", def)
 	// The first auth failure pauses the agent (§6.3).
 	run := h.claim(t, "daily", "2026-09-02T09:00:00-07:00")
-	if err := h.store.Fail(run.ID, ledger.ClassAuth, "authentication_failed", ledger.Result{}); err != nil {
+	if err := h.store.Fail(run.ID, failure.Auth, "authentication_failed", ledger.Result{}); err != nil {
 		t.Fatalf("fail: %v", err)
 	}
 	// Four ticks across three later slot periods.

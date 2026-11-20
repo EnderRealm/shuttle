@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"shuttle/internal/failure"
 )
 
 // A ledger stamped 4 by the build before landing migrates to 5 with its
@@ -93,7 +95,7 @@ func TestSchemaFourMigratesToFiveKeepingV1RunsHistorical(t *testing.T) {
 		t.Fatal(err)
 	}
 	if closed.Phase != WeftPhaseEnded || closed.Outcome.String != "failed" || closed.SettlementState != WeftSettlementNone ||
-		len(closed.Segments) != 1 || closed.Segments[0].Failure.String != ClassUnknown {
+		len(closed.Segments) != 1 || closed.Segments[0].Failure.String != failure.Unknown {
 		t.Fatalf("v1 segment after the restart pass = %+v", closed)
 	}
 	var reservations int
@@ -129,9 +131,9 @@ func TestUngradedReconcileKeepsStopAndFailureClass(t *testing.T) {
 		name, class, outcome string
 		stop, restart        bool
 	}{
-		{"forced stop", ClassStuck, "stopped", true, false},
-		{"died", ClassDied, "failed", false, false},
-		{"daemon restart", ClassUnknown, "failed", false, true},
+		{"forced stop", failure.Stuck, "stopped", true, false},
+		{"died", failure.Died, "failed", false, false},
+		{"daemon restart", failure.Unknown, "failed", false, true},
 	} {
 		run := landingRun(t, s, "demo/"+strings.ReplaceAll(tt.name, " ", "-"))
 		if tt.stop {
@@ -206,8 +208,8 @@ func TestUngradedLandingWithLostReconcileIsHeldUnreconciled(t *testing.T) {
 		name, class, outcome string
 		stop                 bool
 	}{
-		{"forced stop", ClassStuck, "stopped", true},
-		{"died", ClassDied, "failed", false},
+		{"forced stop", failure.Stuck, "stopped", true},
+		{"died", failure.Died, "failed", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newStore(t)
@@ -223,7 +225,7 @@ func TestUngradedLandingWithLostReconcileIsHeldUnreconciled(t *testing.T) {
 			if err := s.MarkWeftRunning(run.ID, 2, 12346, "weft-worker/v2"); err != nil {
 				t.Fatal(err)
 			}
-			if reconcile, err := s.FailWeftSegment(run.ID, 2, ClassDied, "reconcile exited with no terminal event"); err != nil || reconcile {
+			if reconcile, err := s.FailWeftSegment(run.ID, 2, failure.Died, "reconcile exited with no terminal event"); err != nil || reconcile {
 				t.Fatalf("lost reconcile = %v %v", reconcile, err)
 			}
 			got, err := s.GetWeftRun(run.ID)
@@ -270,7 +272,7 @@ func TestUngradedLandingWithLostReconcileIsHeldUnreconciled(t *testing.T) {
 func TestLandIntentNeedsTheRecordedGradedHead(t *testing.T) {
 	s := newStore(t)
 	ungraded := landingRun(t, s, "demo/ungraded")
-	if _, err := s.FailWeftSegment(ungraded.ID, 1, ClassDied, "worker exited with no terminal event"); err != nil {
+	if _, err := s.FailWeftSegment(ungraded.ID, 1, failure.Died, "worker exited with no terminal event"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.MarkWeftRunning(ungraded.ID, 2, 12346, "weft-worker/v2"); err != nil {
@@ -319,12 +321,12 @@ func TestUnfinishedGradeLostBeforeEndedIsNotReconciled(t *testing.T) {
 		name, outcome, class string
 		restart, resumable   bool
 	}{
-		{"halted then killed", "halted", ClassDied, false, false},
-		{"stopped then killed", "stopped", ClassStuck, false, true},
-		{"failed then killed", "failed", ClassDied, false, false},
-		{"failed then restart", "failed", ClassUnknown, true, false},
-		{"halted then restart", "halted", ClassUnknown, true, false},
-		{"stopped then restart", "stopped", ClassUnknown, true, true},
+		{"halted then killed", "halted", failure.Died, false, false},
+		{"stopped then killed", "stopped", failure.Stuck, false, true},
+		{"failed then killed", "failed", failure.Died, false, false},
+		{"failed then restart", "failed", failure.Unknown, true, false},
+		{"halted then restart", "halted", failure.Unknown, true, false},
+		{"stopped then restart", "stopped", failure.Unknown, true, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newStore(t)
@@ -397,7 +399,7 @@ func TestReconcileReadingCannotUndoAFinishedGrade(t *testing.T) {
 	if err := s.RecordWeftLandResult(run.ID, 1, WeftStepFastForward, "done", "", "2026-10-03T09:00:01.000Z"); err != nil {
 		t.Fatal(err)
 	}
-	if reconcile, err := s.FailWeftSegment(run.ID, 1, ClassDied, "worker exited with no terminal event"); err != nil || !reconcile {
+	if reconcile, err := s.FailWeftSegment(run.ID, 1, failure.Died, "worker exited with no terminal event"); err != nil || !reconcile {
 		t.Fatalf("lost landing = %v %v", reconcile, err)
 	}
 	if err := s.MarkWeftRunning(run.ID, 2, 12346, "weft-worker/v2"); err != nil {
@@ -438,7 +440,7 @@ func TestReconciledGradeIsTheLostSegmentsGrade(t *testing.T) {
 		t.Run(tt.outcome, func(t *testing.T) {
 			s := newStore(t)
 			run := landingRun(t, s, "demo/read-"+tt.outcome)
-			if reconcile, err := s.FailWeftSegment(run.ID, 1, ClassDied, "worker exited with no terminal event"); err != nil || !reconcile {
+			if reconcile, err := s.FailWeftSegment(run.ID, 1, failure.Died, "worker exited with no terminal event"); err != nil || !reconcile {
 				t.Fatalf("lost landing = %v %v", reconcile, err)
 			}
 			if err := s.MarkWeftRunning(run.ID, 2, 12346, "weft-worker/v2"); err != nil {
@@ -458,7 +460,7 @@ func TestReconciledGradeIsTheLostSegmentsGrade(t *testing.T) {
 				t.Fatal(err)
 			}
 			if got.Phase != WeftPhaseEnded || got.Outcome.String != tt.outcome || got.SettlementState != WeftSettlementNone ||
-				got.Segments[0].Failure.String != ClassDied || got.ActionRequired.Valid {
+				got.Segments[0].Failure.String != failure.Died || got.ActionRequired.Valid {
 				t.Fatalf("reconciled %s = %+v", tt.outcome, got)
 			}
 			err = s.WeftTx(func(tx *WeftTx) error {
@@ -496,7 +498,7 @@ func TestLostLandingAtTheSegmentLimitIsHeldUnreconciled(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE weft_segments SET segment=? WHERE run_id=? AND segment=1`, WeftSegmentLimit, run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if reconcile, err := s.FailWeftSegment(run.ID, WeftSegmentLimit, ClassDied, "worker exited with no terminal event"); err != nil || reconcile {
+	if reconcile, err := s.FailWeftSegment(run.ID, WeftSegmentLimit, failure.Died, "worker exited with no terminal event"); err != nil || reconcile {
 		t.Fatalf("lost landing at the limit = %v %v", reconcile, err)
 	}
 	got, err := s.GetWeftRun(run.ID)
@@ -541,7 +543,7 @@ func TestLostReconcileReadingAnUnfinishedGradeSettlesAsReconciled(t *testing.T) 
 		t.Run(outcome, func(t *testing.T) {
 			s := newStore(t)
 			run := landingRun(t, s, "demo/lost-"+outcome)
-			if reconcile, err := s.FailWeftSegment(run.ID, 1, ClassDied, "worker exited with no terminal event"); err != nil || !reconcile {
+			if reconcile, err := s.FailWeftSegment(run.ID, 1, failure.Died, "worker exited with no terminal event"); err != nil || !reconcile {
 				t.Fatalf("lost landing = %v %v", reconcile, err)
 			}
 			if err := s.MarkWeftRunning(run.ID, 2, 12346, "weft-worker/v2"); err != nil {
@@ -550,7 +552,7 @@ func TestLostReconcileReadingAnUnfinishedGradeSettlesAsReconciled(t *testing.T) 
 			if err := s.RecordWeftObserved(run.ID, 2, outcome, WeftObserved{"not_done", "not_done", "not_done"}, "2026-10-03T09:00:00.000Z"); err != nil {
 				t.Fatal(err)
 			}
-			if reconcile, err := s.FailWeftSegment(run.ID, 2, ClassDied, "reconcile exited with no terminal event"); err != nil || reconcile {
+			if reconcile, err := s.FailWeftSegment(run.ID, 2, failure.Died, "reconcile exited with no terminal event"); err != nil || reconcile {
 				t.Fatalf("lost reconcile = %v %v", reconcile, err)
 			}
 			got, err := s.GetWeftRun(run.ID)

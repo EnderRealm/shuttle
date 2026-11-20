@@ -1,10 +1,14 @@
 package ledger
 
-import "testing"
+import (
+	"testing"
+
+	"shuttle/internal/failure"
+)
 
 func TestCompletionEventRecordsRecoveryOnce(t *testing.T) {
 	s := newStore(t)
-	failNth(t, s, 1, ClassDied)
+	failNth(t, s, 1, failure.Died)
 	run := claim(t, s, "daily", "2026-09-02T04:30:00-07:00")
 	event, err := s.CompleteEvent(run.ID, Result{})
 	if err != nil || !event.Recovered {
@@ -30,7 +34,7 @@ func TestReconciledLeavesTheFailureHistory(t *testing.T) {
 	s.OnTerminal = func(event Event) { events = append(events, event) }
 	var last string
 	for n := 1; n <= maxFailureStreak; n++ {
-		last = failNth(t, s, n, ClassOutput)
+		last = failNth(t, s, n, failure.Output)
 	}
 	before, err := s.Get(last)
 	if err != nil {

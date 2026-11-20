@@ -17,6 +17,7 @@ import (
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/reap"
 )
@@ -486,8 +487,8 @@ func TestPipelineSegmentsAreRefusedWithoutAnAgentUserLaunch(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Phase != ledger.WeftPhaseEnded || got.Segments[0].Failure.String != ledger.ClassPreflight {
-				t.Fatalf("run = %+v, want it failed %s", got, ledger.ClassPreflight)
+			if got.Phase != ledger.WeftPhaseEnded || got.Segments[0].Failure.String != failure.Preflight {
+				t.Fatalf("run = %+v, want it failed %s", got, failure.Preflight)
 			}
 			if _, err := os.Stat(filepath.Join(got.Segments[0].RunDir.String, "run.json")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("the worker launch was reached: %v", err)

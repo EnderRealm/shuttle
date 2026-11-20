@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"shuttle/internal/agentdef"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 )
 
@@ -32,16 +33,16 @@ func (p *Pipeline) runObserver(
 			Collection: collection, AssessmentStatus: "not-run", NotebookStatus: "not-run",
 			Detail: err.Error(),
 		})
-		return nil, p.fail(run, row.ID, ledger.ClassProvider, err, ledger.Result{}, record)
+		return nil, p.fail(run, row.ID, failure.Provider, err, ledger.Result{}, record)
 	}
 	if err := run.renderObserver(def, state); err != nil {
 		_ = promoteObserverEvidence(state.StagingDir, run.Dir)
-		return nil, p.fail(run, row.ID, ledger.ClassPreflight, err, ledger.Result{}, record)
+		return nil, p.fail(run, row.ID, failure.Preflight, err, ledger.Result{}, record)
 	}
 	_, result, record, class, err := p.executeRuntime(ctx, preflight, def, row, run, opts, record)
 	retainErr := promoteObserverEvidence(state.StagingDir, run.Dir)
 	if retainErr != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, fmt.Errorf("retain observer evidence: %w", retainErr), result, record)
+		return nil, p.fail(run, row.ID, failure.Output, fmt.Errorf("retain observer evidence: %w", retainErr), result, record)
 	}
 	if err != nil {
 		_ = writeObserverResult(run.Dir, observerResultRecord{
@@ -57,7 +58,7 @@ func (p *Pipeline) runObserver(
 			Collection: state.Collection.Status, EvidenceCount: len(state.Collection.Evidence),
 			AssessmentStatus: "invalid", NotebookStatus: "not-run", Detail: err.Error(),
 		})
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 	applied, err := p.applyObserverAssessments(ctx, row.ID, run.Dir, state, validated)
 	if err == nil {
@@ -65,13 +66,13 @@ func (p *Pipeline) runObserver(
 	}
 	if err != nil {
 		_ = writeObserverResult(run.Dir, observerOutcome(state, validated, applied, "conflict-or-failure", err.Error()))
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 	if err := p.prepareObserverReport(def, row, run, opts, validated, applied); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 	if err := writeObserverResult(run.Dir, observerOutcome(state, validated, applied, "applied", "")); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 
 	result.Silent = validated.Silent
@@ -79,7 +80,7 @@ func (p *Pipeline) runObserver(
 	record.Status = ledger.StatusCompleted
 	record.EndedAt = stamp(p.now())
 	if err := writeResult(run.Dir, record); err != nil {
-		return nil, p.fail(run, row.ID, ledger.ClassOutput, err, result, record)
+		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
 	if err := p.Ledger.Complete(row.ID, result); err != nil {
 		return nil, err

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/sandbox"
 )
 
@@ -340,7 +341,7 @@ func TestReconcileWeftUnknownClosesAPIStateAndReleasesRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Phase != WeftPhaseEnded || got.Outcome.String != "failed" ||
-		got.Segments[0].Failure.String != ClassUnknown || got.Question != nil {
+		got.Segments[0].Failure.String != failure.Unknown || got.Question != nil {
 		t.Fatalf("reconciled run = %+v", got)
 	}
 	if _, err := s.ClaimWeft(WeftLaunch{
@@ -554,7 +555,7 @@ func TestDeadSegmentClosesRunningStages(t *testing.T) {
 			if err := s.ReconcileWeftUnknown(run.Segments[0].LedgerRunID); err != nil {
 				t.Fatal(err)
 			}
-		} else if _, err := s.FailWeftSegment(run.ID, 1, ClassDied, tt.detail); err != nil {
+		} else if _, err := s.FailWeftSegment(run.ID, 1, failure.Died, tt.detail); err != nil {
 			t.Fatal(err)
 		}
 		got, err := s.GetWeftRun(run.ID)
@@ -617,7 +618,7 @@ func TestTerminalSegmentStagesUnchanged(t *testing.T) {
 			t.Fatal(err)
 		}
 		if tt.failed {
-			if _, err := s.FailWeftSegment(run.ID, 1, ClassDied, "worker exited 1 after a terminal event"); err != nil {
+			if _, err := s.FailWeftSegment(run.ID, 1, failure.Died, "worker exited 1 after a terminal event"); err != nil {
 				t.Fatal(err)
 			}
 		} else if err := s.CompleteWeftSegment(run.ID, 1); err != nil {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"shuttle/internal/agentdef"
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/runner"
 )
@@ -174,7 +175,7 @@ func TestManualRunCancellationSettlesTheClaim(t *testing.T) {
 		return pipelineFunc(func(ctx context.Context, _ *agentdef.Definition, run *ledger.Run, _ runner.Options) (*runner.RunResult, error) {
 			cancelled = errors.Is(ctx.Err(), context.Canceled)
 			err := errors.New("manual run interrupted")
-			if failErr := store.Fail(run.ID, ledger.ClassStuck, err.Error(), ledger.Result{}); failErr != nil {
+			if failErr := store.Fail(run.ID, failure.Stuck, err.Error(), ledger.Result{}); failErr != nil {
 				return nil, failErr
 			}
 			return nil, err
@@ -197,7 +198,7 @@ func TestManualRunCancellationSettlesTheClaim(t *testing.T) {
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("runs = %v, %v", runs, err)
 	}
-	if runs[0].Status != ledger.StatusFailed || runs[0].FailureClass.String != ledger.ClassStuck {
+	if runs[0].Status != ledger.StatusFailed || runs[0].FailureClass.String != failure.Stuck {
 		t.Fatalf("row = %+v", runs[0])
 	}
 }
@@ -381,7 +382,7 @@ func TestNewPipelineAttachesTheConfiguredNotifications(t *testing.T) {
 	statePath := filepath.Join(os.Getenv("SHUTTLE_HOME"), "notify.state")
 	// The failure below is inside its cooldown, so no notification is sent;
 	// without the configured cooldown it would be.
-	signature := ledger.Signature(ledger.ClassDied, "exit 1")
+	signature := ledger.Signature(failure.Died, "exit 1")
 	state, err := json.Marshal(map[string]time.Time{"daily\x00incident\x00" + signature: time.Now()})
 	if err != nil {
 		t.Fatal(err)
@@ -407,7 +408,7 @@ func TestNewPipelineAttachesTheConfiguredNotifications(t *testing.T) {
 		return r.ID
 	}
 	failed := claim(time.Now().Add(-2 * time.Hour))
-	if err := store.Fail(failed, ledger.ClassDied, "exit 1", ledger.Result{}); err != nil {
+	if err := store.Fail(failed, failure.Died, "exit 1", ledger.Result{}); err != nil {
 		t.Fatal(err)
 	}
 	if want := "run=" + failed + " agent=daily notification=false"; !strings.Contains(logs.String(), want) ||

@@ -49,19 +49,6 @@ const (
 	DeliverySkipped   = "skipped"
 )
 
-// Failure classes, §7.6. Nothing is ever classified as "flake".
-const (
-	ClassPreflight = "preflight"
-	ClassAuth      = "auth"
-	ClassProvider  = "provider"
-	ClassDied      = "died"
-	ClassNoResult  = "no_result"
-	ClassStuck     = "stuck"
-	ClassBudget    = "budget"
-	ClassOutput    = "output"
-	ClassSandbox   = "sandbox"
-)
-
 // runColumns is the select list every read shares, in scanRun's order.
 const runColumns = `id, agent, trigger_kind, scheduled_for, claimed_at, started_at, ended_at,
 	status, skip_reason, failure_class, error_signature, pid, run_dir, session_id,

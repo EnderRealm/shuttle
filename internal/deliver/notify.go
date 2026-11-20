@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 )
 
@@ -49,7 +50,7 @@ func (n *Notifier) Notify(ctx context.Context, event ledger.Event) (bool, error)
 		// The agent is neither failed nor paused: only the email token is.
 		kind = notifyAuth
 		body = fmt.Sprintf("%s report not delivered: %s. Incident %d; run %s completed. Repair the email token.", event.Agent, event.Signature, event.IncidentID, event.RunID)
-	case event.Class == ledger.ClassAuth:
+	case event.Class == failure.Auth:
 		kind = notifyAuth
 		body += " Paused for auth; repair the credential, then shuttle resume " + event.Agent + "."
 	case event.PausedReason != "":

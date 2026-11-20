@@ -19,6 +19,7 @@ import (
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 	"golang.org/x/sys/unix"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/reap"
 )
@@ -150,8 +151,8 @@ func TestDeadSegmentChildrenContained(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Segments[0].Failure.String != ledger.ClassDied {
-			t.Fatalf("segment = %+v, want it failed %s", got.Segments[0], ledger.ClassDied)
+		if got.Segments[0].Failure.String != failure.Died {
+			t.Fatalf("segment = %+v, want it failed %s", got.Segments[0], failure.Died)
 		}
 		if !strings.Contains(logs.String(), ": session containment stopped 2 [") {
 			t.Fatalf("log does not report the contained tree:\n%s", logs.String())
@@ -203,7 +204,7 @@ func TestDeadSegmentChildrenContained(t *testing.T) {
 			killTree(tree)
 			mu.Unlock()
 			run := h.run(runID)
-			if _, err := h.service.segments.settle(run, run.Segments[0], ledger.ClassDied, "torn down", nil); err != nil {
+			if _, err := h.service.segments.settle(run, run.Segments[0], failure.Died, "torn down", nil); err != nil {
 				t.Error(err)
 			}
 		})
@@ -290,7 +291,7 @@ func TestReconcileWaitsForDeadSegmentChild(t *testing.T) {
 		return run.SettlementState == ledger.WeftSettlementLanded && h.reaped(run)
 	})
 	run = h.run(runID)
-	if len(run.Segments) != 2 || run.Segments[0].Failure.String != ledger.ClassDied ||
+	if len(run.Segments) != 2 || run.Segments[0].Failure.String != failure.Died ||
 		run.Segments[1].Kind != ledger.WeftSegmentReconcile {
 		t.Fatalf("reconciled run = %+v", run)
 	}

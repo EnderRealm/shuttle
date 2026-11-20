@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"shuttle/internal/agentdef"
-	"shuttle/internal/ledger"
+	"shuttle/internal/failure"
 	"shuttle/internal/runtime/claude"
 	"shuttle/internal/sandbox"
 )
@@ -58,7 +58,7 @@ func (p Preflight) auth(ctx context.Context, def *agentdef.Definition, runDir st
 	}
 	key, err := p.key(p.Config.Anthropic.KeychainItem)
 	if err != nil {
-		return fail(ledger.ClassPreflight, err)
+		return fail(failure.Preflight, err)
 	}
 	// Reuse the checked run directory: a nested directory can exceed srt's
 	// socket limit even when the local preflight accepted its parent.
@@ -67,21 +67,21 @@ func (p Preflight) auth(ctx context.Context, def *agentdef.Definition, runDir st
 	if !p.UnsafeNoSandbox {
 		so := p.sandbox(def, dir)
 		if _, err := sandbox.WriteProfile(so); err != nil {
-			return fail(ledger.ClassPreflight, err)
+			return fail(failure.Preflight, err)
 		}
 		launcher, err = sandbox.Launcher(so)
 		if err != nil {
-			return fail(ledger.ClassPreflight, err)
+			return fail(failure.Preflight, err)
 		}
 	}
 	transcript, err := os.OpenFile(filepath.Join(dir, "auth-transcript.ndjson"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fail(ledger.ClassPreflight, err)
+		return fail(failure.Preflight, err)
 	}
 	defer transcript.Close()
 	stderr, err := os.OpenFile(filepath.Join(dir, "auth-stderr.log"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fail(ledger.ClassPreflight, err)
+		return fail(failure.Preflight, err)
 	}
 	defer stderr.Close()
 	o, err := claude.Run(ctx, claude.Options{
@@ -91,18 +91,18 @@ func (p Preflight) auth(ctx context.Context, def *agentdef.Definition, runDir st
 		PATH: p.PATH, HomeDir: p.HomeDir, Timezone: "UTC",
 	}, transcript, stderr)
 	if err != nil {
-		return fail(ledger.ClassPreflight, err)
+		return fail(failure.Preflight, err)
 	}
 	if o.TranscriptErr != nil {
-		return fail(ledger.ClassPreflight, o.TranscriptErr)
+		return fail(failure.Preflight, o.TranscriptErr)
 	}
 	if o.StderrErr != nil {
-		return fail(ledger.ClassPreflight, o.StderrErr)
+		return fail(failure.Preflight, o.StderrErr)
 	}
 	if o.Class != "" {
-		class := ledger.ClassPreflight
-		if o.Class == ledger.ClassAuth {
-			class = ledger.ClassAuth
+		class := failure.Preflight
+		if o.Class == failure.Auth {
+			class = failure.Auth
 		}
 		return ctx.Err() == nil, &CheckError{Name: "auth", Class: class, Err: fmt.Errorf("%s: %s", o.Class, o.Detail)}
 	}

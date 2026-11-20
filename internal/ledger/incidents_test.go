@@ -3,6 +3,8 @@ package ledger
 import (
 	"strings"
 	"testing"
+
+	"shuttle/internal/failure"
 )
 
 func TestSignature(t *testing.T) {
@@ -12,11 +14,11 @@ func TestSignature(t *testing.T) {
 		errText string
 		want    string
 	}{
-		{"class only", ClassAuth, "", ClassAuth},
-		{"first line only", ClassDied, "Exit 1\nstack trace here", "died: exit"},
-		{"paths stripped", ClassProvider, "provider loom-sessions: open /Users/steve/.loom/summaries.db: no such file", "provider: provider loom-sessions: open no such file"},
-		{"digits stripped", ClassDied, "exit status 137 after 900s", "died: exit status after s"},
-		{"whitespace collapsed", ClassOutput, "out/report.md:   too    large", "output: too large"},
+		{"class only", failure.Auth, "", failure.Auth},
+		{"first line only", failure.Died, "Exit 1\nstack trace here", "died: exit"},
+		{"paths stripped", failure.Provider, "provider loom-sessions: open /Users/steve/.loom/summaries.db: no such file", "provider: provider loom-sessions: open no such file"},
+		{"digits stripped", failure.Died, "exit status 137 after 900s", "died: exit status after s"},
+		{"whitespace collapsed", failure.Output, "out/report.md:   too    large", "output: too large"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -28,7 +30,7 @@ func TestSignature(t *testing.T) {
 }
 
 func TestSignatureIsCapped(t *testing.T) {
-	got := Signature(ClassDied, strings.Repeat("a", 400))
+	got := Signature(failure.Died, strings.Repeat("a", 400))
 	if len([]rune(got)) != signatureMax {
 		t.Fatalf("length = %d, want %d", len([]rune(got)), signatureMax)
 	}
@@ -36,8 +38,8 @@ func TestSignatureIsCapped(t *testing.T) {
 
 func TestIncidentCountsRepeats(t *testing.T) {
 	s := newStore(t)
-	failNth(t, s, 1, ClassDied)
-	second := failNth(t, s, 2, ClassDied)
+	failNth(t, s, 1, failure.Died)
+	second := failNth(t, s, 2, failure.Died)
 
 	incidents, err := s.OpenIncidents()
 	if err != nil {
@@ -53,12 +55,12 @@ func TestIncidentCountsRepeats(t *testing.T) {
 	if got.LastRunID.String != second {
 		t.Fatalf("last_run_id = %q, want the most recent run", got.LastRunID.String)
 	}
-	if got.Signature != Signature(ClassDied, "the runtime exited 1") {
+	if got.Signature != Signature(failure.Died, "the runtime exited 1") {
 		t.Fatalf("signature = %q", got.Signature)
 	}
 
 	// A different failure is a different incident, not a bump.
-	failNth(t, s, 3, ClassProvider)
+	failNth(t, s, 3, failure.Provider)
 	incidents, err = s.OpenIncidents()
 	if err != nil {
 		t.Fatalf("open incidents: %v", err)
@@ -70,7 +72,7 @@ func TestIncidentCountsRepeats(t *testing.T) {
 
 func TestAckClosesIncidentAndTheNextOccurrenceOpensANewOne(t *testing.T) {
 	s := newStore(t)
-	failNth(t, s, 1, ClassDied)
+	failNth(t, s, 1, failure.Died)
 	incidents, err := s.OpenIncidents()
 	if err != nil {
 		t.Fatalf("open incidents: %v", err)
@@ -87,7 +89,7 @@ func TestAckClosesIncidentAndTheNextOccurrenceOpensANewOne(t *testing.T) {
 		t.Fatalf("open incidents after ack = %d (%v), want none", len(incidents), err)
 	}
 
-	failNth(t, s, 2, ClassDied)
+	failNth(t, s, 2, failure.Died)
 	incidents, err = s.OpenIncidents()
 	if err != nil {
 		t.Fatalf("open incidents: %v", err)

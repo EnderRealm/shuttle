@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"shuttle/internal/failure"
 	"shuttle/internal/sandbox"
 )
 
@@ -22,9 +23,6 @@ const (
 	WeftPhaseRunning = "running"
 	WeftPhaseParked  = "parked"
 	WeftPhaseEnded   = "ended"
-
-	ClassProtocol = "protocol"
-	ClassUnknown  = "unknown"
 )
 
 var (
@@ -552,7 +550,7 @@ func (s *Store) ClaimWeftResume(runID, runDirRoot string) (*WeftRun, error) {
 
 func isHostFailure(v string) bool {
 	switch v {
-	case ClassDied, ClassNoResult, ClassStuck, ClassProtocol, ClassUnknown, ClassSandbox, ClassPreflight:
+	case failure.Died, failure.NoResult, failure.Stuck, failure.Protocol, failure.Unknown, failure.Sandbox, failure.Preflight:
 		return true
 	}
 	return false
@@ -1247,7 +1245,7 @@ func (s *Store) ReconcileWeftUnknown(ledgerRunID string) error {
 		case seg.kind == WeftSegmentReconcile || seg.kind == WeftSegmentCleanup:
 			if !seg.terminal.Valid {
 				if _, err := tx.Exec(`UPDATE weft_segments SET failure=? WHERE run_id=? AND segment=?`,
-					ClassUnknown, runID, segment); err != nil {
+					failure.Unknown, runID, segment); err != nil {
 					return err
 				}
 			}
@@ -1256,7 +1254,7 @@ func (s *Store) ReconcileWeftUnknown(ledgerRunID string) error {
 			return settleReapedTx(tx, runID, seg, stamp)
 		case seg.land:
 			if _, err := tx.Exec(`UPDATE weft_segments SET failure=? WHERE run_id=? AND segment=?`,
-				ClassUnknown, runID, segment); err != nil {
+				failure.Unknown, runID, segment); err != nil {
 				return err
 			}
 			open, err := landingOpenTx(tx, runID)
@@ -1278,7 +1276,7 @@ func (s *Store) ReconcileWeftUnknown(ledgerRunID string) error {
 			return settleReapedTx(tx, runID, seg, stamp)
 		}
 		if _, err := tx.Exec(`UPDATE weft_segments SET failure=? WHERE run_id=? AND segment=?`,
-			ClassUnknown, runID, segment); err != nil {
+			failure.Unknown, runID, segment); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE weft_questions SET state='withdrawn' WHERE run_id=? AND state='pending'`, runID); err != nil {

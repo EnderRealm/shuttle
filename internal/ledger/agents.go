@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"shuttle/internal/failure"
 )
 
 // Pause reasons, §6.3.
@@ -124,7 +126,7 @@ func recordFailure(tx *sql.Tx, agent, class, now string) (string, error) {
 	}
 	reason := ""
 	switch {
-	case class == ClassAuth:
+	case class == failure.Auth:
 		// There is no headless recovery from a rejected credential, so it
 		// pauses on the first occurrence rather than on the fifth.
 		reason = PauseAuth

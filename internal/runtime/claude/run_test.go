@@ -21,7 +21,7 @@ import (
 	"unicode/utf8"
 
 	"shuttle/internal/config"
-	"shuttle/internal/ledger"
+	"shuttle/internal/failure"
 )
 
 const stubInitLine = `{"type":"system","subtype":"init","session_id":"stub-session"}` + "\n"
@@ -85,7 +85,7 @@ func TestRunFailureClasses(t *testing.T) {
 			name:      "died",
 			stdout:    stubInitLine + `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}` + "\n",
 			rest:      "echo 'claude: fatal: connection reset' >&2\nexit 3\n",
-			class:     ledger.ClassDied,
+			class:     failure.Died,
 			exitCode:  3,
 			detailHas: []string{"exit 3", "connection reset"},
 		},
@@ -93,14 +93,14 @@ func TestRunFailureClasses(t *testing.T) {
 			name:      "no_result",
 			stdout:    stubInitLine + `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working"}]}}` + "\n",
 			rest:      "exit 0\n",
-			class:     ledger.ClassNoResult,
+			class:     failure.NoResult,
 			detailHas: []string{"exit 0"},
 		},
 		{
 			name:       "budget",
 			stdout:     stubInitLine + `{"type":"result","subtype":"error_max_budget_usd","is_error":true,"result":"Budget limit of $0.05 reached","num_turns":4,"total_cost_usd":0.0512,"session_id":"stub-session","usage":{"input_tokens":1200,"output_tokens":340}}` + "\n",
 			rest:       "exit 0\n",
-			class:      ledger.ClassBudget,
+			class:      failure.Budget,
 			detailHas:  []string{subtypeMaxBudget},
 			hasResult:  true,
 			wantCost:   0.0512,
@@ -112,7 +112,7 @@ func TestRunFailureClasses(t *testing.T) {
 				`{"type":"system","subtype":"api_retry","error":"authentication_failed","attempt":1,"session_id":"stub-session"}` + "\n" +
 				`{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API Error: 401","num_turns":0,"total_cost_usd":0,"session_id":"stub-session"}` + "\n",
 			rest:       "exit 1\n",
-			class:      ledger.ClassAuth,
+			class:      failure.Auth,
 			exitCode:   1,
 			detailHas:  []string{errorAuthenticationFailed},
 			hasResult:  true,
@@ -168,8 +168,8 @@ func TestRunStuckKillsProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Class != ledger.ClassStuck {
-		t.Errorf("class = %q, want %q (detail %q)", out.Class, ledger.ClassStuck, out.Detail)
+	if out.Class != failure.Stuck {
+		t.Errorf("class = %q, want %q (detail %q)", out.Class, failure.Stuck, out.Detail)
 	}
 	if !strings.Contains(out.Detail, "timeout_seconds 1") {
 		t.Errorf("detail %q does not name the timeout", out.Detail)
@@ -241,8 +241,8 @@ sleep 300
 	// Whatever the assertions find, nothing the stub started outlives the test.
 	t.Cleanup(func() { syscall.Kill(-pgid, syscall.SIGKILL) })
 
-	if out.Class != ledger.ClassStuck {
-		t.Errorf("class = %q, want %q (detail %q)", out.Class, ledger.ClassStuck, out.Detail)
+	if out.Class != failure.Stuck {
+		t.Errorf("class = %q, want %q (detail %q)", out.Class, failure.Stuck, out.Detail)
 	}
 	requireEmptyGroup(t, pgid)
 }
@@ -320,8 +320,8 @@ func TestRunStuckAbandonsEscapedDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if out.Class != ledger.ClassStuck {
-		t.Errorf("class = %q, want %q (detail %q)", out.Class, ledger.ClassStuck, out.Detail)
+	if out.Class != failure.Stuck {
+		t.Errorf("class = %q, want %q (detail %q)", out.Class, failure.Stuck, out.Detail)
 	}
 	for _, want := range []string{"timeout_seconds 1", abandonedDetail} {
 		if !strings.Contains(out.Detail, want) {
@@ -407,8 +407,8 @@ func TestRunReportsAStderrWriteFailure(t *testing.T) {
 	}
 	// The run classifies regardless: the evidence is what was lost, not the
 	// verdict.
-	if out.Class != ledger.ClassDied {
-		t.Errorf("class = %q, want %q (detail %q)", out.Class, ledger.ClassDied, out.Detail)
+	if out.Class != failure.Died {
+		t.Errorf("class = %q, want %q (detail %q)", out.Class, failure.Died, out.Detail)
 	}
 }
 
@@ -463,8 +463,8 @@ func TestRunContextCancellationKillsTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Class != ledger.ClassStuck {
-		t.Errorf("class = %q, want %q (detail %q)", out.Class, ledger.ClassStuck, out.Detail)
+	if out.Class != failure.Stuck {
+		t.Errorf("class = %q, want %q (detail %q)", out.Class, failure.Stuck, out.Detail)
 	}
 }
 
