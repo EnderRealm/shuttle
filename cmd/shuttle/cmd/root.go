@@ -17,7 +17,7 @@ Usage: shuttle <command> [args]
 
 Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack',
 'preflight', 'pause', 'resume', 'install', 'uninstall', 'deliver', 'reconcile',
-'updater', 'weft' and 'run'.
+'updater', 'weft', 'observer' and 'run'.
 Manual and daemon claims execute the same retained, sandboxed pipeline; --dry-run
 stops after inputs and prompt. The rest is the phase 1 surface (docs/phase1-design.md §12) that the
 remaining phase 1 tickets fill in.
@@ -42,6 +42,13 @@ Operations:
   prune --older 30d            Drop run directories past the retention window
   deliver --test               One test email through the configured sender
 
+Observer notebooks:
+  observer register|activate [payload.json] --request-id ID
+  observer retire <entry-id> --reason TEXT --request-id ID
+  observer reopen <entry-id> --condition NAME --request-id ID
+                               Hand a question to a notebook Shuttle holds,
+                                 through the running daemon's observer door
+
 Hosted weft:
   weft bind <origin-url>       Provision a hosted checkout, bind it in
                                  config.json, restart the daemon and report
@@ -64,6 +71,9 @@ Global flags:
 Environment:
   SHUTTLE_HOME          state root (default: ~/.shuttle)
   SHUTTLE_AGENTS_DIR    agent definitions (default: ~/code/shuttle/agents)
+  SHUTTLE_OBSERVER_SOCKET
+                        the observer door
+                        (default: /Users/Shared/weft/observer/door.sock)
 `
 
 var rootCmd = &cobra.Command{
@@ -99,9 +109,27 @@ func reportError(w io.Writer, err error) {
 	fmt.Fprintln(w, err)
 }
 
+// exitError ends the process with code rather than 1: the observer commands
+// surface each refusal class under its own exit (docs/observer-contract.md §8).
+type exitError struct {
+	code int
+	error
+}
+
+func (e exitError) Unwrap() error { return e.error }
+
+// exitCode is the status Execute exits with for a failed command.
+func exitCode(err error) int {
+	var exit exitError
+	if errors.As(err, &exit) {
+		return exit.code
+	}
+	return 1
+}
+
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		reportError(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
 }

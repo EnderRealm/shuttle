@@ -17,6 +17,7 @@ import (
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
+	observercontract "shuttle/internal/observer"
 	"shuttle/internal/reap"
 	"shuttle/internal/runner"
 	"shuttle/internal/schedule"
@@ -51,6 +52,11 @@ The restart pass runs once, at startup: a row it leaves in flight is re-checked
 only at the next daemon start, and until then that agent's slots skip on overlap.
 Claimed slots execute through the same §7 pipeline as shuttle run, with at most
 two run workers active across agents.
+
+When an observer registration names held_notebook, the daemon also serves the
+observer door that shuttle observer calls (docs/observer-contract.md §12), at
+$SHUTTLE_OBSERVER_SOCKET or /Users/Shared/weft/observer/door.sock, logging
+each call's peer uid, operation, entry and outcome.
 
 An error that ends the daemon before its loop is running is recorded in
 ~/.shuttle/daemon-start-failure until a start succeeds. The same error again
@@ -154,6 +160,30 @@ exits 1 without printing it a second time; shuttle status shows the record.`,
 			go func() { ch <- service.Serve(ctx, listener) }()
 			logger.Printf("weft service listening on %s", cfg.Weft.Listen)
 		}
+		var doorErr <-chan error
+		if cfg != nil && holdsNotebooks(cfg) {
+			// Bound in the start like the weft listener, so a door that
+			// cannot take its socket is a start failure rather than a silent
+			// absence callers discover one by one.
+			listener, err := observercontract.ListenDoor(config.ObserverSocket())
+			if err != nil {
+				return err
+			}
+			defer listener.Close()
+			home, err := config.Home()
+			if err != nil {
+				return err
+			}
+			door := observercontract.Door{
+				Notebook: func(identity observercontract.Identity) (observercontract.Held, error) {
+					return runner.HeldNotebook(home, cfg, identity)
+				},
+				Log: logger,
+			}
+			ch := make(chan error, 1)
+			doorErr = ch
+			go func() { ch <- door.Serve(ctx, listener) }()
+		}
 		if err := clearStartFailure(); err != nil {
 			logger.Printf("start failure record: %v", err)
 		}
@@ -188,8 +218,19 @@ exits 1 without printing it a second time; shuttle status shows the record.`,
 			select {
 			case <-ctx.Done():
 				workers.Wait()
+				// The door finishes the calls in hand before it returns.
+				if doorErr != nil {
+					if err := <-doorErr; err != nil {
+						logger.Print(err)
+					}
+				}
 				logger.Print("daemon stop")
 				return nil
+			case err := <-doorErr:
+				if err != nil {
+					return err
+				}
+				doorErr = nil
 			case err := <-serviceErr:
 				if err != nil {
 					return fmt.Errorf("weft service: %w", err)
@@ -203,6 +244,17 @@ exits 1 without printing it a second time; shuttle status shows the record.`,
 
 func init() {
 	rootCmd.AddCommand(daemonCmd)
+}
+
+// holdsNotebooks reports whether any observer registration names the notebook
+// Shuttle holds, which is what the observer door serves.
+func holdsNotebooks(cfg *config.Config) bool {
+	for _, registration := range cfg.Observers {
+		if registration.HeldNotebook {
+			return true
+		}
+	}
+	return false
 }
 
 func startFailurePath() (string, error) {

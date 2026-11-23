@@ -23,6 +23,9 @@ const (
 	// definitions directory. Both are carried in the launchd plist (§13).
 	EnvHome      = "SHUTTLE_HOME"
 	EnvAgentsDir = "SHUTTLE_AGENTS_DIR"
+	// EnvObserverSocket overrides the observer door's socket, for the daemon
+	// that serves it and the commands that call it alike.
+	EnvObserverSocket = "SHUTTLE_OBSERVER_SOCKET"
 
 	configFile = "config.json"
 	ledgerFile = "runs.db"
@@ -37,6 +40,11 @@ const (
 	// HostedRepositoriesRoot is SHARED_ROOT/repos, where every hosted checkout
 	// lives.
 	HostedRepositoriesRoot = HostedSharedRoot + "/repos"
+	// HostedObserverSocket is where the daemon serves the observer door. It
+	// is in a directory of its own under SHARED_ROOT rather than the state
+	// root: the directory and socket take SHARED_ROOT's group, weftagents, so
+	// a hosted agent user can connect without traversing the operator's home.
+	HostedObserverSocket = HostedSharedRoot + "/observer/door.sock"
 )
 
 // Config is config.json, the §4.2 shape. Credentials are Keychain item names
@@ -168,6 +176,16 @@ func Home() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".shuttle"), nil
+}
+
+// ObserverSocket returns the observer door's socket: $SHUTTLE_OBSERVER_SOCKET,
+// else HostedObserverSocket. It reads nothing under the state root, which a
+// caller of the door may not be able to open.
+func ObserverSocket() string {
+	if p := os.Getenv(EnvObserverSocket); p != "" {
+		return p
+	}
+	return HostedObserverSocket
 }
 
 // LedgerPath returns Home()/runs.db, the run ledger (§6).

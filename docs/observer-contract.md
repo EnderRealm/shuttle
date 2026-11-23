@@ -4,7 +4,8 @@ Status: written 2026-09-09 alongside `internal/observer`, which is the executabl
 half of this document. Where the two disagree the code is right and this file is
 stale. The contract package contains validation, a reference notebook, two
 domains' fixtures, the language-neutral conformance suite, the subprocess
-notebook client and the notebook Shuttle holds. `internal/runner` wires both
+notebook client, the notebook Shuttle holds and the door its authors reach it
+through. `internal/runner` wires both
 notebooks and the collector boundary to the same manual and scheduled pipeline
 used by the daily agent.
 `observer/v1` is unreleased on those terms — no records exist under it and no
@@ -150,7 +151,8 @@ other questions, and does not learn what has already been concluded about the
 subject; it declares what its own change should do and hands that over. The
 notebook is likewise never a prompt input for the observed subject — watching is
 one direction. That is what "without inheriting the observer's context" means
-here: two stores, one payload between them, and no path back.
+here: two stores, one payload between them, and no path back. For a notebook
+Shuttle holds, the payload goes through the observer door (§12).
 
 ## 5. Domain ownership and the adapter protocol
 
@@ -319,6 +321,9 @@ stderr may contain a diagnostic:
 | 13 | action was not claimed (`ErrNotClaimed`) |
 | 14 | request id reused with changed content (`ErrRequestConflict`) |
 | 15 | action id already held (`ErrActionHeld`) — a claim under an id already in flight or settled |
+
+The observer door reports a refusal by this table too, and `shuttle observer`
+exits with it (§12).
 
 Exit 0 means stdout holds the successful response. Exit 1 is an adapter or
 storage failure, not a contract refusal. A signal, timeout, malformed stdout,
@@ -609,3 +614,69 @@ widen it, target another ticket, or stand in for a person's decision.
 - **Retirement.** §6's ordering holds at the apply layer: a retirement ahead of
   the claim refuses it, and one behind it reports the action in flight while
   the write lands and settles under its own id, leaving the question retired.
+
+## 12. The observer door
+
+A question's author — a person, a `/work` run, a worker in a hosted slot —
+reaches a notebook Shuttle holds through the running daemon, never through the
+notebook's files, which a hosted agent user cannot open. `Door` in `door.go` is
+the server and `shuttle observer` its client:
+
+```
+shuttle observer register [question.json] --request-id ID
+shuttle observer activate [experiment.json] --request-id ID
+shuttle observer retire <entry-id> --reason TEXT --request-id ID
+shuttle observer reopen <entry-id> --condition NAME --request-id ID
+```
+
+- **Transport.** A unix socket the daemon serves whenever a registration names
+  `held_notebook`: `/Users/Shared/weft/observer/door.sock`, or
+  `$SHUTTLE_OBSERVER_SOCKET` for the daemon and the command alike. The daemon
+  creates the directory, refuses one that is not the operator's or is a
+  symlink, and sets it 0750 and the socket 0660. Both take the shared root's
+  group, `weftagents` (docs/agent-users.md), so a hosted agent user connects
+  without traversing the operator's home or holding the weft bearer token, and
+  no other user connects. A socket it cannot take ends the daemon's start, so
+  a machine with a held notebook needs the shared root `setup.sh` makes. The
+  door is not part of the weft service and reaches nothing of it.
+- **Four operations.** `register` takes a Question payload, `activate` an
+  Experiment, `retire` an `entry_id` and `reason`, `reopen` an `entry_id` and
+  `condition`. Nothing else in the notebook is reachable: no entry, no
+  observation, no revision is ever read out through the door.
+- **Wire.** One JSON object per connection, then the write side closed, and
+  one object back:
+  `{"operation":"register","request":{"request_id":"..."},"payload":{...}}`.
+  Unknown fields are refused, so `request.revision` and `request.identity` are
+  refused, and so is a field the operation does not take.
+- **Which notebook.** The one held for the identity the payload is by, or the
+  entry id is qualified for. Only an identity named by the definition of a
+  `held_notebook` registration in the config.json the daemon started with is
+  accepted; anything else is refused naming `identity` or `entry_id`.
+- **Shuttle supplies the revision.** The payload is validated by the same
+  validators as everywhere else, so a missing `author` or an activation naming
+  nothing is refused naming the field, and a commit-only activation is
+  `pending`. The daemon then reads the notebook's revision and applies the
+  operation at it. A concurrent writer landing between the two is a stale
+  revision the caller never chose, so it is read again, up to three times;
+  that is safe because the request id is checked before the revision. A
+  replay answers what the first attempt did, and changed content under the id
+  is refused.
+- **The answer.** `{"status":"ok","answer":{...}}`. A register or reopen
+  answers `entry_id` and `state`; an activate adds `experiment_status`; a
+  retire answers `entry_id`, `reason` and `in_flight`, the actions already
+  claimed (§6). Nothing else from the notebook travels back: watching is one
+  direction (§4).
+- **Refusals.** `refused` carries §8's `exit` for its class and the `field`,
+  and `shuttle observer` exits with it: 10 stale revision, 11 retired, 12 no
+  entry, 14 request conflict. `invalid` is a call or payload the validators
+  refused, naming `field`; `failed` is the door or the notebook's storage.
+  Both exit 1. A refusal of what the caller sent travels back whole. One the
+  notebook made carries only its field and class, never the notebook's own
+  text: that text can quote a stored subject, an entry's state or the
+  revision, which the door does not read out. The daemon log carries it.
+- **Attribution.** The daemon reads the caller's uid from the kernel
+  (`LOCAL_PEERCRED`) and logs one line per call to `daemon.log`: uid,
+  operation, request id, entry id and outcome, with exit, field and error for
+  anything not ok. A call whose peer cannot be read is not applied, so off
+  darwin the door applies nothing. The uid is a record, not an authority:
+  the author is what the payload declares (§1).

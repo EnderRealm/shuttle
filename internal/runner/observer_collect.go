@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -255,16 +257,44 @@ func validateObserverTickets(tickets *config.ObserverTickets, tkConfig string) e
 // environment.
 func newObserverNotebook(home string, registration config.Observer, identity observercontract.Identity, env []string) (observerNotebook, error) {
 	if registration.HeldNotebook {
-		dir, err := heldNotebookDir(home, identity)
-		if err != nil {
-			return nil, err
-		}
-		return observercontract.Held{Dir: dir, Identity: identity}, nil
+		return heldNotebook(home, identity)
 	}
 	return observercontract.CommandNotebook{
 		Argv: registration.Notebook.Argv, Dir: registration.Notebook.WorkingDir,
 		Env: env, Timeout: time.Duration(registration.TimeoutSeconds) * time.Second,
 	}, nil
+}
+
+func heldNotebook(home string, identity observercontract.Identity) (observercontract.Held, error) {
+	dir, err := heldNotebookDir(home, identity)
+	if err != nil {
+		return observercontract.Held{}, err
+	}
+	return observercontract.Held{Dir: dir, Identity: identity}, nil
+}
+
+// HeldNotebook is the notebook Shuttle holds for identity: the one a
+// held_notebook registration's definition names, built as a run builds it.
+// Any other identity is refused, with the reason a registration's definition
+// could not be read beside it, since that may be why none names it.
+func HeldNotebook(home string, cfg *config.Config, identity observercontract.Identity) (observercontract.Held, error) {
+	var unread []error
+	for _, name := range slices.Sorted(maps.Keys(cfg.Observers)) {
+		registration := cfg.Observers[name]
+		if !registration.HeldNotebook {
+			continue
+		}
+		_, definition, _, err := loadObserverDefinition(registration.Definition)
+		if err != nil {
+			unread = append(unread, fmt.Errorf("observer %q definition: %w", name, err))
+			continue
+		}
+		if definition.Identity == identity {
+			return heldNotebook(home, identity)
+		}
+	}
+	return observercontract.Held{}, errors.Join(append([]error{fmt.Errorf(
+		"%s/%s: no held_notebook observer registration names it", identity.Domain, identity.Observer)}, unread...)...)
 }
 
 // heldNotebookDir is where Shuttle holds one observer identity's notebook:

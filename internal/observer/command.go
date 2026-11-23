@@ -389,23 +389,39 @@ func decodeCommandResponse(data []byte, response any) error {
 	return nil
 }
 
+// refusalExits is §8's exit-status table, read in both directions: an
+// adapter's exit names its refusal, and the observer door reports a refusal by
+// the exit its CLI surfaces it as.
+var refusalExits = []struct {
+	code int
+	err  error
+}{
+	{10, ErrStaleRevision},
+	{11, ErrRetired},
+	{12, ErrNoEntry},
+	{13, ErrNotClaimed},
+	{14, ErrRequestConflict},
+	{15, ErrActionHeld},
+}
+
 func refusalForExit(code int) error {
-	switch code {
-	case 10:
-		return ErrStaleRevision
-	case 11:
-		return ErrRetired
-	case 12:
-		return ErrNoEntry
-	case 13:
-		return ErrNotClaimed
-	case 14:
-		return ErrRequestConflict
-	case 15:
-		return ErrActionHeld
-	default:
-		return nil
+	for _, refusal := range refusalExits {
+		if refusal.code == code {
+			return refusal.err
+		}
 	}
+	return nil
+}
+
+// refusalExit is the exit status of the sentinel refusal err carries, or 0
+// when it carries none.
+func refusalExit(err error) int {
+	for _, refusal := range refusalExits {
+		if errors.Is(err, refusal.err) {
+			return refusal.code
+		}
+	}
+	return 0
 }
 
 type limitedBuffer struct {
