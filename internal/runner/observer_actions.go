@@ -857,9 +857,12 @@ func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.D
 	if err != nil {
 		return err
 	}
+	notebook, err := newObserverNotebook(p.Home, registration, definition.Identity, domainCommandEnv(p.HomeDir, loc))
+	if err != nil {
+		return err
+	}
 	state := &observerRunState{
-		Registration: registration, Definition: definition,
-		Notebook: newObserverNotebook(registration, domainCommandEnv(p.HomeDir, loc)),
+		Registration: registration, Definition: definition, Notebook: notebook,
 		Snapshot: snapshot, Collection: collection,
 	}
 	if observerReconcilable(row.ID, validated, &applied) {
@@ -873,7 +876,9 @@ func (p *Pipeline) ReconcileObserverActions(ctx context.Context, def *agentdef.D
 				break
 			}
 		}
-		if err := errors.Join(recordErr, p.applyObserverActions(ctx, row.ID, runDir, state, validated, &applied)); err != nil {
+		err := errors.Join(recordErr, p.applyObserverActions(ctx, row.ID, runDir, state, validated, &applied))
+		p.pushObserverNotebook(ctx, state)
+		if err != nil {
 			return errors.Join(err, writeObserverResult(runDir, observerOutcome(state, validated, &applied, "conflict-or-failure", err.Error())))
 		}
 	}

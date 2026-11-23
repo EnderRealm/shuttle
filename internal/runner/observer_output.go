@@ -73,9 +73,13 @@ type observerResultRecord struct {
 	ActionsFailed    int    `json:"actions_failed"`
 	NotebookStatus   string `json:"notebook_status"`
 	NotebookRevision int64  `json:"notebook_revision"`
-	Silent           *bool  `json:"silent,omitempty"`
-	Report           bool   `json:"report"`
-	Detail           string `json:"detail,omitempty"`
+	// NotebookPush and NotebookPushError are what became of pushing a held
+	// notebook by the end of the run; absent for a subprocess notebook.
+	NotebookPush      string `json:"notebook_push,omitempty"`
+	NotebookPushError string `json:"notebook_push_error,omitempty"`
+	Silent            *bool  `json:"silent,omitempty"`
+	Report            bool   `json:"report"`
+	Detail            string `json:"detail,omitempty"`
 }
 
 func validateObserverOutput(outDir string, def *agentdef.Definition, state *observerRunState) (*validatedObserverOutput, error) {

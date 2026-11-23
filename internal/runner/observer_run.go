@@ -10,6 +10,7 @@ import (
 	"shuttle/internal/agentdef"
 	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
+	observercontract "shuttle/internal/observer"
 )
 
 func (p *Pipeline) runObserver(
@@ -42,21 +43,26 @@ func (p *Pipeline) runObserver(
 	_, result, record, class, err := p.executeRuntime(ctx, preflight, def, row, run, opts, record)
 	retainErr := promoteObserverEvidence(state.StagingDir, run.Dir)
 	if retainErr != nil {
+		p.pushObserverNotebook(ctx, state)
 		return nil, p.fail(run, row.ID, failure.Output, fmt.Errorf("retain observer evidence: %w", retainErr), result, record)
 	}
 	if err != nil {
+		p.pushObserverNotebook(ctx, state)
 		_ = writeObserverResult(run.Dir, observerResultRecord{
 			Collection: state.Collection.Status, EvidenceCount: len(state.Collection.Evidence),
-			AssessmentStatus: "not-run", NotebookStatus: "not-run", Detail: err.Error(),
+			AssessmentStatus: "not-run", NotebookStatus: "not-run",
+			NotebookPush: state.Push.Status, NotebookPushError: state.Push.Error, Detail: err.Error(),
 		})
 		return nil, p.fail(run, row.ID, class, err, result, record)
 	}
 
 	validated, err := validateObserverOutput(filepath.Join(run.Dir, "out"), def, state)
 	if err != nil {
+		p.pushObserverNotebook(ctx, state)
 		_ = writeObserverResult(run.Dir, observerResultRecord{
 			Collection: state.Collection.Status, EvidenceCount: len(state.Collection.Evidence),
-			AssessmentStatus: "invalid", NotebookStatus: "not-run", Detail: err.Error(),
+			AssessmentStatus: "invalid", NotebookStatus: "not-run",
+			NotebookPush: state.Push.Status, NotebookPushError: state.Push.Error, Detail: err.Error(),
 		})
 		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
 	}
@@ -64,6 +70,7 @@ func (p *Pipeline) runObserver(
 	if err == nil {
 		err = p.applyObserverActions(ctx, row.ID, run.Dir, state, validated, applied)
 	}
+	p.pushObserverNotebook(ctx, state)
 	if err != nil {
 		_ = writeObserverResult(run.Dir, observerOutcome(state, validated, applied, "conflict-or-failure", err.Error()))
 		return nil, p.fail(run, row.ID, failure.Output, err, result, record)
@@ -97,11 +104,46 @@ func observerOutcome(state *observerRunState, out *validatedObserverOutput, appl
 		Collection: state.Collection.Status, EvidenceCount: len(state.Collection.Evidence),
 		AssessmentStatus: assessmentStatus(out), AssessmentCount: len(out.Assessments),
 		ActionCount: len(out.Actions), NotebookStatus: notebookStatus,
-		NotebookRevision: applied.NotebookRevision, Silent: &out.Silent,
+		NotebookRevision: applied.NotebookRevision, NotebookPush: state.Push.Status,
+		NotebookPushError: state.Push.Error, Silent: &out.Silent,
 		Report: len(out.Report) > 0, Detail: detail,
 	}
 	result.ActionsApplied, result.ActionsRefused, result.ActionsFailed = observerActionCounts(applied.Actions)
 	return result
+}
+
+// Push outcomes a run records beyond the ones Held.Push reports.
+const (
+	notebookPushLocalOnly = "local-only"
+	notebookPushFailed    = "failed"
+)
+
+type notebookPush struct {
+	Status string
+	Error  string
+}
+
+// pushObserverNotebook pushes a held notebook by the end of the run. A
+// local-only registration's notebook never leaves the machine, so it is not
+// pushed whatever remote the repository has. A failed push is recorded and
+// logged and does not fail the run: the commits are already durable here, and
+// the next run's push carries them.
+func (p *Pipeline) pushObserverNotebook(ctx context.Context, state *observerRunState) {
+	held, ok := state.Notebook.(observercontract.Held)
+	if !ok {
+		return
+	}
+	if state.Registration.DataPolicy == "local-only" {
+		state.Push = notebookPush{Status: notebookPushLocalOnly}
+		return
+	}
+	status, err := held.Push(ctx)
+	if err != nil {
+		state.Push = notebookPush{Status: notebookPushFailed, Error: err.Error()}
+		p.logger().Printf("observer notebook push: %v", err)
+		return
+	}
+	state.Push = notebookPush{Status: status}
 }
 
 func assessmentStatus(out *validatedObserverOutput) string {

@@ -28,6 +28,9 @@ const (
 	maxCollectorResponse     = 8 << 20
 	maxDomainCommandStderr   = 8 << 10
 	notebookSnapshotAttempts = 3
+
+	// notebooksDir holds every notebook Shuttle holds, under the state root.
+	notebooksDir = "notebooks"
 )
 
 const observerRunContract = `---
@@ -97,13 +100,34 @@ type validatedCollection struct {
 	Exploration string
 }
 
+// observerNotebook is the one interface a run reads and records through,
+// whether the registration names a domain command or a notebook Shuttle holds
+// (docs/observer-contract.md §8).
+type observerNotebook interface {
+	Revision(ctx context.Context) (int64, error)
+	Entry(ctx context.Context, id string) (*observercontract.Entry, error)
+	Register(ctx context.Context, req observercontract.Request, q *observercontract.Question) (*observercontract.Entry, error)
+	Activate(ctx context.Context, req observercontract.Request, exp *observercontract.Experiment) (*observercontract.Entry, error)
+	Record(ctx context.Context, req observercontract.Request, a *observercontract.Assessment) (*observercontract.Entry, error)
+	Claim(ctx context.Context, req observercontract.Request, act *observercontract.Action) (*observercontract.Receipt, error)
+	Settle(ctx context.Context, req observercontract.Request, rec *observercontract.Receipt) (*observercontract.Receipt, error)
+	Retire(ctx context.Context, req observercontract.Request, entryID, reason string) (*observercontract.Retirement, error)
+	Reopen(ctx context.Context, req observercontract.Request, entryID, condition string) (*observercontract.Entry, error)
+}
+
+var (
+	_ observerNotebook = observercontract.CommandNotebook{}
+	_ observerNotebook = observercontract.Held{}
+)
+
 type observerRunState struct {
 	Registration config.Observer
 	Definition   *observerDefinition
-	Notebook     observercontract.CommandNotebook
+	Notebook     observerNotebook
 	Snapshot     observerSnapshot
 	Collection   *validatedCollection
 	StagingDir   string
+	Push         notebookPush
 }
 
 type observerCollectionError struct {
@@ -160,13 +184,19 @@ func validateObserverRegistration(registration config.Observer, runtimeKind, tkC
 	if _, _, _, err := loadObserverDefinition(registration.Definition); err != nil {
 		return fmt.Errorf("definition: %w", err)
 	}
-	for _, configured := range []struct {
+	type namedCommand struct {
 		name    string
 		command config.Command
-	}{
-		{name: "collector", command: registration.Collector},
-		{name: "notebook", command: registration.Notebook},
-	} {
+	}
+	commands := []namedCommand{{name: "collector", command: registration.Collector}}
+	if registration.HeldNotebook {
+		if len(registration.Notebook.Argv) != 0 || registration.Notebook.WorkingDir != "" {
+			return errors.New("notebook: must be absent when held_notebook is set; Shuttle holds the notebook")
+		}
+	} else {
+		commands = append(commands, namedCommand{name: "notebook", command: registration.Notebook})
+	}
+	for _, configured := range commands {
 		if len(configured.command.Argv) == 0 {
 			return fmt.Errorf("%s.argv: required", configured.name)
 		}
@@ -218,14 +248,38 @@ func validateObserverTickets(tickets *config.ObserverTickets, tkConfig string) e
 	return nil
 }
 
-// newObserverNotebook is the subprocess notebook client for one registration.
-// The run and the reconciliation of its actions build it the same way, so a
-// replay after a restart reaches the same adapter under the same environment.
-func newObserverNotebook(registration config.Observer, env []string) observercontract.CommandNotebook {
+// newObserverNotebook is the notebook client for one registration: the
+// notebook Shuttle holds for the definition's identity, or the subprocess
+// adapter. The run and the reconciliation of its actions build it the same
+// way, so a replay after a restart reaches the same notebook under the same
+// environment.
+func newObserverNotebook(home string, registration config.Observer, identity observercontract.Identity, env []string) (observerNotebook, error) {
+	if registration.HeldNotebook {
+		dir, err := heldNotebookDir(home, identity)
+		if err != nil {
+			return nil, err
+		}
+		return observercontract.Held{Dir: dir, Identity: identity}, nil
+	}
 	return observercontract.CommandNotebook{
 		Argv: registration.Notebook.Argv, Dir: registration.Notebook.WorkingDir,
 		Env: env, Timeout: time.Duration(registration.TimeoutSeconds) * time.Second,
+	}, nil
+}
+
+// heldNotebookDir is where Shuttle holds one observer identity's notebook:
+// <state root>/notebooks/<domain>/<observer>. The definition already refuses
+// a separator in either part; "." and ".." are refused here because they
+// would name a directory outside the notebooks root. Identities differing
+// only in case name one directory on a case-folding volume, which is why Held
+// records its owner and refuses every other identity.
+func heldNotebookDir(home string, identity observercontract.Identity) (string, error) {
+	for _, part := range []string{identity.Domain, identity.Observer} {
+		if part == "" || part == "." || part == ".." || strings.Contains(part, "/") {
+			return "", fmt.Errorf("held notebook: identity %s/%s does not name a directory", identity.Domain, identity.Observer)
+		}
 	}
+	return filepath.Join(home, notebooksDir, identity.Domain, identity.Observer), nil
 }
 
 func (p *Pipeline) collectObserver(ctx context.Context, def *agentdef.Definition, run *preparedRun, slot time.Time) (*observerRunState, error) {
@@ -255,7 +309,10 @@ func (p *Pipeline) collectObserver(ctx context.Context, def *agentdef.Definition
 	}
 
 	env := domainCommandEnv(p.HomeDir, run.Loc)
-	notebook := newObserverNotebook(registration, env)
+	notebook, err := newObserverNotebook(p.Home, registration, definition.Identity, env)
+	if err != nil {
+		return nil, &observerCollectionError{Status: "invalid-configuration", Err: err}
+	}
 	snapshot, err := snapshotNotebook(ctx, notebook, definition.Questions)
 	if err != nil {
 		return nil, &observerCollectionError{Status: "notebook-failed", Err: fmt.Errorf("observer notebook snapshot: %w", err)}
@@ -379,7 +436,7 @@ func loadObserverDefinition(path string) ([]byte, *observerDefinition, string, e
 	return data, &definition, hex.EncodeToString(sum[:]), nil
 }
 
-func snapshotNotebook(ctx context.Context, notebook observercontract.CommandNotebook, ids []string) (observerSnapshot, error) {
+func snapshotNotebook(ctx context.Context, notebook observerNotebook, ids []string) (observerSnapshot, error) {
 	for attempt := 0; attempt < notebookSnapshotAttempts; attempt++ {
 		before, err := notebook.Revision(ctx)
 		if err != nil {

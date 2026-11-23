@@ -70,6 +70,13 @@ type conformanceRetirement struct {
 }
 
 func TestMemoryConformance(t *testing.T) {
+	runConformance(t, func(*testing.T) Notebook { return NewMemory() })
+}
+
+// runConformance runs every manifested scenario against a fresh notebook from
+// open, comparing every step in order.
+func runConformance(t *testing.T, open func(*testing.T) Notebook) {
+	t.Helper()
 	root := filepath.Join("testdata", "conformance")
 	var manifest conformanceManifest
 	decodeConformanceFile(t, filepath.Join(root, "manifest.json"), &manifest)
@@ -81,7 +88,7 @@ func TestMemoryConformance(t *testing.T) {
 		path := filepath.Join(scenarioDir, name)
 		decodeConformanceFile(t, path, &scenario)
 		t.Run(scenario.Name, func(t *testing.T) {
-			nb := NewMemory()
+			nb := open(t)
 			outcomes := make([]any, 0, len(scenario.Steps))
 			for i, step := range scenario.Steps {
 				got, err := runConformanceStep(t, nb, scenarioDir, step)

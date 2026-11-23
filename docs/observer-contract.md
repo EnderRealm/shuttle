@@ -3,9 +3,10 @@
 Status: written 2026-09-09 alongside `internal/observer`, which is the executable
 half of this document. Where the two disagree the code is right and this file is
 stale. The contract package contains validation, a reference notebook, two
-domains' fixtures, the language-neutral conformance suite and the subprocess
-notebook client. `internal/runner` wires that client and the collector boundary
-to the same manual and scheduled pipeline used by the daily agent.
+domains' fixtures, the language-neutral conformance suite, the subprocess
+notebook client and the notebook Shuttle holds. `internal/runner` wires both
+notebooks and the collector boundary to the same manual and scheduled pipeline
+used by the daily agent.
 `observer/v1` is unreleased on those terms — no records exist under it and no
 domain adapter reads it — so a correction to the shape is still made in place; a
 version pins a shape once there are records written under it to read.
@@ -160,6 +161,46 @@ wire format, the validation and the state transitions it applies on the way in.
 implementation both fixture domains are exercised against, so an adapter has
 something to match rather than a paragraph to interpret.
 
+A domain may instead leave the notebook to Shuttle. `Held` in `held.go` is a
+notebook Shuttle holds itself, with `Memory`'s rules rather than a copy of them:
+every operation loads the notebook into a `Memory`, applies the operation there,
+and writes back only what an accepted mutation changed. It is one git repository
+per observer identity, at `<state root>/notebooks/<domain>/<observer>` (by default
+under `~/.shuttle`), and it is never rebuilt from anywhere else:
+
+- **One file per entry.** `entries/` holds each entry with the actions claimed
+  against it and their receipts; `requests/` holds each applied request id with
+  the outcome a replay returns; `notebook.json` holds the revision and the
+  owning identity. A file is named by the digest of its id, since ids carry `/`
+  and the volume may fold case; the id is inside the file and in the commit
+  subject. Identities differing only in case share one directory on such a
+  volume, so every operation, a push included, refuses a repository recorded
+  for another identity, naming the notebook and both identities.
+- **One commit per accepted mutation.** The subject names the operation and the
+  entry or action, the body the request and the revisions. A refusal or a replay
+  writes and commits nothing, so the history is the notebook's revisions one for
+  one.
+- **Serialized across processes.** Every operation, reads included, holds an
+  exclusive lock on the sibling `<observer>.lock` for the whole load, apply and
+  commit. That is what keeps the daemon and `shuttle reconcile` from losing each
+  other's writes, and it is what orders a claim against a retirement across
+  processes the way `Memory`'s mutex does within one. A writer that dies between
+  writing its files and committing them leaves a `<observer>.pending` marker,
+  and the next operation rolls the tree back to the last commit: that mutation
+  was never acknowledged, and sweeping it into a later commit would break the
+  one-for-one history.
+- **Its own copy off the machine.** Nothing else under the state root has a copy
+  off the Studio, so the repository's `origin`, when the operator adds one, is
+  pushed by the end of every observer run that reaches its model, and of every
+  reconciliation that writes to it. A `local-only` registration's notebook is
+  never pushed, whatever remote it has. A failed push is recorded in
+  `observer-result.json` as `notebook_push: failed` with the git error, and
+  logged; it does not fail the run, since the commits are durable locally and
+  the next push carries them.
+- **Denied to the model.** The notebooks root is denied to every observer model
+  run by name, beside the rest of `~/.shuttle`, so a state root kept elsewhere
+  does not open it.
+
 The protocol in one place:
 
 - **Stable, qualified ids.** Assigned by the observer, never reassigned.
@@ -223,6 +264,13 @@ cache and is not rebuilt.
   references and the observer's prose.
 
 ## 8. Domain-command transport
+
+A registration names its notebook one of two ways. `"held_notebook": true` names
+the notebook Shuttle holds for the definition's identity (§5); Shuttle calls it
+in-process through the same interface, with no command, no wire and no exit
+codes, and a registration that also carries a `notebook` command is refused.
+Otherwise the notebook is a domain command, as below. The command transport stays
+supported while a domain's notebook is still its own.
 
 An adapter is a spawned domain command, configured by the operator. Shuttle
 starts it directly rather than through a shell, writes exactly one JSON request
@@ -377,17 +425,17 @@ store is opened from its `central_root` the way the tk providers open it. A
 registration without the block applies nothing: every action is retained and
 refused with the reason `ticket output is not configured for this observer`.
 
-Both commands are executed directly as argv, never through a shell, from their
-declared working directories and with a minimal environment. A registration
-marked `local-only` is refused before a Claude run or auth probe; adding a local
-runtime is separate work. Every registration names at least one absolute domain
-store root in `deny_read`; every observer run denies the union across all
-registrations, so a cloud observer cannot read another observer's local-only
-store. A denied root inside the run directory is refused because the
-run-directory allowance would reopen it. The observer definition is strict
-`observer-run/v1` JSON with `revision`, `identity`, `questions` and
-`instructions`. Question ids select notebook entries; an empty list is valid
-for an exploratory observer.
+Both commands — the collector alone, for a held notebook — are executed directly
+as argv, never through a shell, from their declared working directories and with
+a minimal environment. A registration marked `local-only` is refused before a
+Claude run or auth probe; adding a local runtime is separate work. Every
+registration names at least one absolute domain store root in `deny_read`; every
+observer run denies the union across all registrations, so a cloud observer
+cannot read another observer's local-only store. A denied root inside the run
+directory is refused because the run-directory allowance would reopen it. The
+observer definition is strict `observer-run/v1` JSON with `revision`,
+`identity`, `questions` and `instructions`. Question ids select notebook
+entries; an empty list is valid for an exploratory observer.
 
 Before model execution Shuttle takes a stable notebook snapshot by reading the
 revision, each configured entry and the revision again. It retries a moving

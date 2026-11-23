@@ -127,11 +127,14 @@ const DefaultWeftOAuthKeychainItem = "weft-claude-oauth-token"
 
 // Observer is one operator-owned domain integration. Commands are argv arrays
 // so they are executed directly, never through a shell, and WorkingDir is
-// explicit so daemon and manual runs behave the same.
+// explicit so daemon and manual runs behave the same. HeldNotebook names the
+// notebook Shuttle holds for the definition's identity in place of a Notebook
+// command; a registration carries one or the other.
 type Observer struct {
 	Definition         string           `json:"definition"`
 	Collector          Command          `json:"collector"`
 	Notebook           Command          `json:"notebook"`
+	HeldNotebook       bool             `json:"held_notebook,omitempty"`
 	DataPolicy         string           `json:"data_policy"`
 	DenyRead           []string         `json:"deny_read"`
 	MaxModelInputBytes int              `json:"max_model_input_bytes"`

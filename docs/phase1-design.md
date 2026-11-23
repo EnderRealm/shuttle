@@ -82,6 +82,8 @@ State lives under `$SHUTTLE_HOME`, default `~/.shuttle`:
   runs.db                        the ledger (§6)
   runs/<agent>/<run-id>/         one directory per attempt (§7.2)
   reports/                       a git repo the harness commits into (§9.3)
+  notebooks/<domain>/<observer>/ a held observer notebook, a git repo of its own
+                                 (docs/observer-contract.md §5)
   daemon.log                     launchd stdout+stderr
   daemon-start-failure           the error the daemon last failed to start on
   notify.state                   notification cooldowns
