@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -126,6 +127,16 @@ type Weft struct {
 	// projects exist; only this map decides where their work runs, so a
 	// project it does not name has no checkout.
 	Repositories map[string]string `json:"repositories,omitempty"`
+	// ImageReader is where a ticket's pictures are (weft-service/v2 §5.6).
+	// Unset, the host does not serve image_reader.
+	ImageReader ImageReader `json:"image_reader,omitzero"`
+}
+
+// ImageReader is Folio's origin and the Keychain item holding its image-reader
+// token, set together or not at all.
+type ImageReader struct {
+	Origin       string `json:"origin"`
+	KeychainItem string `json:"keychain_item"`
 }
 
 // DefaultWeftOAuthKeychainItem names the login-Keychain generic password that
@@ -256,6 +267,9 @@ func Parse(path string, data []byte) (*Config, error) {
 	}
 	// Both trees carry the inheritable agent-write ACL (docs/agent-users.md).
 	if err := validateWeftRoot(c.Weft.Root, []string{HostedWorktreeRoot, HostedRepositoriesRoot}); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := validateImageReader(c.Weft.ImageReader); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &c, nil
@@ -428,6 +442,29 @@ func validateRepositories(root string, repos map[string]string) error {
 		if base := filepath.Base(clean); filepath.Dir(clean) != root || base == "." || base == ".." {
 			return fmt.Errorf("%s: %s is not a directory directly under %s, where agent users can reach a hosted checkout", key, path, root)
 		}
+	}
+	return nil
+}
+
+// imageReaderOrigin is an origin as weft-service/v2 §5.6 serves one, which
+// clients decode strictly.
+var imageReaderOrigin = regexp.MustCompile(`^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$`)
+
+// validateImageReader refuses an image reader with half of itself missing, and
+// an origin a client would refuse.
+func validateImageReader(r ImageReader) error {
+	if r == (ImageReader{}) {
+		return nil
+	}
+	if r.Origin == "" {
+		return errors.New("weft.image_reader.origin: not set, and weft.image_reader.keychain_item is; set both or neither")
+	}
+	if r.KeychainItem == "" {
+		return errors.New("weft.image_reader.keychain_item: not set, and weft.image_reader.origin is; set both or neither")
+	}
+	if !imageReaderOrigin.MatchString(r.Origin) {
+		// Not echoed: what is refused may carry a credential as its userinfo.
+		return errors.New("weft.image_reader.origin: not https://host or https://host:port, with no path, userinfo, query, fragment or trailing slash")
 	}
 	return nil
 }

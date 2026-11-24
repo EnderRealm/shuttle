@@ -93,6 +93,20 @@ and the count no later than it declares `ticket_test`.
 The same order holds for a `make install` of this code. Do not roll a client back past that build
 afterwards.
 
+### Precondition for the first release that serves `attachments` or declares `image_reader`
+
+A ticket's `attachments` and the `image_reader` capability (weft-service/v2 §5.6) are the next such
+values. This host serves the key on every ticket and declares the capability whether or not a token
+is configured, so either is in the first release of this code. Older clients refuse the key and the
+id, and the builds of the section above, from weft/weft-client-decodes-ee81, are among them.
+
+**Do not tag the first release carrying either until every client in use reads both:** the desktop
+on both Macs and the iPhone app, each on a build from weft/contract-add-ticket-90c9 or later. Such a
+build works against a host with or without either, so that step can finish well ahead of the tag.
+weft's `docs/upgrade-runbook.md`, "Serving `attachments` and `image_reader` (§5.6)", is the rollout,
+and the same order holds for a `make install` of this code. Do not roll a client back past that
+build afterwards.
+
 ## Releases are the deploy channel
 
 A tagged release is the deploy unit: an unreleased commit on `main` reaches a host only in a

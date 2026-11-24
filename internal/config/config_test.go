@@ -387,6 +387,73 @@ func TestLoadRefusesAWeftRootAgentsCanWrite(t *testing.T) {
 	}
 }
 
+func imageReaderConfig(block string) string {
+	return strings.Replace(sampleConfig, `"segment_timeout_seconds": 21600,`,
+		`"segment_timeout_seconds": 21600, "image_reader": `+block+`,`, 1)
+}
+
+func TestLoadAcceptsAnImageReader(t *testing.T) {
+	for _, origin := range []string{"https://folio.example", "https://folio.example:8443", "https://Folio-1.example"} {
+		writeConfig(t, imageReaderConfig(`{"origin": `+strconv.Quote(origin)+`, "keychain_item": "folio-image-reader-token"}`))
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if want := (ImageReader{Origin: origin, KeychainItem: "folio-image-reader-token"}); c.Weft.ImageReader != want {
+			t.Errorf("weft.image_reader = %+v", c.Weft.ImageReader)
+		}
+	}
+	for _, body := range []string{sampleConfig, imageReaderConfig(`{}`)} {
+		writeConfig(t, body)
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.Weft.ImageReader != (ImageReader{}) {
+			t.Errorf("unset weft.image_reader = %+v", c.Weft.ImageReader)
+		}
+	}
+}
+
+// Clients decode the origin strictly and hold the token to it, so one outside
+// the contract's shape, or half an image reader, refuses the load. The refused
+// value, which may be a credential, is never in the error.
+func TestLoadRefusesAnImageReaderClientsWouldRefuse(t *testing.T) {
+	cases := []struct {
+		name, block, want string
+	}{
+		{"no item", `{"origin": "https://folio.example"}`, "weft.image_reader.keychain_item"},
+		{"no origin", `{"keychain_item": "folio-image-reader-token"}`, "weft.image_reader.origin"},
+		{"inline token", `{"origin": "https://folio.example", "token": "sekrit"}`, `unknown field "token"`},
+	}
+	for name, origin := range map[string]string{
+		"http": "http://sekrit.example", "scheme in capitals": "HTTPS://sekrit.example", "no scheme": "sekrit.example", "no host": "https://",
+		"trailing slash": "https://sekrit.example/", "path": "https://sekrit.example/api", "userinfo": "https://u:sekrit@folio.example",
+		"query": "https://folio.example?t=sekrit", "fragment": "https://folio.example#sekrit", "no port": "https://sekrit.example:",
+		"long port": "https://sekrit.example:123456", "space": "https://sekrit example", "line break": "https://sekrit.example\n",
+	} {
+		cases = append(cases, struct{ name, block, want string }{
+			name, `{"origin": ` + strconv.Quote(origin) + `, "keychain_item": "folio-image-reader-token"}`, "weft.image_reader.origin"})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfig(t, imageReaderConfig(tc.block))
+			_, err := Load()
+			if err == nil {
+				t.Fatal("Load succeeded, want an error")
+			}
+			for _, want := range []string{configFile, tc.want} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "sekrit") {
+				t.Errorf("error %q carries the refused value", err)
+			}
+		})
+	}
+}
+
 // An alias of a shared tree is the tree: a symlink to it or to an ancestor,
 // and a case alias on a case-insensitive volume, are refused as its own
 // spelling is, while a sibling is not.

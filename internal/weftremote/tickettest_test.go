@@ -73,6 +73,7 @@ func (s *studio) writeTestedTicket(edit func(*ticket.Ticket)) {
 			Priority: *ft.Priority, Branch: *ft.Branch, Created: updated.Add(-time.Hour), Updated: updated,
 			Body: detail["description"].(string) + "\n\n## Acceptance Criteria\n\n" + detail["acceptance"].(string) + "\n",
 		}
+		ft.attach(s.t, tk)
 		if edit != nil {
 			edit(tk)
 		}

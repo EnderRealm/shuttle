@@ -508,8 +508,21 @@ func (v *catalogView) ticketRow(p *catalogProject, t *ticket.Ticket) map[string]
 		"parent": parent, "deps": deps, "blocked": v.snap.IsBlocked(t.ID), "branch": branch,
 		"question": question, "eligibility": map[string]any{"state": state, "reasons": reasons},
 		"run": runRef, "entry": entryRef, "criteria_count": criteriaCount(t),
-		"last_test": lastTest(t),
+		"last_test": lastTest(t), "attachments": attachments(t),
 	}
+}
+
+// attachments are the ticket's pictures as tk holds them, less any whose link
+// is outside §5.6's shape: tk takes a scheme in any case, and a client that
+// decodes strictly would refuse the whole listing for one not spelled https.
+func attachments(t *ticket.Ticket) []map[string]any {
+	served := []map[string]any{}
+	for _, a := range ticket.Attachments(t) {
+		if strings.HasPrefix(a.Link, "https://") {
+			served = append(served, map[string]any{"id": a.ID, "role": string(a.Role), "link": a.Link})
+		}
+	}
+	return served
 }
 
 // criteriaCount is how many acceptance criteria tk parses from the ticket.

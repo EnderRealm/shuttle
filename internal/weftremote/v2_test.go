@@ -317,9 +317,20 @@ type fixtureTicket struct {
 		Kind    string `json:"kind"`
 		State   string `json:"state"`
 	} `json:"entry"`
-	Description *string `json:"description"`
-	Acceptance  *string `json:"acceptance"`
-	NotesTotal  int     `json:"notes_total"`
+	Attachments []ticket.Attachment `json:"attachments"`
+	Description *string             `json:"description"`
+	Acceptance  *string             `json:"acceptance"`
+	NotesTotal  int                 `json:"notes_total"`
+}
+
+// attach stores on tk the attachments the fixture lists for it.
+func (ft fixtureTicket) attach(t *testing.T, tk *ticket.Ticket) {
+	t.Helper()
+	for _, a := range ft.Attachments {
+		if err := ticket.SetAttachment(tk, a); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func bare(id string) string {
@@ -603,7 +614,8 @@ func TestServiceDiscoveryMirrorsDevelopmentalSlice(t *testing.T) {
 	// (§2.6): unprobed, each is not served and says what it needs, where the
 	// fixture names the ticket that adds it. Archive import, terminals, the folder
 	// picker, ticket edits, queue dismissal and ticket tests are the host's own and
-	// are served (§5.4, §5.5, §6.3, §9, §14.3). The rest is the slice as the fixture declares it.
+	// are served (§5.4, §5.5, §6.3, §9, §14.3). image_reader is not served with no token
+	// configured, and says that (§5.6). The rest is the slice as the fixture declares it.
 	fixtureReasons := map[string]any{}
 	for _, c := range slice["capabilities"].([]any) {
 		fixtureReasons[c.(map[string]any)["id"].(string)] = c.(map[string]any)["reason"]
@@ -621,6 +633,11 @@ func TestServiceDiscoveryMirrorsDevelopmentalSlice(t *testing.T) {
 				t.Errorf("%s = %v", c["id"], c)
 			}
 			c["state"], c["reason"] = "not_served", fixtureReasons[c["id"].(string)]
+		case "image_reader":
+			if c["state"] != "not_served" || c["reason"] != imageReaderUnconfigured {
+				t.Errorf("unconfigured image_reader = %v", c)
+			}
+			c["reason"] = fixtureReasons["image_reader"]
 		}
 	}
 	for _, key := range []string{"service_versions", "worker_versions", "conformance", "capabilities", "limits"} {

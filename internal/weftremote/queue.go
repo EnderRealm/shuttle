@@ -526,7 +526,7 @@ func (s *Service) handleLaunch(w http.ResponseWriter, r *http.Request) {
 		}
 		trial := req.Checkout != nil || req.Environment != nil
 		if trial && !s.served("trial_launch") {
-			message, _ := s.notServedMessage("trial_launch")
+			message, _ := s.notServedMessage(s.capabilities(), "trial_launch")
 			return refused("capability_not_served", "%s", message), nil
 		}
 		switch {

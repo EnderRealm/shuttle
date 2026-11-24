@@ -103,8 +103,9 @@ The full configuration shape, including credential **Keychain item names**, is i
 Agent lookup uses `SHUTTLE_AGENTS_DIR`, then `config.json`'s `agents_dir`, then
 `~/code/shuttle/agents`.
 
-Hosted weft runs add this block; the bearer token and the Claude OAuth token
-are Keychain generic passwords and never appear in the file or launchd plist:
+Hosted weft runs add this block; the bearer token, the Claude OAuth token
+and Folio's image-reader token are Keychain generic passwords and never appear in the
+file or launchd plist:
 
 ```json
 {
@@ -116,7 +117,8 @@ are Keychain generic passwords and never appear in the file or launchd plist:
     "weft_root": "/Users/you/.shuttle/weft",
     "segment_timeout_seconds": 21600,
     "repositories": {"shuttle": "/Users/Shared/weft/repos/shuttle"},
-    "agent_users": ["weftagent1", "weftagent2", "weftagent3"]
+    "agent_users": ["weftagent1", "weftagent2", "weftagent3"],
+    "image_reader": {"origin": "https://folio.example.com", "keychain_item": "folio-image-reader-token"}
   }
 }
 ```
@@ -153,6 +155,24 @@ user cannot read the Keychain where the CLI keeps the subscription credential.
 It is never in argv. The daemon refuses a listener outside loopback or
 `100.64.0.0/10`, and refuses each segment before spawning the worker if that item
 is missing or the worker does not list the `agent_user` capability.
+
+`image_reader` (optional) is where a ticket's pictures are (weft-service/v2 §5.6):
+Folio's `origin`, `https://host` or `https://host:port` and nothing after it, and the
+login-Keychain generic password holding Folio's `IMAGE_READER_TOKEN`. Set both or
+neither: one alone, or any other origin, refuses the load. Put the token there with
+
+```sh
+security add-generic-password -U -a "$USER" -s folio-image-reader-token -w
+```
+
+which prompts for the value, so it is in neither the shell history nor argv, and leaves
+the item readable by `security` without a prompt, which is how the daemon reads it. A
+client with the bearer token gets the origin and the token from `GET /v2/image-reader`,
+the only response that carries the token. The daemon reads the item at each request, so
+a rotation is the same command again with no restart; adding the block takes one. Unset,
+`image_reader` is declared not served, and so is an item that is missing, does not answer
+within two seconds, or is not visible ASCII, with a reason that names the item. Tickets
+carry their `attachments` either way.
 
 `release_root` (optional) is the directory weft's Studio builder writes its release
 to. When set, the service serves its regular files read-only at

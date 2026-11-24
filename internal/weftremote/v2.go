@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"shuttle/internal/config"
 	"shuttle/internal/ledger"
 	"shuttle/internal/version"
 )
@@ -30,8 +31,9 @@ type capability struct {
 // developmentalCapabilities is §2.3's list in the contract's order, as
 // docs/service-v2/service-developmental.json began it (§2.4). output, landing,
 // cleanup and trial_launch are gated by the worker probe instead
-// (workerGate); archive import, terminals, the folder picker, ticket edits,
-// queue dismissal and ticket tests are the host's alone and served.
+// (workerGate) and image_reader by the host's configuration and Keychain;
+// archive import, terminals, the folder picker, ticket edits, queue dismissal
+// and ticket tests are the host's alone and served.
 var developmentalCapabilities = []capability{
 	{ID: "dashboard"},
 	{ID: "catalog"},
@@ -51,6 +53,7 @@ var developmentalCapabilities = []capability{
 	{ID: "queue_dismiss"},
 	{ID: "ticket_test"},
 	{ID: "trial_launch"},
+	{ID: imageReaderCapability},
 }
 
 // notServedRoutes maps each route of a not-served capability (§3, §4.3) to
@@ -69,6 +72,7 @@ var notServedRoutes = []struct {
 	{http.MethodPost, ticketEdit, "ticket_edit"},
 	{http.MethodPost, regexp.MustCompile(`^/v2/queue/([^/]+/dismiss|dismiss-settled)$`), "queue_dismiss"},
 	{http.MethodPost, ticketTest, "ticket_test"},
+	{http.MethodGet, regexp.MustCompile(`^/v2/image-reader$`), imageReaderCapability},
 }
 
 // Each route answers its version's errors; §2.5 names the versions this host
@@ -83,7 +87,8 @@ func unspokenVersion(segment string) bool {
 	return versionSegment.MatchString(segment) && segment != "v1" && segment != "v2"
 }
 
-// capabilities is §2.3's list as this host serves it now.
+// capabilities is §2.3's list as this host serves it now, image_reader as
+// configured alone (resolvedCapabilities).
 func (s *Service) capabilities() []capability {
 	listed := slices.Clone(developmentalCapabilities)
 	worker := s.segments.worker.Load()
@@ -97,6 +102,10 @@ func (s *Service) capabilities() []capability {
 			listed[i].Reason = s.workerGate(worker, "dismiss and fresh work need", "cleanup", "archive")
 		case "trial_launch":
 			listed[i].Reason = s.workerGate(worker, "checkout launches need", "trial_environment")
+		case imageReaderCapability:
+			if s.cfg.Weft.ImageReader == (config.ImageReader{}) {
+				listed[i].Reason = imageReaderUnconfigured
+			}
 		}
 	}
 	return listed
@@ -141,7 +150,7 @@ func (s *Service) served(id string) bool {
 func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 	for _, route := range notServedRoutes {
 		if r.Method == route.method && route.pattern.MatchString(path) && !s.served(route.capability) {
-			s.capabilityNotServed(w, route.capability)
+			s.capabilityNotServed(w, s.capabilities(), route.capability)
 			return
 		}
 	}
@@ -162,6 +171,8 @@ func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 		s.handleTicketTest(w, r, m[1], m[2])
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v2/tickets/"):
 		s.handleCatalogTicket(w, strings.TrimPrefix(path, "/v2/tickets/"))
+	case r.Method == http.MethodGet && path == "/v2/image-reader":
+		s.handleImageReader(w)
 	case r.Method == http.MethodGet && path == "/v2/runs":
 		s.handleV2Runs(w, r)
 	case r.Method == http.MethodGet && outputRoute.MatchString(path):
@@ -245,8 +256,8 @@ func upgradeMessage(version string) string {
 		version, strings.Join(spokenVersions, " and "))
 }
 
-func (s *Service) capabilityNotServed(w http.ResponseWriter, id string) {
-	message, ok := s.notServedMessage(id)
+func (s *Service) capabilityNotServed(w http.ResponseWriter, listed []capability, id string) {
+	message, ok := s.notServedMessage(listed, id)
 	if !ok {
 		s.v2Internal(w, fmt.Errorf("route names undeclared capability %s", id))
 		return
@@ -255,8 +266,7 @@ func (s *Service) capabilityNotServed(w http.ResponseWriter, id string) {
 }
 
 // notServedMessage is error-capability-not-served.json's message for id.
-func (s *Service) notServedMessage(id string) (string, bool) {
-	listed := s.capabilities()
+func (s *Service) notServedMessage(listed []capability, id string) (string, bool) {
 	for _, c := range listed {
 		if c.ID == id {
 			return fmt.Sprintf("%s is not served by host %s, which declares %s conformance: %s",
@@ -267,10 +277,10 @@ func (s *Service) notServedMessage(id string) (string, bool) {
 }
 
 // conformance is complete only when every desktop capability — all but
-// trial_launch — is served (§2.3).
+// the extensions, trial_launch and image_reader — is served (§2.3).
 func conformance(capabilities []capability) string {
 	for _, c := range capabilities {
-		if c.ID != "trial_launch" && c.Reason != "" {
+		if c.ID != "trial_launch" && c.ID != imageReaderCapability && c.Reason != "" {
 			return "developmental"
 		}
 	}
@@ -294,7 +304,7 @@ func (s *Service) handleService(w http.ResponseWriter) {
 		s.v2Internal(w, err)
 		return
 	}
-	capabilities := s.capabilities()
+	capabilities, _ := s.resolvedCapabilities()
 	listed := make([]map[string]any, 0, len(capabilities))
 	for _, c := range capabilities {
 		state, reason := "served", any(nil)
