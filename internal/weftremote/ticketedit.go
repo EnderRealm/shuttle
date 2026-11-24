@@ -15,6 +15,10 @@ import (
 
 var ticketEdit = regexp.MustCompile(`^/v2/tickets/([^/]+)/([^/]+)/edit$`)
 
+// editVerb is what a guard's refusal says to do with the ticket once nothing
+// holds it.
+const editVerb = "edit"
+
 type ticketEditRequest struct {
 	ContractVersion string  `json:"contract_version"`
 	Status          *string `json:"status"`
@@ -23,9 +27,10 @@ type ticketEditRequest struct {
 	ReadPriority    *int    `json:"read_priority"`
 }
 
-// handleTicketEdit is the host's one ticket write (§5.4): a ticket's status,
-// its priority or both, written through pkg/ticket and nothing else with
-// them. Its refusals come in the contract's order, and each writes nothing.
+// handleTicketEdit is one of the host's two ticket writes (§5.4): a ticket's
+// status, its priority or both, written through pkg/ticket and nothing else
+// with them. Its refusals come in the contract's order, and each writes
+// nothing.
 func (s *Service) handleTicketEdit(w http.ResponseWriter, r *http.Request, project, slug string) {
 	id := project + "/" + slug
 	s.mutateV2(w, r, func(body []byte, _ string) (v2Commit, error) {
@@ -36,61 +41,72 @@ func (s *Service) handleTicketEdit(w http.ResponseWriter, r *http.Request, proje
 		switch {
 		case req.Status == nil && req.Priority == nil:
 			return refused("malformed", "an edit of %s names a status, a priority or both, and this one names neither", id), nil
-		case req.Status != nil && ticket.ValidateStatus(ticket.Status(*req.Status)) != nil:
+		case req.Status != nil && (ticket.ValidateStatus(ticket.Status(*req.Status)) != nil ||
+			ticket.Status(*req.Status) == ticket.StatusTesting):
 			return refused("malformed", "status '%s' is not one of backlog, ready, open, done, closed", *req.Status), nil
 		case req.Priority != nil && ticket.ValidatePriority(*req.Priority) != nil:
 			return refused("malformed", "priority %d is outside 0-4", *req.Priority), nil
 		}
-		c, err := s.readCatalog()
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := c.snap.Get(id); c.byName[project] == nil || !ok {
-			return refused("ticket_not_found", "ticket %s is not on this host", id), nil
-		}
-		return func(tx *ledger.WeftTx) (v2Outcome, error) {
-			// Under the state lock, so no dispatch lands between the guard
-			// and the write.
-			if err := tx.EditGuard(id); err != nil {
-				return v2Outcome{}, err
-			}
-			wrote, err := s.editTicket(tx, c, id, req)
-			if err != nil {
-				return v2Outcome{}, err
-			}
-			// An edit that changed nothing wrote nothing and is no catalog
-			// event; one that wrote is read back and recorded, raising
-			// catalog_revision before the response's as_of is taken.
-			if wrote {
-				if c, err = s.readCatalog(); err != nil {
-					return v2Outcome{}, err
-				}
-				if err := s.recordCatalogTx(tx, c); err != nil {
-					return v2Outcome{}, err
-				}
-			}
-			t, ok := c.snap.Get(id)
-			if !ok || c.byName[project] == nil {
-				return v2Outcome{}, fmt.Errorf("%s is no longer in tk after its edit", id)
-			}
-			runs, err := tx.WeftRuns(id)
-			if err != nil {
-				return v2Outcome{}, err
-			}
-			v := &catalogView{catalog: c, runs: map[string][]*ledger.WeftRun{id: runs}}
-			if v.entries, err = tx.PendingEntries(); err != nil {
-				return v2Outcome{}, err
-			}
-			return v2Outcome{status: http.StatusOK, fields: map[string]any{"ticket": v.ticketDetail(c.byName[project], t)}}, nil
-		}, nil
+		return s.writeTicket(project, slug, func(tx *ledger.WeftTx, c *catalog, id string) (bool, error) {
+			return s.editTicket(tx, c, id, req)
+		})
 	})
 }
 
-// editTicket holds the ticket as tk reads it now to what the client read,
-// then writes the edit through pkg/ticket's own edit path — an epic set
-// closed is abandoned as tk abandons one. It reports whether anything was
-// written: a priority equal to the current one changes nothing.
+// writeTicket is the commit of a ticket write (§5.4, §5.5): refused where the
+// ticket is not on this host, otherwise write, run under the state lock and
+// answered with the ticket as GET reads it afterwards. write reports whether
+// it wrote.
+func (s *Service) writeTicket(project, slug string, write func(tx *ledger.WeftTx, c *catalog, id string) (bool, error)) (v2Commit, error) {
+	id := project + "/" + slug
+	c, err := s.readCatalog()
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := c.snap.Get(id); c.byName[project] == nil || !ok {
+		return refused("ticket_not_found", "ticket %s is not on this host", id), nil
+	}
+	return func(tx *ledger.WeftTx) (v2Outcome, error) {
+		wrote, err := write(tx, c, id)
+		if err != nil {
+			return v2Outcome{}, err
+		}
+		// An edit that changed nothing wrote nothing and is no catalog
+		// event; one that wrote is read back and recorded, raising
+		// catalog_revision before the response's as_of is taken.
+		if wrote {
+			if c, err = s.readCatalog(); err != nil {
+				return v2Outcome{}, err
+			}
+			if err := s.recordCatalogTx(tx, c); err != nil {
+				return v2Outcome{}, err
+			}
+		}
+		t, ok := c.snap.Get(id)
+		if !ok || c.byName[project] == nil {
+			return v2Outcome{}, fmt.Errorf("%s is no longer in tk after its write", id)
+		}
+		runs, err := tx.WeftRuns(id)
+		if err != nil {
+			return v2Outcome{}, err
+		}
+		v := &catalogView{catalog: c, runs: map[string][]*ledger.WeftRun{id: runs}}
+		if v.entries, err = tx.PendingEntries(); err != nil {
+			return v2Outcome{}, err
+		}
+		return v2Outcome{status: http.StatusOK, fields: map[string]any{"ticket": v.ticketDetail(c.byName[project], t)}}, nil
+	}, nil
+}
+
+// editTicket guards the ticket under the state lock, so no dispatch lands
+// between the guard and the write, holds it as tk reads it now to what the
+// client read, then writes the edit through pkg/ticket's own edit path — an
+// epic set closed is abandoned as tk abandons one. It reports whether anything
+// was written: a priority equal to the current one changes nothing.
 func (s *Service) editTicket(tx *ledger.WeftTx, c *catalog, id string, req ticketEditRequest) (bool, error) {
+	if err := tx.EditGuard(id, editVerb); err != nil {
+		return false, err
+	}
 	t, err := c.store.Get(id)
 	if err != nil {
 		return false, err
@@ -142,7 +158,7 @@ func (s *Service) editTicket(tx *ledger.WeftTx, c *catalog, id string, req ticke
 				foreign = append(foreign, child.ID)
 				continue
 			}
-			if err := tx.EditGuard(child.ID); err != nil {
+			if err := tx.EditGuard(child.ID, editVerb); err != nil {
 				return false, err
 			}
 		}

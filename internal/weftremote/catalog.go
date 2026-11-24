@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/EnderRealm/ticket/v8/pkg/ticket"
 
@@ -507,12 +508,31 @@ func (v *catalogView) ticketRow(p *catalogProject, t *ticket.Ticket) map[string]
 		"parent": parent, "deps": deps, "blocked": v.snap.IsBlocked(t.ID), "branch": branch,
 		"question": question, "eligibility": map[string]any{"state": state, "reasons": reasons},
 		"run": runRef, "entry": entryRef, "criteria_count": criteriaCount(t),
+		"last_test": lastTest(t),
 	}
 }
 
 // criteriaCount is how many acceptance criteria tk parses from the ticket.
 func criteriaCount(t *ticket.Ticket) int {
 	return len(ticket.ParseCriteria(ticket.AcceptanceCriteria(t.Body)))
+}
+
+// lastTest is the last test standing on the ticket (§5.5), nil where none
+// does.
+func lastTest(t *ticket.Ticket) any {
+	row := ticket.LastTest(t)
+	if row == nil {
+		return nil
+	}
+	checks := make([]string, 0, len(row.Checks))
+	for _, c := range row.Checks {
+		checks = append(checks, c.Text)
+	}
+	// tk stamps At itself; a row it did not write reads as the zero instant.
+	at, _ := time.Parse(time.RFC3339, row.At)
+	return map[string]any{
+		"result": string(row.Result), "checks": checks, "note": nullableText(row.Note), "at": formatTime(at),
+	}
 }
 
 // ineligibility lists why the host would not launch the ticket. What tk says

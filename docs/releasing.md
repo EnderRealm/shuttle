@@ -78,6 +78,21 @@ that step can finish well ahead of the tag. weft's `docs/upgrade-runbook.md`, "W
 event", is the rollout, and the same order holds for a `make install` of this code. Do not roll a
 client back past that build afterwards.
 
+### Precondition for the first release that declares `ticket_test`
+
+The `ticket_test` capability and `last_test` (weft-service/v2 §5.5) are the next such values, with
+the `testing` status and `counts.testing` beside them. §5.5's rollout has a host serve the status
+and the count no later than it declares `ticket_test`.
+
+**Do not tag the first release carrying `ticket_test` until both hold:**
+
+- shuttle/bump-tk-treat-9efb is in it.
+- Every client in use, the desktop on both Macs and the iPhone app, runs a build that reads
+  `last_test` and the capability (weft/weft-client-decodes-ee81).
+
+The same order holds for a `make install` of this code. Do not roll a client back past that build
+afterwards.
+
 ## Releases are the deploy channel
 
 A tagged release is the deploy unit: an unreleased commit on `main` reaches a host only in a

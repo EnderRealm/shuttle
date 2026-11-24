@@ -749,21 +749,23 @@ func (t *WeftTx) runGuard(run *WeftRun) error {
 	return t.guard(run.Ticket, trial.TKStoreRoot, run.RepositoryID, run.ID)
 }
 
-// EditGuard is §5.4's guard on a ticket edit: §6.2's with no run excepted,
-// reaching every run whose settlement is reconciling and every waiting or
-// archiving entry but a cleanup, which writes no ticket status. Each of those
-// may still write the ticket's status, so a hand edit never races it. An edit
-// is of the host catalog's ticket, which no trial run or entry writes.
-func (t *WeftTx) EditGuard(ticket string) error {
+// EditGuard is §5.4's guard on a ticket edit, and §5.5's on a ticket's test:
+// §6.2's with no run excepted, reaching every run whose settlement is
+// reconciling and every waiting or archiving entry but a cleanup, which writes
+// no ticket status. Each of those may still write the ticket's status, so a
+// hand edit never races it. An edit is of the host catalog's ticket, which no
+// trial run or entry writes. verb is what the refusal says to do with the
+// ticket once nothing holds it.
+func (t *WeftTx) EditGuard(ticket, verb string) error {
 	var run, phase, settlement string
 	err := t.tx.QueryRow(`SELECT id,phase,settlement_state FROM weft_runs WHERE ticket=? AND `+weftRunStore+`='' AND (phase IN (?,?,?,?) OR settlement_state=?)
 		ORDER BY created_at LIMIT 1`, ticket, WeftPhaseQueued, WeftPhaseRunning, WeftPhaseParked, WeftPhaseSettling,
 		WeftSettlementReconciling).Scan(&run, &phase, &settlement)
 	switch {
 	case err == nil && settlement == WeftSettlementReconciling:
-		return refuse("ticket_in_flight", "%s has run %s reconciling its landing; edit the ticket once that run is over", ticket, run)
+		return refuse("ticket_in_flight", "%s has run %s reconciling its landing; %s the ticket once that run is over", ticket, run, verb)
 	case err == nil:
-		return refuse("ticket_in_flight", "%s has run %s in phase %s; edit the ticket once that run is over", ticket, run, WeftV2Phase(phase))
+		return refuse("ticket_in_flight", "%s has run %s in phase %s; %s the ticket once that run is over", ticket, run, WeftV2Phase(phase), verb)
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}
@@ -772,7 +774,7 @@ func (t *WeftTx) EditGuard(ticket string) error {
 		ORDER BY position LIMIT 1`, ticket, WeftEntryWaiting, WeftEntryArchiving, WeftEntryCleanup).Scan(&entry, &kind, &state)
 	switch {
 	case err == nil:
-		return refuse("ticket_in_flight", "%s has %s entry %s %s in the queue; edit the ticket once that entry has left it", ticket, kind, entry, state)
+		return refuse("ticket_in_flight", "%s has %s entry %s %s in the queue; %s the ticket once that entry has left it", ticket, kind, entry, state, verb)
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}

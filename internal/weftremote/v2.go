@@ -30,8 +30,8 @@ type capability struct {
 // developmentalCapabilities is §2.3's list in the contract's order, as
 // docs/service-v2/service-developmental.json began it (§2.4). output, landing,
 // cleanup and trial_launch are gated by the worker probe instead
-// (workerGate); archive import, terminals, the folder picker, ticket edits and
-// queue dismissal are the host's alone and served.
+// (workerGate); archive import, terminals, the folder picker, ticket edits,
+// queue dismissal and ticket tests are the host's alone and served.
 var developmentalCapabilities = []capability{
 	{ID: "dashboard"},
 	{ID: "catalog"},
@@ -49,6 +49,7 @@ var developmentalCapabilities = []capability{
 	{ID: "archive"},
 	{ID: "ticket_edit"},
 	{ID: "queue_dismiss"},
+	{ID: "ticket_test"},
 	{ID: "trial_launch"},
 }
 
@@ -67,6 +68,7 @@ var notServedRoutes = []struct {
 	{http.MethodPost, regexp.MustCompile(`^/v2/archives$`), "archive"},
 	{http.MethodPost, ticketEdit, "ticket_edit"},
 	{http.MethodPost, regexp.MustCompile(`^/v2/queue/([^/]+/dismiss|dismiss-settled)$`), "queue_dismiss"},
+	{http.MethodPost, ticketTest, "ticket_test"},
 }
 
 // Each route answers its version's errors; §2.5 names the versions this host
@@ -155,6 +157,9 @@ func (s *Service) serveV2(w http.ResponseWriter, r *http.Request, path string) {
 	case r.Method == http.MethodPost && ticketEdit.MatchString(path):
 		m := ticketEdit.FindStringSubmatch(path)
 		s.handleTicketEdit(w, r, m[1], m[2])
+	case r.Method == http.MethodPost && ticketTest.MatchString(path):
+		m := ticketTest.FindStringSubmatch(path)
+		s.handleTicketTest(w, r, m[1], m[2])
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v2/tickets/"):
 		s.handleCatalogTicket(w, strings.TrimPrefix(path, "/v2/tickets/"))
 	case r.Method == http.MethodGet && path == "/v2/runs":

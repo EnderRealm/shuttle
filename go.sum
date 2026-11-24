@@ -1,5 +1,5 @@
-github.com/EnderRealm/ticket/v8 v8.11.1-0.20261108051455-76f1334522f9 h1:MqSBiK1ykKxL+/1tcxQnCwOb5VPrStR7mYTa+n6AP6Y=
-github.com/EnderRealm/ticket/v8 v8.11.1-0.20261108051455-76f1334522f9/go.mod h1:fvlK51/PW8YYM/d15bMxTbhppCWCFSLW/TSB7uZTOgk=
+github.com/EnderRealm/ticket/v8 v8.13.1-0.20261124213959-843686bfd206 h1:Dnr2CaTPEz5Sj04DFPdsNbVFZKPYIzysOdtslUP+NnQ=
+github.com/EnderRealm/ticket/v8 v8.13.1-0.20261124213959-843686bfd206/go.mod h1:ajpBXsXC0YOI3wdrI0Vk3pRENu0oeQ1LZxwtRkGH05M=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=

@@ -250,6 +250,8 @@ func TestTicketEditRefusalsWriteNothing(t *testing.T) {
 		{"neither", "weft/example-ready-a0b1", editBody(nil, nil, "ready", 1), 400, "malformed", "", "names neither"},
 		{"unknown status", "weft/example-ready-a0b1", editBody("started", nil, "ready", 1), 400, "malformed",
 			"error-ticket-edit-unknown-status.json", ""},
+		{"testing", "weft/example-ready-a0b1", editBody("testing", nil, "ready", 1), 400, "malformed", "",
+			"status 'testing' is not one of backlog, ready, open, done, closed"},
 		{"priority range", "weft/example-ready-a0b1", editBody(nil, 7, "ready", 1), 400, "malformed",
 			"error-ticket-edit-priority-range.json", ""},
 		{"body before ticket", "weft/example-gone-0c1d", editBody(nil, 7, "ready", 1), 400, "malformed",
