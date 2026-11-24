@@ -845,7 +845,7 @@ also records the residuals the profile does not close.
 ```
 shuttle daemon                      the scheduler; launchd runs this
 shuttle run <agent> [--slot D] [--dry-run] [--no-deliver] [--unsafe-no-sandbox]
-shuttle status                      daemon, agents, next slot, last outcome, streak, paused, open incidents, today's spend
+shuttle status [--json]             daemon, agents, next slot, last outcome, streak, paused, open incidents, today's spend
 shuttle runs [--agent A] [-n 20]    ledger rows
 shuttle show <run-id>               result.json, applied.json, paths
 shuttle reconcile <run-id>          resume a failed observer run's actions (observer-contract §11)
@@ -862,6 +862,13 @@ shuttle version
 Every command that prints ledger rows prints `cost_usd` with two decimals and never
 prints `$0.00` for a run that reported no cost (weft's `Spend` distinction: unpriced
 is not free).
+
+`shuttle status --json` prints the same readings as one JSON object on stdout, with
+each open incident's id, agent and signature where the rows give a count. A reading
+that could not be taken is null beside an error field saying why (`agents_error` is
+also set when only some definitions loaded), an unpriced cost is null without one,
+and the object is printed whole whatever failed. The exit status is the rows': a
+worker probe that answers with a failure is the worker's state, not the command's.
 
 ## 13. Install
 

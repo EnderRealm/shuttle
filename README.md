@@ -216,6 +216,7 @@ in the agent's trigger timezone; the report covers the preceding day. See the
 ./shuttle show RUN_ID
 ```
 
+`status --json` prints the status as one JSON object for another program to read.
 Replace `RUN_ID` with a row printed by `runs`. These commands inspect the ledger
 at `<state-root>/runs.db`; they do not list dry runs. Dry-run failures name the
 provider, and its partially written run directory contains the inputs gathered

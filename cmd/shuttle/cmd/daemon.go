@@ -269,15 +269,25 @@ func startFailurePath() (string, error) {
 // read reads as none, which leaves the daemon printing every start failure and
 // the watchdog logging every kickstart: noisy, never silent.
 func startFailure() (string, bool) {
+	failure, recorded, _ := readStartFailure()
+	return failure, recorded
+}
+
+// readStartFailure is startFailure for a caller that tells a record it could
+// not read from none.
+func readStartFailure() (string, bool, error) {
 	path, err := startFailurePath()
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
+	if os.IsNotExist(err) {
+		return "", false, nil
 	}
-	return string(data), true
+	if err != nil {
+		return "", false, err
+	}
+	return string(data), true, nil
 }
 
 // recordStartFailure records err as the daemon's start failure. One that
@@ -328,12 +338,19 @@ func restartLine(o reap.Outcome) string {
 // and the ledger. `shuttle run` and `shuttle status` build the same one, so a
 // manual run cannot drift from the gate the daemon applies.
 func newScheduler(store *ledger.Store, logger *log.Logger) (*schedule.Scheduler, error) {
+	sched, _, err := loadScheduler(store, logger)
+	return sched, err
+}
+
+// loadScheduler is newScheduler for a caller that also answers with loadErr,
+// the failures of the definitions that would not load.
+func loadScheduler(store *ledger.Store, logger *log.Logger) (sched *schedule.Scheduler, loadErr, err error) {
 	// A missing config.json is not fatal: agents_dir has its own default and
 	// the limits are simply unset, which is what a checkout is before
 	// `shuttle install` has written the file.
 	cfg, err := config.Load()
 	if err != nil && !os.IsNotExist(err) {
-		return nil, err
+		return nil, nil, err
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
@@ -341,12 +358,12 @@ func newScheduler(store *ledger.Store, logger *log.Logger) (*schedule.Scheduler,
 	loc := time.Local
 	if cfg.Timezone != "" {
 		if loc, err = time.LoadLocation(cfg.Timezone); err != nil {
-			return nil, fmt.Errorf("config timezone: %w", err)
+			return nil, nil, fmt.Errorf("config timezone: %w", err)
 		}
 	}
 	dir, err := config.AgentsDir()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defs, loadErr := agentdef.LoadAll(dir)
 	if loadErr != nil {
@@ -364,5 +381,5 @@ func newScheduler(store *ledger.Store, logger *log.Logger) (*schedule.Scheduler,
 		// The daemon and manual command attach the live pipeline after the
 		// scheduler is built; tests may leave it nil to inspect claims alone.
 		Log: logger,
-	}, nil
+	}, loadErr, nil
 }

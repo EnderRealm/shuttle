@@ -35,8 +35,9 @@ Runs:
   preflight                    The per-run checks without a run
 
 Operations:
-  status                       Daemon, agents, next slot, last outcome, streak,
-                                 paused, open incidents, today's spend
+  status [--json]              Daemon, agents, next slot, last outcome, streak,
+                                 paused, open incidents, today's spend; --json
+                                 prints them as one JSON object
   ack <incident-id>            Acknowledge an open incident
   pause <agent> | resume <agent>
   prune --older 30d            Drop run directories past the retention window
