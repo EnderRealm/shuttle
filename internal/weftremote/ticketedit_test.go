@@ -313,6 +313,34 @@ func TestTicketEditRefusalsWriteNothing(t *testing.T) {
 	}
 }
 
+// A ticket in testing is set to no status but closed, refused in the
+// contract's order; its priority is edited as any ticket's (§5.4).
+func TestTicketEditOfTestingTicket(t *testing.T) {
+	s := newTestStudio(t)
+	file, seq := s.ticketFile(testedTicket), s.asOf()
+	for _, status := range []string{"backlog", "ready", "open", "done"} {
+		message := s.edit(testedTicket, "to-"+status, editBody(status, nil, "testing", 3)).refused(t, http.StatusBadRequest, "malformed")
+		if want := s.fixtureMessage("error-ticket-edit-testing.json"); message != want {
+			t.Errorf("edit to %s: message %q, error-ticket-edit-testing.json has %q", status, message, want)
+		}
+	}
+	s.edit(testedTicket, "to-testing", editBody("testing", nil, "testing", 3)).refused(t, http.StatusBadRequest, "malformed")
+	s.edit(testedTicket, "stale", editBody("ready", nil, "open", 3)).refused(t, http.StatusConflict, "revision_conflict")
+	if string(s.ticketFile(testedTicket)) != string(file) || s.asOf() != seq {
+		t.Fatalf("a refused edit wrote: stream %d -> %d, file %s", seq, s.asOf(), s.ticketFile(testedTicket))
+	}
+
+	s.edit(testedTicket, "priority", editBody(nil, 1, "testing", 3)).expect(t, http.StatusOK)
+	if row := s.row(testedTicket); row["priority"] != float64(1) || row["status"] != "testing" {
+		t.Fatalf("priority edit = %v", row)
+	}
+	s.edit(testedTicket, "priority-back", editBody(nil, 3, "testing", 1)).expect(t, http.StatusOK)
+	s.edit(testedTicket, "close", string(fixtureBytes(t, "ticket-edit-request-testing.json"))).expect(t, http.StatusOK)
+	if row := s.row(testedTicket); row["status"] != "closed" {
+		t.Fatalf("close = %v", row)
+	}
+}
+
 // An epic set closed is abandoned, which closes its children with it, so a
 // child's run refuses the epic's edit as it would refuse the child's own.
 func TestTicketEditEpicCloseHoldsChildRuns(t *testing.T) {

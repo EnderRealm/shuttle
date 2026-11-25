@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -522,7 +523,7 @@ func TestHostCleansParkedRunBeforeCatalogPass(t *testing.T) {
 	if entries := h.cleanupEntries(park.ID); len(entries) != 1 || entries[0].token != ledger.WeftHostToken {
 		t.Fatalf("cleanup of the parked run = %+v", entries)
 	}
-	summary := `{"state":"unavailable","reason":"ticket ` + parked + ` is done or closed in tk"}`
+	summary := `{"state":"unavailable","reason":"ticket ` + parked + ` is testing, done or closed in tk"}`
 	if cleaned.Phase != ledger.WeftPhaseEnded || cleaned.Outcome.String != "stopped" || cleaned.Stopped ||
 		string(cleaned.Summary) != summary || h.registered(park) || !h.branchKept(park) {
 		t.Fatalf("host-cleaned parked run = %+v", cleaned)
@@ -687,8 +688,8 @@ func (h *queueHost) dashboardCounts() (blocked, pending any) {
 // cleanup is not served, so nothing removes them — and the dashboard stops
 // counting it. An answer for the withdrawn question is refused run_over and
 // queues nothing. A parked run whose ticket is open, ready or backlog is
-// untouched; one whose ticket finished while the daemon was down is ended by
-// the restart.
+// untouched; one whose ticket went to testing while the daemon was down is
+// ended by the restart.
 func TestParkedRunEndsOnceTicketFinished(t *testing.T) {
 	h := newHostCleanupHost(t)
 	h.withoutCleanup()
@@ -721,7 +722,7 @@ func TestParkedRunEndsOnceTicketFinished(t *testing.T) {
 	h.finish(done, ticket.StatusDone)
 
 	ended := h.run(runs[done].ID)
-	summary := `{"state":"unavailable","reason":"ticket ` + done + ` is done or closed in tk"}`
+	summary := `{"state":"unavailable","reason":"ticket ` + done + ` is testing, done or closed in tk"}`
 	if ended.Phase != ledger.WeftPhaseEnded || ended.Outcome.String != "stopped" || ended.Stopped ||
 		string(ended.Summary) != summary || ended.Disposition != ledger.WeftDispositionRetained ||
 		ended.SettlementState != ledger.WeftSettlementNone || len(ended.Segments) != 1 {
@@ -754,7 +755,7 @@ func TestParkedRunEndsOnceTicketFinished(t *testing.T) {
 	if blocked, pending := h.dashboardCounts(); blocked != float64(3) || pending != float64(3) {
 		t.Fatalf("dashboard after = blocked %v, questions_pending %v", blocked, pending)
 	}
-	if !strings.Contains(h.logs.String(), "run="+ended.ID+": ended parked "+done+" ("+done+" is done or closed in tk)") {
+	if !strings.Contains(h.logs.String(), "run="+ended.ID+": ended parked "+done+" ("+done+" is testing, done or closed in tk)") {
 		t.Errorf("log lacks the ended run:\n%s", h.logs.String())
 	}
 
@@ -771,8 +772,8 @@ func TestParkedRunEndsOnceTicketFinished(t *testing.T) {
 		t.Fatalf("the refused answer moved the run: %+v", after)
 	}
 
-	// A ticket finished while the daemon was down: no catalog change of its
-	// own reaches the host, and the restart's pass ends the run.
+	// A ticket gone to testing while the daemon was down: no catalog change of
+	// its own reaches the host, and the restart's pass ends the run.
 	down := "loom/example-down-9e0f"
 	h.ticket(down, ticket.StatusReady, 2)
 	missed := h.parkedRun(down)
@@ -781,7 +782,7 @@ func TestParkedRunEndsOnceTicketFinished(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.ticket(down, ticket.StatusDone, 2)
+	h.ticket(down, ticket.StatusTesting, 2)
 	h.restart()
 	if h.service.served("cleanup") {
 		t.Fatal("cleanup is served after the restart")
@@ -1057,6 +1058,181 @@ func TestHostCleanupWorktreeAlreadyGone(t *testing.T) {
 		if err != nil || !strings.Contains(string(events), `"result":"done","worktree_removed":false`) {
 			t.Fatalf("%s's cleanup events = %s %v", id, events, err)
 		}
+	}
+	h.settle()
+}
+
+// testable writes the ticket with one criterion a person checks.
+func (h *queueHost) testable(id string, status ticket.Status) {
+	h.t.Helper()
+	project, slug, _ := strings.Cut(id, "/")
+	created := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	writeTicketIn(h.t, h.central, project, &ticket.Ticket{
+		ID: slug, Status: status, Type: ticket.TypeFeature, Priority: 2, Title: "Test " + slug,
+		Body: criterionBody + "  test: look at it\n", Created: created, Updated: created,
+	})
+}
+
+// landsInTesting launches the ticket and lands it as its worker would, through
+// tk, which leaves it in testing; the worker is held before its ended event.
+func (h *queueHost) landsInTesting(id string) *ledger.WeftRun {
+	h.t.Helper()
+	h.testable(id, ticket.StatusReady)
+	lines := h.landingSegment(id, "worker-segment.ndjson")
+	h.script(id, 1, splice(lines, indexOf(lines, "ended"), nil))
+	runID := h.waitDispatched(entryOf(h.launch(id, "lands-"+slugOf(id)))["entry_id"].(string))
+	waitFor(h.t, func() bool {
+		r := h.run(runID)
+		return len(r.Steps) == 3 && r.Steps[2].Result.String == "done"
+	})
+	run := h.run(runID)
+	h.addWorktree(run)
+	if _, err := ticket.ApplyAction(ticket.NewMultiStore(filepath.Join(h.central, "tickets")), ticket.ActionRequest{
+		ID: id, ActionID: "land", Note: "Landed.", Transition: ticket.TransitionLand, Commit: fixtureHead,
+	}); err != nil {
+		h.t.Fatal(err)
+	}
+	if _, err := h.service.syncCatalog(); err != nil {
+		h.t.Fatal(err)
+	}
+	if row := h.catalogRow(id); row["status"] != "testing" {
+		h.t.Fatalf("%s once landed = %v", id, row)
+	}
+	return run
+}
+
+// fails fails the ticket's test as a client does, and answers its row.
+func (h *queueHost) fails(id string) map[string]any {
+	h.t.Helper()
+	r := h.send(http.MethodPost, "/v2/tickets/"+id+"/test", "fails-"+slugOf(id),
+		testBody("fail", []int{1}, "It overflows.", h.catalogRow(id)["updated"]))
+	r.expect(h.t, http.StatusOK)
+	row := r.body["ticket"].(map[string]any)
+	if row["status"] != "ready" || row["last_test"].(map[string]any)["result"] != "failed" {
+		h.t.Fatalf("%s once failed = %v", id, row)
+	}
+	return row
+}
+
+// A run that lands with its ticket in testing is cleaned as any whose ticket
+// is finished (§6.8), and once landed and cleaned it is no prior_run: failed
+// back to ready, the ticket launches with no fresh (§6.7). A run that is
+// cleaned and did not land still refuses the next launch.
+func TestTestingTicketFreesLandedRun(t *testing.T) {
+	h := newHostCleanupHost(t)
+	t.Setenv("HOME", h.root)
+	id := "weft/example-second-4c2d"
+	landed := h.landsInTesting(id)
+	h.release(id)
+	cleaned := func(runID string) {
+		t.Helper()
+		waitFor(t, func() bool {
+			run := h.run(runID)
+			return run.Disposition == ledger.WeftDispositionCleaned && h.reaped(run)
+		})
+	}
+	cleaned(landed.ID)
+	if run := h.run(landed.ID); run.SettlementState != ledger.WeftSettlementLanded || h.registered(run) || !h.branchKept(run) {
+		t.Fatalf("landed run = %+v", run)
+	}
+	if entries := h.cleanupEntries(landed.ID); len(entries) != 1 || entries[0].token != ledger.WeftHostToken {
+		t.Fatalf("landed run's cleanup = %+v", entries)
+	}
+
+	if eligibility := h.fails(id)["eligibility"].(map[string]any); eligibility["state"] != "eligible" {
+		t.Fatalf("failed ticket's eligibility = %v", eligibility)
+	}
+	h.script(id, 1, h.halted(id))
+	again := h.waitReaped(h.waitDispatched(entryOf(h.launch(id, "again"))["entry_id"].(string)))
+	if again.ID == landed.ID || again.Outcome.String != "halted" {
+		t.Fatalf("second run = %+v", again)
+	}
+
+	for _, refusal := range []string{"retained", "cleaned"} {
+		if refusal == "cleaned" {
+			h.finish(id, ticket.StatusDone)
+			cleaned(again.ID)
+			h.finish(id, ticket.StatusReady)
+		}
+		if _, codes := h.eligibilityCodes(id); !slices.Equal(codes, []string{"prior_run"}) {
+			t.Fatalf("ticket of a halted, %s run = %v", refusal, codes)
+		}
+		if message := h.launch(id, "third-"+refusal).refused(t, http.StatusConflict, "prior_run"); !strings.Contains(message, again.ID) {
+			t.Fatalf("prior_run = %s, want it to name %s", message, again.ID)
+		}
+	}
+	h.settle()
+}
+
+// A ticket in testing failed while its run's host-started cleanup waits does
+// not invalidate the entry of a run that landed: the next launch is refused
+// prior_run until that worktree is gone, and its going raises
+// catalog_revision. An entry of a run that did not land is invalidated
+// ticket_ineligible (§6.8).
+func TestFailKeepsLandedRunsWaitingCleanup(t *testing.T) {
+	h := newHostCleanupHost(t)
+	t.Setenv("HOME", h.root)
+	lands, halts := "weft/example-second-4c2d", "loom/example-halts-1a2b"
+	h.ticket(halts, ticket.StatusReady, 2)
+	halted := h.haltedRun(halts)
+	h.addWorktree(halted)
+	landed := h.landsInTesting(lands)
+	if err := h.store.Pause(ledger.WeftAgent); err != nil {
+		t.Fatal(err)
+	}
+	h.release(lands)
+	h.waitReaped(landed.ID)
+	h.testable(halts, ticket.StatusTesting)
+	if _, err := h.service.syncCatalog(); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []*ledger.WeftRun{landed, halted} {
+		if entries := h.cleanupEntries(run.ID); len(entries) != 1 || entries[0].token != ledger.WeftHostToken || entries[0].state != "waiting" {
+			t.Fatalf("cleanup of %s while the host is paused = %+v", run.Ticket, entries)
+		}
+	}
+
+	h.fails(lands)
+	h.fails(halts)
+	if entries := h.cleanupEntries(landed.ID); len(entries) != 1 || entries[0].state != "waiting" {
+		t.Fatalf("landed run's cleanup once its ticket failed = %+v", entries)
+	}
+	if entries := h.cleanupEntries(halted.ID); len(entries) != 1 || entries[0].state != "invalidated" ||
+		entries[0].reason != ledger.WeftInvalidTicket || h.hold(halted.ID) {
+		t.Fatalf("halted run's cleanup once its ticket failed = %+v", entries)
+	}
+	if message := h.launch(lands, "early").refused(t, http.StatusConflict, "prior_run"); !strings.Contains(message, landed.ID) {
+		t.Fatalf("prior_run = %s, want it to name %s", message, landed.ID)
+	}
+	read, codes := h.eligibilityCodes(lands)
+	if !slices.Contains(codes, "prior_run") {
+		t.Fatalf("ticket of a landed run not cleaned yet = %v", codes)
+	}
+
+	before := asOf(t, h.store)
+	if err := h.store.Resume(ledger.WeftAgent); err != nil {
+		t.Fatal(err)
+	}
+	h.service.dispatch()
+	waitFor(t, func() bool {
+		run := h.run(landed.ID)
+		return run.Disposition == ledger.WeftDispositionCleaned && h.reaped(run)
+	})
+	cleaned, raised := false, int64(0)
+	for _, ev := range h.eventsSince(before) {
+		doc := decode(t, ev.Payload).(map[string]any)
+		switch {
+		case ev.Type == "run" && doc["run_id"] == landed.ID && doc["disposition"] == "cleaned":
+			cleaned = true
+		case ev.Type == "catalog" && doc["project"] == "weft" && cleaned:
+			raised = int64(doc["catalog_revision"].(float64))
+		}
+	}
+	if revision, codes := h.eligibilityCodes(lands); raised <= read || revision != raised || len(codes) != 0 {
+		t.Fatalf("cleaned %v raised revision %d to %d, read at %d as %v", cleaned, read, raised, revision, codes)
+	}
+	if run := h.run(halted.ID); run.Disposition != ledger.WeftDispositionRetained || !h.registered(run) {
+		t.Fatalf("halted run = %+v", run)
 	}
 	h.settle()
 }

@@ -666,11 +666,11 @@ func TestTrialLaunchCleanedFromOwnStore(t *testing.T) {
 	h.settle()
 }
 
-// A trial run whose landing finishes its ticket in its own store is cleaned
-// in the commit that reaps it, as a registered run's is (§6.8, §11.7): no
-// restart and no tk watch pass, which never reads a trial store, is needed.
-// The ticket is in no host project, so only the cell's store can say it is
-// done.
+// A trial run whose landing leaves its ticket in testing in its own store is
+// cleaned in the commit that reaps it, as a registered run's is (§6.8,
+// §11.7): no restart and no tk watch pass, which never reads a trial store, is
+// needed. The ticket is in no host project, so only the cell's store can say
+// it is in testing.
 func TestTrialLaunchCleanedOnSettle(t *testing.T) {
 	h := newHostCleanupHost(t)
 	const lands = "evalcell/lands-8192"
@@ -686,7 +686,7 @@ func TestTrialLaunchCleanedOnSettle(t *testing.T) {
 	run := h.run(runID)
 	h.addWorktree(run)
 	writeTicketIn(t, cell.store, "evalcell", &ticket.Ticket{
-		ID: "lands-8192", Status: ticket.StatusDone, Type: ticket.TypeFeature, Priority: 2, Title: "Trial lands-8192", Body: criterionBody,
+		ID: "lands-8192", Status: ticket.StatusTesting, Type: ticket.TypeFeature, Priority: 2, Title: "Trial lands-8192", Body: criterionBody,
 		Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Updated: time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
 	})
 	if entries := h.cleanupEntries(runID); len(entries) != 0 {
@@ -708,6 +708,51 @@ func TestTrialLaunchCleanedOnSettle(t *testing.T) {
 	if got := h.trialColumns(entries[0].id); !reflect.DeepEqual(got[:3], []string{cell.checkout, cell.store, cell.evidence}) {
 		t.Fatalf("cleanup entry's trial columns = %q", got)
 	}
+	h.settle()
+}
+
+// A landed trial run's cleanup waiting on the host's pause keeps its place
+// once its ticket is failed in its own store, as a registered run's does
+// (§6.8, §11.7): only that store can say it failed.
+func TestTrialLandedCleanupSurvivesFail(t *testing.T) {
+	h := newHostCleanupHost(t)
+	const lands = "evalcell/lands-8192"
+	cell := h.trialCell("c-0062", lands)
+	h.gitCheckout(cell)
+	lines := h.trialLanding(cell, lands)
+	h.script(lands, 1, splice(lines, indexOf(lines, "ended"), nil))
+	runID := h.waitDispatched(entryOf(h.send(http.MethodPost, "/v2/launches", "lands", cell.request(t, lands)))["entry_id"].(string))
+	waitFor(t, func() bool { return len(h.run(runID).Steps) == 3 })
+	h.addWorktree(h.run(runID))
+	store := func(status ticket.Status, tests ...ticket.TestRow) {
+		writeTicketIn(t, cell.store, "evalcell", &ticket.Ticket{
+			ID: "lands-8192", Status: status, Type: ticket.TypeFeature, Priority: 2, Title: "Trial lands-8192", Body: criterionBody, Tests: tests,
+			Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Updated: time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC),
+		})
+	}
+	store(ticket.StatusTesting)
+	if err := h.store.Pause(ledger.WeftAgent); err != nil {
+		t.Fatal(err)
+	}
+	h.release(lands)
+	h.waitReaped(runID)
+	if entries := h.cleanupEntries(runID); len(entries) != 1 || entries[0].state != "waiting" {
+		t.Fatalf("cleanup while the host is paused = %+v", entries)
+	}
+
+	store(ticket.StatusReady, ticket.TestRow{Result: ticket.TestFailed, Checks: []ticket.TestCheck{{Index: 1, Text: "It works."}},
+		Note: "It overflows.", At: "2026-10-02T10:00:00Z", By: "human", Commit: fixtureHead})
+	if err := h.store.Resume(ledger.WeftAgent); err != nil {
+		t.Fatal(err)
+	}
+	h.service.dispatch()
+	if entries := h.cleanupEntries(runID); len(entries) != 1 || entries[0].state != "dispatched" {
+		t.Fatalf("cleanup of a landed trial run whose ticket failed = %+v", entries)
+	}
+	waitFor(t, func() bool {
+		run := h.run(runID)
+		return run.Disposition == ledger.WeftDispositionCleaned && h.reaped(run)
+	})
 	h.settle()
 }
 

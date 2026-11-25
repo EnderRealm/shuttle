@@ -21,7 +21,8 @@ import (
 const testedTicket = "weft/example-second-4c2d"
 
 // newTestStudio is newEditStudio's catalog as tickets-testing.json has the
-// tested ticket: landed, in testing, updated when the fixture's pass read it.
+// tested ticket: landed and cleaned, in testing, updated when the fixture's
+// pass read it.
 func newTestStudio(t *testing.T) *studio {
 	t.Helper()
 	s := newStudio(t)
@@ -33,7 +34,8 @@ func newTestStudio(t *testing.T) *studio {
 		}
 	}
 	s.seedFixtureRuns(tickets)
-	s.exec(`UPDATE weft_runs SET settlement_state=? WHERE id=?`, ledger.WeftSettlementLanded, s.ticketRun[testedTicket])
+	s.exec(`UPDATE weft_runs SET settlement_state=?,disposition=? WHERE id=?`, ledger.WeftSettlementLanded,
+		ledger.WeftDispositionCleaned, s.ticketRun[testedTicket])
 	s.writeTestedTicket(nil)
 	s.sync()
 	return s
@@ -141,9 +143,8 @@ func (s *studio) fixtureResponse(action string) map[string]any {
 }
 
 // decided holds a test's answer to its fixture and to the GET after it. The
-// instants and the run are this host's own; tk notes each action, where the
-// fixtures count a fail's note alone; and whether the landed run's retained
-// branch still refuses the failed ticket a launch is §6.7's.
+// instants and the run are this host's own, and tk notes each action, where
+// the fixtures count a fail's note alone.
 func (s *studio) decided(action string, r response) {
 	t := s.t
 	t.Helper()
@@ -153,7 +154,6 @@ func (s *studio) decided(action string, r response) {
 	for key, value := range want {
 		switch {
 		case key == "updated" || key == "run" || key == "runs" || key == "notes_total" || key == "last_test":
-		case key == "eligibility" && action == testActionFail:
 		case !reflect.DeepEqual(got[key], value):
 			t.Errorf("%s: %s = %v, %s has %v", action, key, got[key], fixture, value)
 		}

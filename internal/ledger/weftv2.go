@@ -291,9 +291,9 @@ func appendCatalogEventTx(tx *sql.Tx, project string, revision int64, stamp stri
 // syncWeftHostCatalogTx raises catalog_revision, with its catalog event, for
 // every recorded project whose host-held eligibility inputs tx moved: what a
 // catalog read judges a ticket by beside tk — each run in flight and its
-// phase, each hosted run ended and not archived and the branch it retains,
-// and each entry waiting or archiving — all of the host catalog's tickets
-// only, since a trial's run or entry is of a ticket in its own store
+// phase, each hosted run ended and neither archived nor freed and the branch
+// it retains, and each entry waiting or archiving — all of the host catalog's
+// tickets only, since a trial's run or entry is of a ticket in its own store
 // (§11.7). Nothing else a run or entry carries is digested, so a write that
 // changes no ticket's eligibility leaves the revision where it was. A row
 // with no host digest yet — one SyncWeftCatalog has just recorded in this
@@ -305,7 +305,7 @@ func syncWeftHostCatalogTx(tx *sql.Tx, now time.Time) error {
 		SELECT project,ticket,'in_flight',id,phase FROM weft_runs WHERE phase IN (?,?,?,?) AND `+weftRunStore+`=''
 		UNION ALL
 		SELECT project,ticket,'prior_run',id,branch FROM weft_runs
-			WHERE origin=? AND phase=? AND COALESCE(disposition,'')<>? AND `+weftRunStore+`=''
+			WHERE origin=? AND phase=? AND COALESCE(disposition,'')<>? AND NOT `+weftFreedSQL+` AND `+weftRunStore+`=''
 		UNION ALL
 		SELECT project,ticket,'entry',id,kind||'/'||state FROM weft_entries WHERE state IN (?,?) AND COALESCE(tk_store_root,'')=''
 		ORDER BY 1,2,3,4,5`,
@@ -418,6 +418,18 @@ func (r *WeftRun) Action() (reason, detail sql.NullString) {
 // action, recorded or derived.
 const weftActionRequiredSQL = `(action_required IS NOT NULL OR (origin<>'` + WeftOriginArchive + `' AND phase='` +
 	WeftPhaseEnded + `' AND outcome='halted' AND disposition='` + WeftDispositionRetained + `' AND head IS NOT NULL))`
+
+// Freed is whether the run landed and its worktree was cleaned: its work is
+// on the default branch, so it is no prior_run and its ticket, failed back to
+// ready, launches over the branch the cleanup kept (§6.7).
+func (r *WeftRun) Freed() bool {
+	return r.SettlementState == WeftSettlementLanded && r.Disposition == WeftDispositionCleaned
+}
+
+// weftFreedSQL is Freed's rule over weft_runs, never NULL, so NOT of it keeps
+// a row with no settlement or disposition.
+const weftFreedSQL = `(COALESCE(settlement_state,'')='` + WeftSettlementLanded +
+	`' AND COALESCE(disposition,'')='` + WeftDispositionCleaned + `')`
 
 // WeftDashboardCounts reads every dashboard figure in one statement, so they
 // agree with each other. Capacity's running count is weftRunningSQL's.

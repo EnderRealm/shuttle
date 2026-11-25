@@ -42,6 +42,21 @@ func qualifyDep(ticketID, dep string) string {
 	return projectOf(ticketID) + "/" + dep
 }
 
+// resolved is whether the ticket's work is over: testing, done or closed. As a
+// dependency it is satisfied, which pkg/ticket decides the same way and does
+// not export (§5.2); as a run's ticket it is finished (§6.8). It is not
+// whether an epic's child is finished, which one in testing is not (§5.4).
+func resolved(t *ticket.Ticket) bool {
+	return t.Status == ticket.StatusTesting || t.Status == ticket.StatusDone || t.Status == ticket.StatusClosed
+}
+
+// failedTest is whether the ticket reads ready with its last test failed
+// (§6.8).
+func failedTest(t *ticket.Ticket) bool {
+	row := ticket.LastTest(t)
+	return t.Status == ticket.StatusReady && row != nil && row.Result == ticket.TestFailed
+}
+
 func launchable(t *ticket.Ticket, byID map[string]*ticket.Ticket) (bool, string) {
 	if t.Status != ticket.StatusReady && t.Status != ticket.StatusOpen {
 		return false, "status is " + string(t.Status)
@@ -55,7 +70,7 @@ func launchable(t *ticket.Ticket, byID map[string]*ticket.Ticket) (bool, string)
 		if !ok {
 			return false, "dependency " + id + " is missing"
 		}
-		if d.Status != ticket.StatusDone && d.Status != ticket.StatusClosed {
+		if !resolved(d) {
 			return false, "dependency " + id + " is " + string(d.Status)
 		}
 	}

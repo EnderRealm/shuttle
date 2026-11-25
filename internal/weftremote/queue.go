@@ -269,6 +269,7 @@ func (s *Service) dispatchConfig(c *catalog) ledger.WeftDispatch {
 	d.Check = s.entryCheck(c)
 	if s.served("cleanup") {
 		d.Finished, d.TrialFinished = c.finished, c.trials.finished
+		d.Failed, d.TrialFailed = c.failed, c.trials.failed
 	}
 	return d
 }
@@ -299,7 +300,7 @@ func (s *Service) cleanupDispatch(what string) ledger.WeftDispatch {
 // its run's worktree from the repository the run was created in, so it is
 // held to that repository still resolving as recorded, not to the project's
 // binding, which may have moved since the run was retained, nor to the
-// project's registration or its ticket, which a landing may have made done
+// project's registration or its ticket, which a landing may have finished
 // (§6.8). A trial entry is held to its own checkout and store instead (§11.7).
 func (s *Service) entryCheck(c *catalog) func(*ledger.WeftEntry) (string, string) {
 	return func(e *ledger.WeftEntry) (string, string) {

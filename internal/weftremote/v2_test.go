@@ -727,7 +727,7 @@ func TestCatalogServesEveryProjectAndTicketWithEligibility(t *testing.T) {
 	s.seedFixtureRuns(tickets)
 
 	projects := s.get("/v2/projects")
-	learn(decode(t, fixtureBytes(t, "projects.json"))).check(t, "projects", projects)
+	learn(decode(t, fixtureBytes(t, "projects-testing.json"))).check(t, "projects", projects)
 	var fixtureProjects struct {
 		Projects []map[string]any `json:"projects"`
 	}
@@ -749,6 +749,8 @@ func TestCatalogServesEveryProjectAndTicketWithEligibility(t *testing.T) {
 			t.Errorf("%s: state %v %v, want %v %v", name, got["state"], got["reason"], want["state"], want["reason"])
 		}
 		if name == "weft" || name == "docs-site" || name == "scratch" {
+			// This host counts testing, which projects.json leaves out.
+			want["counts"].(map[string]any)["testing"] = float64(0)
 			if !reflect.DeepEqual(got["counts"], want["counts"]) {
 				t.Errorf("%s counts = %v, want %v", name, got["counts"], want["counts"])
 			}
@@ -803,6 +805,71 @@ func TestCatalogServesEveryProjectAndTicketWithEligibility(t *testing.T) {
 	s.errorBody(http.MethodGet, "/v2/tickets?project=nowhere", http.StatusNotFound, "project_not_found")
 	s.errorBody(http.MethodGet, "/v2/tickets/weft/missing-0000", http.StatusNotFound, "ticket_not_found")
 	s.errorBody(http.MethodGet, "/v2/tickets/nowhere/first-0001", http.StatusNotFound, "ticket_not_found")
+}
+
+// A ticket in testing is served with that status, ineligible for it and
+// blocking nothing that depends on it, and every project counts testing, 0
+// included (§5.1, §5.2).
+func TestCatalogServesAndCountsTesting(t *testing.T) {
+	s := newTestStudio(t)
+	var list struct {
+		Tickets []fixtureTicket `json:"tickets"`
+	}
+	fixtureJSON(t, "tickets-testing.json", &list)
+	// What the listing has beside the tested ticket that tickets.json does not,
+	// or has in another status.
+	for _, ft := range list.Tickets {
+		if tk, err := s.tk().Get(ft.ID); err == nil && string(tk.Status) == ft.Status {
+			continue
+		}
+		s.ticket("weft", bare(ft.ID), ft.Title, ticket.Status(ft.Status))
+		tk := s.stored(ft.ID)
+		for _, dep := range ft.Deps {
+			tk.Deps = append(tk.Deps, bare(dep.ID))
+		}
+		if err := s.tk().Update(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	projects := s.get("/v2/projects")
+	learn(decode(t, fixtureBytes(t, "projects-testing.json"))).check(t, "projects", projects)
+	var want struct {
+		Projects []map[string]any `json:"projects"`
+	}
+	fixtureJSON(t, "projects-testing.json", &want)
+	for i, p := range projects["projects"].([]any) {
+		p, want := p.(map[string]any), want.Projects[i]
+		if p["project"] != want["project"] {
+			t.Fatalf("project %d = %v, want %v", i, p["project"], want["project"])
+		}
+		counts, wantCounts := p["counts"].(map[string]any), want["counts"].(map[string]any)
+		// loom, ticket and warp hold one ready ticket each here.
+		if counts["testing"] != wantCounts["testing"] ||
+			(slices.Contains([]any{"docs-site", "scratch", "weft"}, p["project"]) && !reflect.DeepEqual(counts, wantCounts)) {
+			t.Errorf("%s counts = %v, want %v", p["project"], counts, wantCounts)
+		}
+	}
+
+	learn(decode(t, fixtureBytes(t, "tickets-testing.json")), decode(t, fixtureBytes(t, "tickets.json"))).
+		check(t, "tickets", s.get("/v2/tickets?project=weft"))
+	var fixture map[string]any
+	fixtureJSON(t, "tickets-testing.json", &fixture)
+	for _, row := range fixture["tickets"].([]any) {
+		row := row.(map[string]any)
+		if row["id"] != testedTicket && row["id"] != "weft/example-follow-3c5d" {
+			continue
+		}
+		got := s.row(row["id"].(string))
+		for _, key := range []string{"status", "deps", "blocked", "eligibility"} {
+			if !reflect.DeepEqual(got[key], row[key]) {
+				t.Errorf("%s.%s = %v, tickets-testing.json has %v", row["id"], key, got[key], row[key])
+			}
+		}
+	}
+	if got := s.get("/v2/tickets/" + testedTicket)["ticket"].(map[string]any)["status"]; got != "testing" {
+		t.Errorf("%s reads %v", testedTicket, got)
+	}
 }
 
 // A board reads each card's count off the listing, so the listing and a
@@ -1075,7 +1142,7 @@ func TestCatalogBindingsNeverDefaultARepository(t *testing.T) {
 		s.ticket(name, "work-0001", "Work", ticket.StatusReady)
 	}
 	projects := s.get("/v2/projects")
-	learn(decode(t, fixtureBytes(t, "projects.json"))).check(t, "projects", projects)
+	learn(decode(t, fixtureBytes(t, "projects-testing.json"))).check(t, "projects", projects)
 	want := map[string]string{"bare": "not_a_repository", "unbound": "no_binding", "slash": "root_binding", "homed": "root_binding"}
 	for _, p := range projects["projects"].([]any) {
 		p := p.(map[string]any)

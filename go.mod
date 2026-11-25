@@ -3,7 +3,7 @@ module shuttle
 go 1.26
 
 require (
-	github.com/EnderRealm/ticket/v8 v8.13.1-0.20261124215514-ada9937243ed
+	github.com/EnderRealm/ticket/v8 v8.14.0
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/robfig/cron/v3 v3.0.1

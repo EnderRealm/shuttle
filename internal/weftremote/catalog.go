@@ -306,13 +306,31 @@ func (s *Service) recordCatalogTx(tx *ledger.WeftTx, c *catalog) error {
 	return tx.CleanFinished(changed, d)
 }
 
-// finished is §6.8's trigger as this read has it: the ticket done or closed
-// through pkg/ticket. A ticket not found, or one of a project tk does not
-// register, is no trigger.
+// finished is §6.8's trigger as this read has it: the ticket testing, done or
+// closed through pkg/ticket. A ticket not found, or one of a project tk does
+// not register, is no trigger.
 func (c *catalog) finished(id string) bool {
+	t := c.lookup(id)
+	return t != nil && resolved(t)
+}
+
+// failed is whether the ticket reads, as this read has it, as a Fail leaves
+// one: what keeps a landed run's waiting cleanup once its ticket is no longer
+// finished (§6.8).
+func (c *catalog) failed(id string) bool {
+	t := c.lookup(id)
+	return t != nil && failedTest(t)
+}
+
+// lookup is the ticket in this read, nil where it is not found or is of a
+// project tk does not register.
+func (c *catalog) lookup(id string) *ticket.Ticket {
 	project, _ := ticket.ParseNamespacedID(id)
-	t, ok := c.snap.Get(id)
-	return c.byName[project] != nil && ok && (t.Status == ticket.StatusDone || t.Status == ticket.StatusClosed)
+	if c.byName[project] == nil {
+		return nil
+	}
+	t, _ := c.snap.Get(id)
+	return t
 }
 
 // syncCatalog is one pass of the host watching tk.
@@ -395,7 +413,7 @@ func (s *Service) handleProjects(w http.ResponseWriter) {
 		if p.Repository != "" {
 			repository, repositoryID = p.Repository, p.RepositoryID
 		}
-		counts := map[string]int{"backlog": 0, "ready": 0, "open": 0, "done": 0, "closed": 0, "epics": 0}
+		counts := map[string]int{"backlog": 0, "ready": 0, "open": 0, "testing": 0, "done": 0, "closed": 0, "epics": 0}
 		for _, t := range p.Tickets {
 			if _, ok := counts[string(t.Status)]; ok {
 				counts[string(t.Status)]++
@@ -581,7 +599,8 @@ func (v *catalogView) ineligibility(p *catalogProject, t *ticket.Ticket, runs []
 			add("entry_waiting", detail)
 		}
 		for _, run := range runs {
-			if run.Origin == ledger.WeftOriginHosted && run.Phase == ledger.WeftPhaseEnded && run.Disposition != ledger.WeftDispositionArchived {
+			if run.Origin == ledger.WeftOriginHosted && run.Phase == ledger.WeftPhaseEnded &&
+				run.Disposition != ledger.WeftDispositionArchived && !run.Freed() {
 				add("prior_run", "run "+run.ID+" retains branch "+run.Branch+"; start it fresh")
 				break
 			}
@@ -620,7 +639,7 @@ func tkIneligibility(snap *ticket.Snapshot, t *ticket.Ticket) []map[string]any {
 			switch {
 			case !ok:
 				add("dependency_unresolved", dep+" does not resolve")
-			case d.Status != ticket.StatusDone && d.Status != ticket.StatusClosed:
+			case !resolved(d):
 				add("dependency_unresolved", dep+" is "+string(d.Status))
 			default:
 				continue

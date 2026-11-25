@@ -151,20 +151,32 @@ func (m trialStores) read(root string) trialRead {
 	return read
 }
 
-// finished is catalog.finished for a trial run's ticket (§6.8, §11.7): done
-// or closed in the store at root, the path its run was admitted against. A
-// store that no longer canonicalizes to that path is another store, and one
-// that cannot be read, or a ticket not in it, is no trigger.
+// finished is catalog.finished for a trial run's ticket (§6.8, §11.7): as it
+// reads in the store at root, the path its run was admitted against.
 func (m trialStores) finished(root, id string) bool {
+	t := m.lookup(root, id)
+	return t != nil && resolved(t)
+}
+
+// failed is catalog.failed for a trial run's ticket.
+func (m trialStores) failed(root, id string) bool {
+	t := m.lookup(root, id)
+	return t != nil && failedTest(t)
+}
+
+// lookup is the ticket in the store at root, nil where it is not in it, where
+// the store cannot be read, and where root no longer canonicalizes to itself:
+// that is another store.
+func (m trialStores) lookup(root, id string) *ticket.Ticket {
 	if trialPathMoved(root) != "" {
-		return false
+		return nil
 	}
 	read := m.read(root)
 	if read.err != nil {
-		return false
+		return nil
 	}
-	t, ok := read.snap.Get(id)
-	return ok && (t.Status == ticket.StatusDone || t.Status == ticket.StatusClosed)
+	t, _ := read.snap.Get(id)
+	return t
 }
 
 // check is a trial entry's revalidation (§11.7, §6.3): each directory its

@@ -248,8 +248,10 @@ func (s *Store) WeftArchiveHead(runID string) (string, error) {
 // revalidateMaintenance is dispatch's recheck of a reconcile, cleanup or
 // fresh entry against the run it acts on as that run is now. A host-started
 // cleanup also re-tests its trigger (§6.8): its ticket through d's finished
-// reads, then the rest of what made the run qualify. d.Finished is nil on a
-// host that does not serve cleanup, where the ticket is not re-tested.
+// reads, then the rest of what made the run qualify. A landed run's keeps its
+// place over a ticket failed back to ready, whose next launch is refused
+// prior_run until this worktree is gone. d.Finished is nil on a host that does
+// not serve cleanup, where the ticket is not re-tested.
 func (t *WeftTx) revalidateMaintenance(e *WeftEntry, d WeftDispatch) (string, string, error) {
 	runID := e.RunID.String
 	if e.Kind == WeftEntryFresh {
@@ -298,12 +300,15 @@ func (t *WeftTx) revalidateMaintenance(e *WeftEntry, d WeftDispatch) (string, st
 	if err != nil || !host {
 		return "", "", err
 	}
-	done, err := runFinished(t.tx, run.ID, run.Ticket, d.Finished, d.TrialFinished)
+	done, err := runReads(t.tx, run.ID, run.Ticket, d.Finished, d.TrialFinished)
+	if err == nil && !done && run.SettlementState == WeftSettlementLanded {
+		done, err = runReads(t.tx, run.ID, run.Ticket, d.Failed, d.TrialFailed)
+	}
 	if err != nil {
 		return "", "", err
 	}
 	if !done {
-		return WeftInvalidTicket, fmt.Sprintf("%s no longer reads done or closed in tk", run.Ticket), nil
+		return WeftInvalidTicket, fmt.Sprintf("%s no longer reads testing, done or closed in tk", run.Ticket), nil
 	}
 	blocked, err := t.hostCleanupBlocked(run, e.ID)
 	if err != nil || blocked == "" {
@@ -312,24 +317,24 @@ func (t *WeftTx) revalidateMaintenance(e *WeftEntry, d WeftDispatch) (string, st
 	return WeftInvalidRun, blocked, nil
 }
 
-// runFinished is whether the run's ticket reads done or closed: through
-// finished, the host catalog's read, for a run of a registered repository,
-// and through trialFinished in the store it was admitted against for a trial
-// run (§11.7), whose ticket the host catalog never holds — a ticket of the
-// same id there says nothing about it. A nil trialFinished reads no trial run
-// finished. No trial store is watched: a trial ticket finished in its own
+// runReads is whether the run's ticket reads as host asks — finished, or
+// failed (WeftDispatch) — through host, the host catalog's read, for a run of
+// a registered repository, and through trial in the store it was admitted
+// against for a trial run (§11.7), whose ticket the host catalog never holds —
+// a ticket of the same id there says nothing about it. A nil trial is true of
+// no trial run. No trial store is watched: a trial ticket finished in its own
 // store outside a run is reached at the next restart, cleanup-served turn,
 // owed pass or settle of its run, not on a tk watch pass as a registered
 // run's is.
-func runFinished(q querier, runID, ticket string, finished func(string) bool, trialFinished func(store, ticket string) bool) (bool, error) {
-	trial, err := weftRunTrial(q, runID)
+func runReads(q querier, runID, ticket string, host func(string) bool, trial func(store, ticket string) bool) (bool, error) {
+	env, err := weftRunTrial(q, runID)
 	switch {
 	case err != nil:
 		return false, err
-	case trial.Checkout == "":
-		return finished(ticket), nil
+	case env.Checkout == "":
+		return host(ticket), nil
 	}
-	return trialFinished != nil && trialFinished(trial.TKStoreRoot, ticket), nil
+	return trial != nil && trial(env.TKStoreRoot, ticket), nil
 }
 
 // hostStarted is whether the entry is one the host admitted itself.
@@ -421,8 +426,8 @@ func (t *WeftTx) CleanFinishedRun(runID string, d WeftDispatch) error {
 }
 
 // EndFinishedParked ends every parked hosted run of projects — of every
-// project when projects is nil — whose ticket finished reads done or closed,
-// or trialFinished in its own store for a trial run (runFinished):
+// project when projects is nil — whose ticket finished reads testing, done or
+// closed, or trialFinished in its own store for a trial run (runReads):
 // nothing is left to answer its question for, so the question is withdrawn
 // and the run is over, stopped but not by the operator, its worktree and
 // branch retained (§6.5). A host cleanup hold does not spare it; the hold
@@ -460,7 +465,7 @@ func (t *WeftTx) EndFinishedParked(projects []string, finished func(string) bool
 	}
 	var ids, tickets []string
 	for i, id := range parked {
-		done, err := runFinished(t.tx, id, parkedTickets[i], finished, trialFinished)
+		done, err := runReads(t.tx, id, parkedTickets[i], finished, trialFinished)
 		if err != nil {
 			return err
 		}
@@ -477,27 +482,27 @@ func (t *WeftTx) EndFinishedParked(projects []string, finished func(string) bool
 			return err
 		}
 		t.Changes = append(t.Changes, WeftChange{Action: "ended", RunID: id, Kind: "parked", Ticket: tickets[i],
-			Detail: tickets[i] + " is done or closed in tk"})
+			Detail: tickets[i] + " is testing, done or closed in tk"})
 	}
 	return nil
 }
 
 // finishedTicketSummary is the summary of a parked run ended because its
-// ticket is done or closed in tk.
+// ticket is testing, done or closed in tk.
 func finishedTicketSummary(ticket string) (string, error) {
 	summary, err := json.Marshal(struct {
 		State  string `json:"state"`
 		Reason string `json:"reason"`
-	}{"unavailable", "ticket " + ticket + " is done or closed in tk"})
+	}{"unavailable", "ticket " + ticket + " is testing, done or closed in tk"})
 	return string(summary), err
 }
 
 // cleanFinished admits, for each of runs that qualifies and whose ticket
-// reads done or closed through d (runFinished), the cleanup entry a dismiss
-// would — as the host admits its own, with no request behind it, carrying a
-// trial run's environment as insertEntryTx inherits it — and dispatches it in
-// this transaction. A nil d.Finished is a host that does not serve cleanup,
-// which cleans nothing itself.
+// reads testing, done or closed through d (runReads), the cleanup entry a
+// dismiss would — as the host admits its own, with no request behind it,
+// carrying a trial run's environment as insertEntryTx inherits it — and
+// dispatches it in this transaction. A nil d.Finished is a host that does not
+// serve cleanup, which cleans nothing itself.
 func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
 	if d.Finished == nil {
 		return nil
@@ -514,7 +519,7 @@ func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
 		if blocked != "" {
 			continue
 		}
-		done, err := runFinished(t.tx, run.ID, run.Ticket, d.Finished, d.TrialFinished)
+		done, err := runReads(t.tx, run.ID, run.Ticket, d.Finished, d.TrialFinished)
 		if err != nil {
 			return err
 		}
@@ -530,7 +535,7 @@ func (t *WeftTx) cleanFinished(runIDs []string, d WeftDispatch) error {
 		}
 		a := WeftAdmission{Kind: WeftEntryCleanup, Ticket: run.Ticket, Project: run.Project, RunID: run.ID,
 			RepositoryID: run.RepositoryID, Repository: run.Repo, TokenID: WeftHostToken}
-		e, err := t.insertEntryNoting(a, "host-started: "+run.Ticket+" is done or closed in tk")
+		e, err := t.insertEntryNoting(a, "host-started: "+run.Ticket+" is testing, done or closed in tk")
 		if err != nil {
 			return err
 		}
@@ -655,10 +660,10 @@ func refuseCleanupTx(tx *sql.Tx, runID, detail, stamp string) (held bool, err er
 // cleanup, changing nothing else. A parked run the host cleaned before any
 // catalog pass ended it — a dispatch can admit its cleanup first — is ended
 // as EndFinishedParked ends one, its pending question withdrawn and no
-// operator stop marked: its ticket is done or closed, and nothing can answer
-// it once its worktree is gone (§6.5, §6.8). An archive's result is settled
-// at reap, by SettleWeftArchive. held is whether a refusal set the run's
-// hold.
+// operator stop marked: its ticket is testing, done or closed, and nothing
+// can answer it once its worktree is gone (§6.5, §6.8). An archive's result
+// is settled at reap, by SettleWeftArchive. held is whether a refusal set the
+// run's hold.
 func (s *Store) RecordWeftMaintained(runID string, segment int, op, result, detail string) (held bool, err error) {
 	err = s.withTx(func(tx *sql.Tx) error {
 		stamp := weftTimestamp(s.now())

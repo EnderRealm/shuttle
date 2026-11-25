@@ -674,7 +674,7 @@ func (t *WeftTx) Admit(a WeftAdmission) (*WeftEntry, error) {
 	}
 	var prior, branch string
 	err := t.tx.QueryRow(`SELECT id,branch FROM weft_runs WHERE ticket=? AND (`+weftRunStore+`=? OR repository_id=?) AND origin=? AND disposition<>?
-		ORDER BY created_at DESC,id DESC LIMIT 1`, a.Ticket, a.Trial.TKStoreRoot, a.RepositoryID, WeftOriginHosted, WeftDispositionArchived).Scan(&prior, &branch)
+		AND NOT `+weftFreedSQL+` ORDER BY created_at DESC,id DESC LIMIT 1`, a.Ticket, a.Trial.TKStoreRoot, a.RepositoryID, WeftOriginHosted, WeftDispositionArchived).Scan(&prior, &branch)
 	switch {
 	case err == nil:
 		return nil, refuse("prior_run", "%s has run %s, which retains branch %s; start that run fresh rather than launching over it",
@@ -1238,18 +1238,24 @@ type WeftDispatch struct {
 	// are now, answering an invalidation reason and detail, or "" when the
 	// entry may still dispatch.
 	Check func(*WeftEntry) (reason, detail string)
-	// Finished is whether a ticket reads done or closed through pkg/ticket as
-	// Check's read has it: the trigger of a host-started cleanup (§6.8). Nil
-	// on a host that does not serve cleanup, which cleans no run itself. It is
-	// the host catalog's, so it is never consulted for a trial run (runFinished).
+	// Finished is whether a ticket reads testing, done or closed through
+	// pkg/ticket as Check's read has it: the trigger of a host-started cleanup
+	// (§6.8). Nil on a host that does not serve cleanup, which cleans no run
+	// itself. It is the host catalog's, so it is never consulted for a trial
+	// run (runReads).
 	Finished func(ticket string) bool
 	// TrialFinished is Finished for a trial run (§11.7): whether the ticket
-	// reads done or closed in the tk store at store, the root its run was
-	// admitted against. Nil reads no trial run finished. No trial store is
+	// reads testing, done or closed in the tk store at store, the root its run
+	// was admitted against. Nil reads no trial run finished. No trial store is
 	// watched, so a trial ticket finished in its own store outside a run is
 	// reached at the next restart, cleanup-served turn, owed pass or settle
 	// of its run, not on a tk watch pass as a registered run's is.
 	TrialFinished func(store, ticket string) bool
+	// Failed and TrialFailed are whether the ticket reads ready with its last
+	// test failed, through the reads Finished and TrialFinished are over and
+	// set with them: what keeps a landed run's waiting cleanup (§6.8).
+	Failed      func(ticket string) bool
+	TrialFailed func(store, ticket string) bool
 }
 
 // Dispatch walks the waiting entries in position order (§6.3). One whose

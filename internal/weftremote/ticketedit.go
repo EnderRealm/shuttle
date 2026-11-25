@@ -130,6 +130,9 @@ func (s *Service) editTicket(tx *ledger.WeftTx, c *catalog, id string, req ticke
 		case t.Type == ticket.TypeEpic && status != ticket.StatusClosed:
 			return false, &ledger.WeftRefusal{Code: "malformed", Message: fmt.Sprintf(
 				"%s is an epic, whose status tk derives: closed is the only status an edit can set on it", id)}
+		case t.Status == ticket.StatusTesting && status != ticket.StatusClosed:
+			return false, &ledger.WeftRefusal{Code: "malformed", Message: fmt.Sprintf(
+				"%s is in testing, which its test moves it out of: closed is the only status an edit can set on it", id)}
 		}
 		t.Status, changed = status, true
 	}

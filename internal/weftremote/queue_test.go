@@ -1141,6 +1141,58 @@ func TestLaunchRefusals(t *testing.T) {
 	}
 }
 
+// A dependency in testing is satisfied (§5.2): the ready ticket is not blocked
+// and launches, on either contract's listing, and a ticket another dependency
+// blocks names only that one. Failed back to ready, it blocks again.
+func TestTestingDepDoesNotBlockLaunch(t *testing.T) {
+	h := newQueueHost(t)
+	h.ticket("weft/landed-0001", ticket.StatusTesting, 2)
+	h.ticket("weft/ready-0002", ticket.StatusReady, 2)
+	dependent := func(slug string, deps ...string) string {
+		writeTicketIn(t, h.central, "weft", &ticket.Ticket{
+			ID: slug, Status: ticket.StatusReady, Type: ticket.TypeFeature, Priority: 2, Title: "Work " + slug, Body: criterionBody, Deps: deps,
+			Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), Updated: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+		})
+		return "weft/" + slug
+	}
+	follows, blocked := dependent("follows-0003", "landed-0001"), dependent("blocked-0004", "landed-0001", "ready-0002")
+	check := func(id string, wantBlocked bool, reasons ...any) {
+		t.Helper()
+		row := h.catalogRow(id)
+		got := row["eligibility"].(map[string]any)["reasons"].([]any)
+		if row["blocked"] != wantBlocked || !slices.EqualFunc(got, reasons, func(a, b any) bool { return reflect.DeepEqual(a, b) }) {
+			t.Errorf("%s blocked = %v, reasons %v, want %v, %v", id, row["blocked"], got, wantBlocked, reasons)
+		}
+		if listed := strings.Contains(h.request(t, http.MethodGet, "/v1/tickets", "", "").Body.String(), id); listed == wantBlocked {
+			t.Errorf("GET /v1/tickets lists %s = %v, blocked %v", id, listed, wantBlocked)
+		}
+	}
+	unresolved := func(detail string) any { return map[string]any{"code": "dependency_unresolved", "detail": detail} }
+	check(follows, false)
+	check(blocked, true, unresolved("weft/ready-0002 is ready"))
+	h.ticket("weft/landed-0001", ticket.StatusReady, 2)
+	check(follows, true, unresolved("weft/landed-0001 is ready"))
+	h.launch(follows, "blocked").refused(t, http.StatusConflict, "ticket_not_eligible")
+	h.ticket("weft/landed-0001", ticket.StatusTesting, 2)
+	h.launch(follows, "follows").expect(t, http.StatusAccepted, "launch-response.json")
+}
+
+func TestTestingTicketIsNotLaunchEligible(t *testing.T) {
+	h := newQueueHost(t)
+	id := "weft/landed-0001"
+	h.ticket(id, ticket.StatusTesting, 2)
+	want := map[string]any{"state": "ineligible", "reasons": []any{map[string]any{"code": "status", "detail": "testing"}}}
+	if row := h.catalogRow(id); row["status"] != "testing" || !reflect.DeepEqual(row["eligibility"], any(want)) {
+		t.Fatalf("ticket in testing = %v", row)
+	}
+	if message := h.launch(id, "launch").refused(t, http.StatusConflict, "ticket_not_eligible"); message != id+" is testing in tk" {
+		t.Fatalf("launch of a ticket in testing = %s", message)
+	}
+	if n := len(h.queue()["entries"].([]any)); n != 0 {
+		t.Fatalf("a refused launch queued %d entries", n)
+	}
+}
+
 // §12: the restart pass closes the interrupted segment as v1's unknown; then
 // steps 4 and 5 keep the waiting entries, delete reservations whose holders
 // are gone and relaunch nothing — and dispatch resumes afterwards.
