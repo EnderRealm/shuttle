@@ -541,6 +541,9 @@ func TestRunSnapshotBoundedWithLosses(t *testing.T) {
 	var oldestShown time.Time
 	for _, entry := range presentation.Entries {
 		for _, observation := range entry.Observations {
+			if observation == nil {
+				continue
+			}
 			at, err := time.Parse(time.RFC3339, observation.At)
 			if err != nil {
 				t.Fatal(err)

@@ -10,7 +10,10 @@ notebooks and the collector boundary to the same manual and scheduled pipeline
 used by the daily agent.
 `observer/v1` is unreleased on those terms — no records exist under it and no
 domain adapter reads it — so a correction to the shape is still made in place; a
-version pins a shape once there are records written under it to read.
+version pins a shape once there are records written under it to read. That is
+why `observer/v1` itself carries the three observations that do not come from a
+run — a person's observation, a correction and a carried-over reading (§1) —
+rather than a new version.
 
 An observer cannot judge a change consistently if every domain invents its own
 meaning for a window, a baseline, missing evidence or a retired question. This
@@ -20,7 +23,8 @@ how an experiment is registered without inheriting the observer's context.
 
 ## 1. What travels
 
-Six payloads, all JSON, all carrying `contract_version` (`observer/v1` today).
+Six payloads, all JSON, all carrying `contract_version` (`observer/v1` today);
+the Assessment has four kinds, listed as rows of their own.
 A payload with no version, or one this binary does not read, is refused naming
 `contract_version` and listing what it does read — the notebook outlives the
 binary, so a record has to say which rules it was written under rather than be
@@ -31,17 +35,52 @@ guessed at from its shape.
 | Question | a standing question about a subject: what would answer it, what answering it would change, how fast its inputs move | a person, a worker or the observer, recorded in `author` | into the notebook from its author |
 | Experiment | a change's declared effect, its activation, the window and opportunity it needs, and the readings and baseline it will be judged by | a person, a worker or the observer, recorded in `author` | into the notebook from its author |
 | Bundle | recorded fact: readings over an explicit window, from named sources, out of a named snapshot, with what could not be read | the observer | written into the notebook |
-| Assessment | one outcome and one prose interpretation, carrying the bundle it was drawn from; an unprompted assessment also carries the finding that opens its entry | the observer | written into the notebook |
+| Assessment | one outcome and one prose interpretation, carrying the bundle it was drawn from; an unprompted assessment also carries the finding that opens its entry | the observer, by a run (§10) | written into the notebook |
+| Person's observation | an outcome and the facts as a person states them, with the time, and no bundle | a person, `author.kind` `human`, calling as the operator's uid | into the notebook through the door (§12) |
+| Correction | a person's observation that also names, in `corrects`, the observation it corrects and what was wrong with it | a person, `author.kind` `human`, calling as the operator's uid | into the notebook through the door |
+| Carried-over reading | a reading first recorded elsewhere, with the source it came from in `carried_over` and its original date in `at` | any declared author | into the notebook through the door |
 | Action | ticket-facing feedback under a stable id: a `ticket-note` on the entry's ticket, a `ticket-reopen` or `ticket-release` of it, or a `ticket-open` carrying the title of a ticket to create | the observer | out toward the ticket store, as a proposal (§11) |
 | Receipt | what became of an action, under that same id | the observer, recording what the far store did | back from that store: `applied`, `refused` or `failed`, with its reference |
 
 `author` is a kind from a fixed vocabulary — `human`, `worker`, `observer` — and an
 optional free `ref` holding whatever identifies that author: a person's name, a
-ticket id, a run id. It is required on a question and an experiment because the
-three carry different authority, and a reader who cannot tell them apart reads a
-model's proposal as a person's decision. A ticket reference on either is
-provenance and is optional on both: many questions and experiments are written by
-hand with no ticket behind them.
+ticket id, a run id. It is required on a question, an experiment and every
+assessment but the observer's own, because the three carry different authority,
+and a reader who cannot tell them apart reads a model's proposal as a person's
+decision. An assessment with no `author` is the observer's. A ticket reference
+on a question or an experiment is provenance and is optional on both: many
+questions and experiments are written by hand with no ticket behind them.
+
+The three rows after the assessment are assessments too — one row each of an
+entry's history, under the same `question_id`, outcome vocabulary and request
+rules — and the row's kind is read from the fields it carries, never declared
+beside them. No `author`, or the observer's, with neither `corrects` nor
+`carried_over`, is the observer's own and must carry its bundle and no `facts`.
+`author.kind` `human` is a person's observation and carries `facts`, one
+statement each, its `at` as a timestamp, and no bundle: a bundle is what the observer read, and a
+person's statement dressed as one would look checkable in a way it is not.
+`corrects` makes it a correction, `{"observation": <n>, "wrong": "..."}`, with
+`n` the 1-based position of the row corrected; positions are stable because the
+history is append-only. `carried_over`, `{"source": "..."}`, makes it a
+carried-over reading, which carries its reading in `interpretation`, may carry
+`facts` or a bundle, and names an author of any kind — whoever first wrote it.
+Its `at` is the date it was written where it came from, a calendar date or a
+timestamp as written there, since a time of day the source never recorded is
+not the contract's to add. None of the three opens a finding, and a worker
+writes only a carried-over reading. Everything else is refused naming the
+field.
+
+Who writes each is the point of the split. A run writes only the observer's own
+assessment; one claiming a person, a correction or a carried source is refused
+(§10). A person's observation and a correction are a person's, and reach the
+notebook only through the door (§12), as a carried-over reading does — Mead's
+dated readings moving in from its file with their dates is the case it exists
+for. A declared `human` is not enough to make a row a person's: a person's
+`effect-observed` releases a ticket (§11), and the door is reachable by every
+hosted agent user, so the door records an observation or a correction only from
+the operator's own uid, which the kernel attests. A carried-over reading
+authorizes nothing and keeps the door's rule for everything else: any caller,
+its uid a record.
 
 A Question pins the subject of a standing entry. A Finding does the same for an
 entry opened by an unprompted assessment: it declares its own id, subject, question
@@ -105,6 +144,16 @@ explicit decision with a reason; a reopen takes a named condition
 (`re-activated`, `method-revised`, `contradicted`) and applies only to an
 answered question. A retired question does not come back: it was taken off the
 list deliberately, and a new question is the honest way back on.
+
+A person's observation goes through the same transition rules as the
+observer's assessment: their `effect-observed` or absence answers an observing
+question, and their `insufficient-evidence` closes nothing. The sufficiency
+rule below is a rule about a bundle and does not apply to a statement that
+carries none; the person is its authority. A correction and a carried-over
+reading are recorded and move no state. The first says what was wrong with a
+row the rules already applied, and re-applying them from it would rewrite what
+the notebook did on the day; the second was applied, if at all, by the store it
+came from.
 
 `effect-absent-with-sufficient-opportunity` is the outcome the rules guard
 hardest, because it is the one that says a change did not work. It requires a
@@ -211,7 +260,14 @@ The protocol in one place:
   composed before a decision it could not see never replaces that decision.
 - **Append-only observations.** Recording adds a row. A second reading of the
   same window is another row, never a correction of the first, and callers get a
-  copy of the history rather than a handle on it.
+  copy of the history rather than a handle on it. A correction is a row of its
+  own naming an earlier one, which must be on the entry and must not itself be a
+  correction: the row that was believed is the one corrected, so every
+  correction of it names that row. An entry's `corrected` lists, ascending, the
+  positions some correction names. It is derived from the rows every time the
+  entry is read — never stored, so marking a row corrected never edits it — and
+  shuttle derives it from an adapter's response rather than taking it, so an
+  adapter need not store it either.
 - **Duplicate request ids.** A repeat with the same content returns the original
   outcome; the same id with changed content is refused. The request id is checked
   before the revision, because a replay after an uncertain response necessarily
@@ -250,6 +306,11 @@ cache and is not rebuilt.
   moved the day after we shipped something is a different fact from one that
   moved on its own, and only the dated, append-only record tells them apart. An
   edited observation destroys exactly that distinction.
+- **A corrected observation is kept.** A reading that was wrong is corrected by
+  appending a correction that names it, not by editing it: the record has to
+  show what was believed on each day, and the day it stopped being believed is
+  the correction's own row. The earlier row stays exactly as recorded and is
+  marked corrected when read (§5).
 - **Entries are kept after retirement**, with the retirement's reason and the
   observations under it. A retired question is closed, not deleted; deleting it
   would remove the evidence for a decision somebody took.
@@ -469,7 +530,10 @@ an unavailable source or reading. The complete definition, notebook snapshot
 and collector response remain under `observer/`; `inputs/observer.json` is a
 separate bounded presentation. Bounding drops globally oldest history, then
 evidence from the end, then truncates exploratory prose, and records those
-losses rather than truncating JSON. Observer-run Read, Glob and Grep
+losses rather than truncating JSON. A dropped observation is presented as
+`null` in its place rather than spliced out: a row's position is what a
+correction and an entry's `corrected` name it by (§5), so every row left keeps
+the position it has in the notebook, and a `null` row is omitted history. Observer-run Read, Glob and Grep
 permissions cover only `inputs/`. Full definition, notebook and evidence
 artifacts remain in a sibling staging directory covered by the sandbox's
 `~/.shuttle` denial while the model runs, then move atomically under
@@ -480,9 +544,10 @@ default reads there.
 The model may write only `out/observer.json` and an optional `out/report.md`.
 The first carries required `silent`, plus Assessment and proposed Action
 arrays; a non-silent run configured for email also carries a printable
-`subject` of at most 120 characters. An assessment is accepted only when its
-evidence is byte-equivalent after canonical JSON encoding to a collector
-bundle. An action's evidence references must come from the same collection;
+`subject` of at most 120 characters. An assessment is accepted only when it is
+the observer's own — no author other than the observer, no `corrects`, no
+`carried_over` (§1) — and its evidence is byte-equivalent after canonical JSON
+encoding to a collector bundle. An action's evidence references must come from the same collection;
 what becomes of the action after the model exits is §11.
 Delivery retry reads the original output capabilities retained in `run.json`;
 turning email on in a later agent definition cannot promote a historical
@@ -625,6 +690,26 @@ widen it, target another ticket, or stand in for a person's decision.
 - **Retirement.** §6's ordering holds at the apply layer: a retirement ahead of
   the claim refuses it, and one behind it reports the action in flight while
   the write lands and settles under its own id, leaving the question retired.
+- **A person's observed event.** A person who saw the event a ticket is parked
+  on says so with an `observe` carrying `effect-observed` (§12), and that
+  authorizes the release a run's `effect-observed` would. tk has no finish
+  transition, so "release or finish" is the release today. The door applies it
+  right after the observation is recorded, on the run's terms: the standing
+  question's own ticket, the experiment's else the question's, in the
+  registration's configured `projects`; a `backlog` non-epic ticket with a
+  non-blank `waiting_on`, read once and held against that precondition; tk's
+  `release` under `observer-release`, so the release cap is the same cap. The
+  observation is the authority in place of a run's assessment, so there is no
+  claim or receipt in the notebook; the observation's own record is the
+  admission. The note is composed by shuttle from the validated observation —
+  author, entry, outcome, its `at`, the door request id and each fact as one
+  literal line — and reads no clock, so a repeat of the same door call replays
+  identically at tk, and that repeat is how a release that failed is tried
+  again. Another person's observation composes another note and is refused by
+  the ticket's receipt. A refused or failed release never undoes the
+  observation. Any other outcome from a person, every correction and every
+  carried-over reading authorize nothing: no ticket is read or written for
+  them.
 
 ## 12. The observer door
 
@@ -638,6 +723,9 @@ shuttle observer register [question.json] --request-id ID
 shuttle observer activate [experiment.json] --request-id ID
 shuttle observer retire <entry-id> --reason TEXT --request-id ID
 shuttle observer reopen <entry-id> --condition NAME --request-id ID
+shuttle observer observe [observation.json] --request-id ID
+shuttle observer correct [correction.json] --request-id ID
+shuttle observer carry [reading.json] --request-id ID
 shuttle observer list <name>
 ```
 
@@ -651,10 +739,18 @@ shuttle observer list <name>
   no other user connects. A socket it cannot take ends the daemon's start, so
   a machine with a held notebook needs the shared root `setup.sh` makes. The
   door is not part of the weft service and reaches nothing of it.
-- **Four operations.** `register` takes a Question payload, `activate` an
+- **Seven operations.** `register` takes a Question payload, `activate` an
   Experiment, `retire` an `entry_id` and `reason`, `reopen` an `entry_id` and
-  `condition`. Nothing else in the notebook is reachable: no entry, no
-  observation, no revision is ever read out through the door.
+  `condition`. `observe`, `correct` and `carry` each take an Assessment payload
+  of one kind (§1) and record it: `observe` a person's observation, `correct` a
+  correction, `carry` a carried-over reading. `observe` and `correct` are
+  taken only from the operator's uid (Attribution, below). The kind is the
+  operation's before anything else in the payload is judged, so a payload of another kind is refused
+  naming the field that makes it one — `corrects`, `carried_over`, or
+  `author.kind` for an `observe` not by a person. The observer's own assessment
+  has no operation: it is a run's alone. Nothing else in the notebook is
+  reachable: no entry, no observation, no revision is ever read out through the
+  door.
 - **The one read is local.** `shuttle observer list <name>` does not use the
   door. It is the operator's: it loads config.json, takes the registration
   named `<name>`, loads its definition and builds the notebook exactly as a run
@@ -683,11 +779,17 @@ shuttle observer list <name>
   that is safe because the request id is checked before the revision. A
   replay answers what the first attempt did, and changed content under the id
   is refused.
-- **The answer.** `{"status":"ok","answer":{...}}`. A register or reopen
-  answers `entry_id` and `state`; an activate adds `experiment_status`; a
-  retire answers `entry_id`, `reason` and `in_flight`, the actions already
-  claimed (§6). Nothing else from the notebook travels back: watching is one
-  direction (§4).
+- **The answer.** `{"status":"ok","answer":{...}}`. A register, reopen,
+  correct or carry answers `entry_id` and `state`; an activate adds
+  `experiment_status`; an observe adds `release`, what became of the release
+  §11 lets a person's `effect-observed` authorize: `{"status":"applied"}`,
+  `refused` with the rule's `reason`, or `failed` with the detail withheld to
+  the daemon log, each with the `ticket` it was decided on, or
+  `{"status":"none"}` for any other outcome. A retire answers
+  `entry_id`, `reason` and `in_flight`, the actions already claimed (§6).
+  Nothing else from the notebook travels back: watching is one direction (§4).
+  The release's ticket is the one exception, and it is the caller's own
+  question's provenance.
 - **Refusals.** `refused` carries §8's `exit` for its class and the `field`,
   and `shuttle observer` exits with it: 10 stale revision, 11 retired, 12 no
   entry, 14 request conflict. `invalid` is a call or payload the validators
@@ -699,6 +801,14 @@ shuttle observer list <name>
 - **Attribution.** The daemon reads the caller's uid from the kernel
   (`LOCAL_PEERCRED`) and logs one line per call to `daemon.log`: uid,
   operation, request id, entry id and outcome, with exit, field and error for
-  anything not ok. A call whose peer cannot be read is not applied, so off
-  darwin the door applies nothing. The uid is a record, not an authority:
-  the author is what the payload declares (§1).
+  anything not ok. An observe logs a line beside it with the request id, entry
+  id and the release's status, ticket and reason. A call whose peer cannot be
+  read is not applied, so off darwin the door applies nothing. For `register`,
+  `activate`, `retire`, `reopen` and `carry` the uid is a record, not an
+  authority: the author is what the payload declares (§1). For `observe` and
+  `correct` it is the authority. A person's observation carries the release
+  authority of §11, and the door's socket is open to the `weftagents` group,
+  so a hosted agent user could otherwise declare itself `human` and release a
+  ticket. Those two are applied only when the peer uid is the daemon's own —
+  the operator's — and any other peer is refused as `invalid` naming
+  `author.kind`, applying and releasing nothing.

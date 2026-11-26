@@ -157,6 +157,12 @@ func validateObserverOutput(outDir string, def *agentdef.Definition, state *obse
 		if assessment.Identity != state.Definition.Identity {
 			return nil, fmt.Errorf("output %s assessments[%d].identity does not match configured observer", observerOutputFile, i)
 		}
+		// A run writes the observer's own reading and nothing else: a person's
+		// observation, a correction and a carried-over reading arrive through
+		// the door (§12), never from model output claiming to be one.
+		if kind := assessment.Kind(); kind != observercontract.ObservationAssessment {
+			return nil, fmt.Errorf("output %s assessments[%d] is a %s; a run records only the observer's own assessment", observerOutputFile, i, kind)
+		}
 		if assessment.Finding == nil && !entryIDs[assessment.QuestionID] {
 			return nil, fmt.Errorf("output %s assessments[%d].question_id %q was not in the selected notebook snapshot", observerOutputFile, i, assessment.QuestionID)
 		}

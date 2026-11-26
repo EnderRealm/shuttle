@@ -20,15 +20,30 @@ import (
 	"time"
 )
 
-// The door's operations: the four ways a question's author reaches a notebook
-// Shuttle holds (docs/observer-contract.md §12). Nothing else in the notebook
-// is reachable through it.
+// The door's operations: the ways an author reaches a notebook Shuttle holds
+// (docs/observer-contract.md §12). Observe, correct and carry each record one
+// observation of their own kind; nothing else in the notebook is reachable
+// through it.
 const (
 	DoorRegister = "register"
 	DoorActivate = "activate"
 	DoorRetire   = "retire"
 	DoorReopen   = "reopen"
+	DoorObserve  = "observe"
+	DoorCorrect  = "correct"
+	DoorCarry    = "carry"
 )
+
+// doorKinds is the one observation kind each recording operation records.
+var doorKinds = map[string]string{
+	DoorObserve: ObservationPerson,
+	DoorCorrect: ObservationCorrection,
+	DoorCarry:   ObservationCarried,
+}
+
+// DoorReleaseNone is the release an observe answers when its observation
+// authorizes none. The others are the receipt outcomes.
+const DoorReleaseNone = "none"
 
 // Door response statuses. Refused carries §8's exit status for the sentinel
 // refusal; invalid is a payload or call the validators refused, naming the
@@ -87,14 +102,25 @@ type DoorResponse struct {
 	Answer json.RawMessage `json:"answer,omitempty"`
 }
 
-// DoorEntry is the whole answer to a register, activate or reopen. Watching is
-// one direction: the caller learns the id and state of the entry it wrote and
-// nothing else the notebook holds — no observations, no other entry, no
-// revision.
+// DoorEntry is the whole answer to a register, activate, reopen or recorded
+// observation. Watching is one direction: the caller learns the id and state
+// of the entry it wrote and nothing else the notebook holds — no
+// observations, no other entry, no revision. An observe adds what became of
+// the release it may authorize.
 type DoorEntry struct {
-	EntryID          string `json:"entry_id"`
-	State            string `json:"state"`
-	ExperimentStatus string `json:"experiment_status,omitempty"`
+	EntryID          string       `json:"entry_id"`
+	State            string       `json:"state"`
+	ExperimentStatus string       `json:"experiment_status,omitempty"`
+	Release          *DoorRelease `json:"release,omitempty"`
+}
+
+// DoorRelease is what became of the release a person's observation may
+// authorize: applied, refused or failed with the reason, or none when the
+// observation authorizes none. Ticket is the ticket it was decided on.
+type DoorRelease struct {
+	Status string `json:"status"`
+	Ticket string `json:"ticket,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // DoorRetirement is the answer to a retire: the entry, the reason recorded and
@@ -106,12 +132,26 @@ type DoorRetirement struct {
 	InFlight []string `json:"in_flight"`
 }
 
-// Door serves the four operations to callers that cannot open the notebook's
+// Door serves its operations to callers that cannot open the notebook's
 // files: a worker in a hosted slot, a /work run, a person. Notebook resolves
 // the notebook Shuttle holds for an identity, refusing one no registration
 // holds; Log receives one line per request.
+//
+// Release applies the release a person's effect-observed authorizes (§11),
+// called after the observe is recorded — a replay included, so a release that
+// failed is tried again by repeating the call — with the entry as recorded,
+// the observation and the request id. It lives outside the contract package
+// because the ticket store is the runner's; nil applies none and says so.
+//
+// Operator is the uid observe and correct are applied for, the operator's
+// own: a person's observation carries release authority, and the door is
+// reachable by every hosted agent user, so the author a payload declares
+// cannot be what makes it a person's. Every other operation takes the peer
+// uid as a record only.
 type Door struct {
 	Notebook func(Identity) (Held, error)
+	Release  func(entry *Entry, observation *Assessment, requestID string) DoorRelease
+	Operator int
 	Log      *log.Logger
 }
 
@@ -238,7 +278,7 @@ func (d Door) handle(ctx context.Context, conn *net.UnixConn) {
 		peer = strconv.Itoa(uid)
 		call, err = readDoorCall(conn)
 		if err == nil {
-			entryID, resp, detail = d.apply(ctx, call)
+			entryID, resp, detail = d.apply(ctx, call, uid)
 		} else {
 			resp = doorFailure(err)
 		}
@@ -300,12 +340,16 @@ var doorTakes = map[string][]string{
 	DoorActivate: {"payload"},
 	DoorRetire:   {"entry_id", "reason"},
 	DoorReopen:   {"entry_id", "condition"},
+	DoorObserve:  {"payload"},
+	DoorCorrect:  {"payload"},
+	DoorCarry:    {"payload"},
 }
 
 func (c DoorCall) check() error {
 	takes, ok := doorTakes[c.Operation]
 	if !ok {
-		return fieldErr("operation", "%q, one of %s, %s, %s, %s", c.Operation, DoorRegister, DoorActivate, DoorRetire, DoorReopen)
+		return fieldErr("operation", "%q, one of %s, %s, %s, %s, %s, %s, %s", c.Operation,
+			DoorRegister, DoorActivate, DoorRetire, DoorReopen, DoorObserve, DoorCorrect, DoorCarry)
 	}
 	for _, carried := range []struct {
 		field string
@@ -335,15 +379,19 @@ func (c DoorCall) check() error {
 	return nil
 }
 
-// apply validates the call, resolves the notebook for the identity it is
-// qualified for and applies the operation at that notebook's current
-// revision. It returns the entry id for the log beside the response, and the
-// error behind the response when the response withholds its detail.
-func (d Door) apply(ctx context.Context, call DoorCall) (string, DoorResponse, error) {
+// apply validates the call from the peer uid, resolves the notebook for the
+// identity it is qualified for and applies the operation at that notebook's
+// current revision. It returns the entry id for the log beside the response,
+// and the error behind the response when the response withholds its detail.
+func (d Door) apply(ctx context.Context, call DoorCall, uid int) (string, DoorResponse, error) {
 	// Everything before the notebook is reached judges only what the caller
 	// sent, so its refusals travel back whole and name the field.
 	if err := call.check(); err != nil {
 		return "", doorFailure(err), nil
+	}
+	if (call.Operation == DoorObserve || call.Operation == DoorCorrect) && uid != d.Operator {
+		return "", doorFailure(fieldErr("author.kind", "%s records a person's observation, which only the operator's own uid may record; peer uid %d is not the operator's",
+			call.Operation, uid)), nil
 	}
 	requestID := call.Request.RequestID
 	switch call.Operation {
@@ -379,6 +427,45 @@ func (d Door) apply(ctx context.Context, call DoorCall) (string, DoorResponse, e
 			return exp.QuestionID, notebookFailure(err), err
 		}
 		return exp.QuestionID, doorAnswer(DoorEntry{EntryID: e.ID, State: e.State, ExperimentStatus: e.ExperimentStatus}), nil
+	case DoorObserve, DoorCorrect, DoorCarry:
+		// The kind is the operation's before anything else is judged, so a
+		// person's payload missing its author is told so rather than held to
+		// the observer's rules.
+		a := &Assessment{}
+		if err := decode(call.Payload, a); err != nil {
+			return "", doorFailure(err), nil
+		}
+		if err := checkDoorKind(call.Operation, a); err != nil {
+			return a.EntryID(), doorFailure(err), nil
+		}
+		if err := a.validate(); err != nil {
+			return a.EntryID(), doorFailure(err), nil
+		}
+		held, err := d.Notebook(a.Identity)
+		if err != nil {
+			return a.EntryID(), notHeld(a.Identity, "identity"), err
+		}
+		e, err := atCurrentRevision(ctx, held, requestID, func(req Request) (*Entry, error) {
+			return held.Record(ctx, req, a)
+		})
+		if err != nil {
+			return a.EntryID(), notebookFailure(err), err
+		}
+		answer := DoorEntry{EntryID: e.ID, State: e.State}
+		if call.Operation == DoorObserve {
+			release := d.release(e, a, requestID)
+			// The release's outcome never undoes the observation: it is
+			// answered and logged beside it, and repeating the call retries it.
+			d.Log.Printf("observer door: request=%q entry=%q release=%s ticket=%q reason=%q",
+				requestID, e.ID, release.Status, release.Ticket, release.Reason)
+			if release.Status == ReceiptFailed {
+				// A failure's text can name the operator's definition files or
+				// the ticket store's paths; the log line above carries it.
+				release.Reason = doorWithheld
+			}
+			answer.Release = &release
+		}
+		return e.ID, doorAnswer(answer), nil
 	case DoorRetire:
 		identity, err := entryIdentity(call.EntryID)
 		if err != nil {
@@ -415,6 +502,40 @@ func (d Door) apply(ctx context.Context, call DoorCall) (string, DoorResponse, e
 		}
 		return call.EntryID, doorAnswer(DoorEntry{EntryID: e.ID, State: e.State}), nil
 	}
+}
+
+// checkDoorKind holds a recording operation to the one observation kind it
+// records, naming the field that makes the payload another kind.
+func checkDoorKind(operation string, a *Assessment) error {
+	want := doorKinds[operation]
+	if kind := a.Kind(); kind == want {
+		return nil
+	}
+	switch {
+	case a.Corrects != nil:
+		return fieldErr("corrects", "not taken by %s; a correction is recorded by %s", operation, DoorCorrect)
+	case a.CarriedOver != nil:
+		return fieldErr("carried_over", "not taken by %s; a carried-over reading is recorded by %s", operation, DoorCarry)
+	case want == ObservationPerson:
+		return fieldErr("author.kind", "required %s: %s records a person's observation; a run records the observer's", AuthorHuman, operation)
+	case want == ObservationCorrection:
+		return fieldErr("corrects", "required: the observation corrected and what was wrong with it")
+	default:
+		return fieldErr("carried_over", "required: the source the reading was first recorded in")
+	}
+}
+
+// release is what becomes of the release a person's observation may
+// authorize. Only effect-observed — the event the ticket waits on occurred —
+// can authorize one; any other outcome reads and writes no ticket.
+func (d Door) release(e *Entry, a *Assessment, requestID string) DoorRelease {
+	if a.Outcome != OutcomeEffectObserved {
+		return DoorRelease{Status: DoorReleaseNone}
+	}
+	if d.Release == nil {
+		return DoorRelease{Status: ReceiptFailed, Reason: "this door applies no release"}
+	}
+	return d.Release(e, a, requestID)
 }
 
 // entryIdentity is the identity an entry id is qualified for. The notebook

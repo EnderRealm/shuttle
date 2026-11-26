@@ -283,6 +283,15 @@ func heldNotebook(home string, identity observercontract.Identity) (observercont
 // Any other identity is refused, with the reason a registration's definition
 // could not be read beside it, since that may be why none names it.
 func HeldNotebook(home string, cfg *config.Config, identity observercontract.Identity) (observercontract.Held, error) {
+	if _, err := heldRegistration(cfg, identity); err != nil {
+		return observercontract.Held{}, err
+	}
+	return heldNotebook(home, identity)
+}
+
+// heldRegistration is the held_notebook registration whose definition names
+// identity, refusing it as HeldNotebook does.
+func heldRegistration(cfg *config.Config, identity observercontract.Identity) (config.Observer, error) {
 	var unread []error
 	for _, name := range slices.Sorted(maps.Keys(cfg.Observers)) {
 		registration := cfg.Observers[name]
@@ -295,10 +304,10 @@ func HeldNotebook(home string, cfg *config.Config, identity observercontract.Ide
 			continue
 		}
 		if definition.Identity == identity {
-			return heldNotebook(home, identity)
+			return registration, nil
 		}
 	}
-	return observercontract.Held{}, errors.Join(append([]error{fmt.Errorf(
+	return config.Observer{}, errors.Join(append([]error{fmt.Errorf(
 		"%s/%s: no held_notebook observer registration names it", identity.Domain, identity.Observer)}, unread...)...)
 }
 
@@ -624,12 +633,23 @@ func boundPresentation(definition *observerDefinition, snapshot observerSnapshot
 	return presentation, nil
 }
 
+// removeOldestObservation drops the globally oldest presented observation by
+// putting null in its place. A row's 1-based position is what a correction
+// and an entry's corrected list name it by, so splicing it out would leave
+// both naming the row after it; a null row is omitted history.
 func removeOldestObservation(entries []*observercontract.Entry) bool {
 	entryIndex, observationIndex := -1, -1
 	var oldest time.Time
 	for i, entry := range entries {
 		for j, observation := range entry.Observations {
+			if observation == nil {
+				continue
+			}
 			at, err := time.Parse(time.RFC3339, observation.At)
+			if err != nil {
+				// A carried-over reading may be dated by its day alone.
+				at, err = time.Parse(time.DateOnly, observation.At)
+			}
 			if err != nil {
 				// Adapter responses were validated before presentation, so an
 				// invalid timestamp is unreachable. Keeping it is safer than
@@ -644,11 +664,9 @@ func removeOldestObservation(entries []*observercontract.Entry) bool {
 	if entryIndex == -1 {
 		return false
 	}
-	observations := entries[entryIndex].Observations
-	entries[entryIndex].Observations = append(
-		append([]*observercontract.Assessment(nil), observations[:observationIndex]...),
-		observations[observationIndex+1:]...,
-	)
+	observations := append([]*observercontract.Assessment(nil), entries[entryIndex].Observations...)
+	observations[observationIndex] = nil
+	entries[entryIndex].Observations = observations
 	return true
 }
 

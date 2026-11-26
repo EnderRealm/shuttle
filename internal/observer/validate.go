@@ -176,13 +176,22 @@ func validateEntry(e *Entry) error {
 		if a.Identity != e.Identity || a.EntryID() != e.ID {
 			return fieldErr(fmt.Sprintf("observations[%d]", i), "does not belong to entry %q", e.ID)
 		}
-		if a.Evidence.Subject != e.subject() {
+		if a.Evidence != nil && a.Evidence.Subject != e.subject() {
 			return fieldErr(fmt.Sprintf("observations[%d].evidence.subject", i),
 				"%s %s, the entry is about %s %s",
 				a.Evidence.Subject.Kind, a.Evidence.Subject.Instance,
 				e.subject().Kind, e.subject().Instance)
 		}
+		if a.Corrects != nil {
+			if err := checkCorrection(e.Observations[:i], a); err != nil {
+				return wrapField(fmt.Sprintf("observations[%d]", i), err)
+			}
+		}
 	}
+	// The mark is derived, so it is taken from the rows rather than from the
+	// adapter: an adapter need not store it, and one that stored it wrong
+	// cannot mark a row corrected that no correction names.
+	e.Corrected = corrected(e.Observations)
 	inFlight := make(map[string]bool, len(e.InFlight))
 	for i, id := range e.InFlight {
 		if err := checkQualified(fmt.Sprintf("in_flight[%d]", i), id, e.Identity); err != nil {

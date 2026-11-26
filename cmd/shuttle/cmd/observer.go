@@ -23,19 +23,32 @@ const observerCallTimeout = 5 * time.Minute
 
 var observerCmd = &cobra.Command{
 	Use:   "observer",
-	Short: "Register, activate, retire and reopen questions through the running Shuttle; list an observer's entries",
-	Long: `Hand a question, an experiment, a retirement or a reopen to the notebook
-Shuttle holds for an observer (docs/observer-contract.md §12). The call goes to
-the running daemon over its observer door, $SHUTTLE_OBSERVER_SOCKET or
-/Users/Shared/weft/observer/door.sock; the daemon validates it, applies it at
+	Short: "Register, activate, retire, reopen and record observations through the running Shuttle; list an observer's entries",
+	Long: `Hand a question, an experiment, a retirement, a reopen or an observation to
+the notebook Shuttle holds for an observer (docs/observer-contract.md §12). The
+call goes to the running daemon over its observer door, $SHUTTLE_OBSERVER_SOCKET
+or /Users/Shared/weft/observer/door.sock; the daemon validates it, applies it at
 the notebook's current revision and answers with the entry's id and state. No
-file under the state root is read by these four.
+file under the state root is read by any of them but list.
 
   shuttle observer register [question.json] --request-id ID
   shuttle observer activate [experiment.json] --request-id ID
   shuttle observer retire <entry-id> --reason TEXT --request-id ID
   shuttle observer reopen <entry-id> --condition NAME --request-id ID
+  shuttle observer observe [observation.json] --request-id ID
+  shuttle observer correct [correction.json] --request-id ID
+  shuttle observer carry [reading.json] --request-id ID
   shuttle observer list <name>
+
+observe records a person's observation: an outcome and the facts as they state
+them, by author.kind human. Its answer adds release, what became of the release
+an effect-observed authorizes on a ticket parked on the event: applied, refused
+or failed with the reason, or none. correct records a person's correction of an
+earlier observation, named by its 1-based position; the earlier one is kept and
+marked corrected. carry records a reading first written elsewhere, with its
+source and its original date. A correction and a carried reading move no state
+and authorize nothing. observe and correct are recorded only when called as the
+operator's own uid; any other caller is refused naming author.kind.
 
 list is the one read, and it is local and the operator's: it does not use the
 door, which reads nothing out. It reads the notebook of the observer registered
@@ -98,6 +111,39 @@ var observerReopenCmd = &cobra.Command{
 		return observerCall(cmd, observercontract.DoorCall{
 			Operation: observercontract.DoorReopen, EntryID: args[0], Condition: condition,
 		})
+	},
+}
+
+var observerObserveCmd = &cobra.Command{
+	Use:           "observe [observation.json]",
+	Short:         "Record a person's observation, releasing a ticket parked on an event they saw happen",
+	Args:          cobra.MaximumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return observerPayloadCall(cmd, args, observercontract.DoorObserve)
+	},
+}
+
+var observerCorrectCmd = &cobra.Command{
+	Use:           "correct [correction.json]",
+	Short:         "Record a person's correction of an earlier observation, keeping it marked corrected",
+	Args:          cobra.MaximumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return observerPayloadCall(cmd, args, observercontract.DoorCorrect)
+	},
+}
+
+var observerCarryCmd = &cobra.Command{
+	Use:           "carry [reading.json]",
+	Short:         "Record a reading carried over from another store, with its source and original date",
+	Args:          cobra.MaximumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return observerPayloadCall(cmd, args, observercontract.DoorCarry)
 	},
 }
 
@@ -171,7 +217,10 @@ func observerCall(cmd *cobra.Command, call observercontract.DoorCall) error {
 }
 
 func init() {
-	for _, sub := range []*cobra.Command{observerRegisterCmd, observerActivateCmd, observerRetireCmd, observerReopenCmd} {
+	for _, sub := range []*cobra.Command{
+		observerRegisterCmd, observerActivateCmd, observerRetireCmd, observerReopenCmd,
+		observerObserveCmd, observerCorrectCmd, observerCarryCmd,
+	} {
 		sub.Flags().String("request-id", "", "The id a repeat of this call is answered under")
 		observerCmd.AddCommand(sub)
 	}

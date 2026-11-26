@@ -337,13 +337,7 @@ func authorizeObserverAction(tickets *config.ObserverTickets, state *observerRun
 	if entry == nil {
 		return "the entry was opened by a finding in this run, not a standing question with a ticket"
 	}
-	provenance := ""
-	if entry.Question != nil {
-		provenance = entry.Question.Ticket
-	}
-	if entry.Experiment != nil && entry.Experiment.Ticket != "" {
-		provenance = entry.Experiment.Ticket
-	}
+	provenance := entryProvenance(entry)
 	if provenance == "" {
 		return "the entry has no ticket provenance"
 	}
@@ -378,6 +372,19 @@ func authorizeObserverAction(tickets *config.ObserverTickets, state *observerRun
 		return err.Error()
 	}
 	return ""
+}
+
+// entryProvenance is the ticket a standing question's actions may name: the
+// experiment's, else the question's.
+func entryProvenance(entry *observercontract.Entry) string {
+	provenance := ""
+	if entry.Question != nil {
+		provenance = entry.Question.Ticket
+	}
+	if entry.Experiment != nil && entry.Experiment.Ticket != "" {
+		provenance = entry.Experiment.Ticket
+	}
+	return provenance
 }
 
 func snapshotEntry(state *observerRunState, id string) *observercontract.Entry {
@@ -538,8 +545,7 @@ func (p *Pipeline) writeObserverTicket(store ticket.Store, runID string, identit
 		record.Outcome, record.Reason, record.At = observercontract.ReceiptFailed, fmt.Sprintf("unsupported action kind %q", action.Kind), stamp(p.now())
 		return
 	}
-	switch {
-	case err == nil:
+	if err == nil {
 		record.Outcome, record.Replayed, record.At = observercontract.ReceiptApplied, result.Replayed, result.Receipt.At
 		record.Ticket = action.Ticket
 		if action.Kind == observercontract.ActionTicketOpen {
@@ -548,18 +554,103 @@ func (p *Pipeline) writeObserverTicket(store ticket.Store, runID string, identit
 		}
 		record.Reference = record.Ticket + "@" + result.Receipt.At
 		return
-	case errors.Is(err, ticket.ErrConflict):
-		record.Outcome, record.Reason = observercontract.ReceiptRefused, "the ticket changed since it was read; re-read it before deciding again"
-	case errors.Is(err, ticket.ErrActionConflict) && action.Kind == observercontract.ActionTicketReopen:
-		record.Outcome, record.Reason = observercontract.ReceiptRefused, "the ticket was already reopened once by an observer"
-	case errors.Is(err, ticket.ErrActionConflict) && action.Kind == observercontract.ActionTicketRelease:
-		record.Outcome, record.Reason = observercontract.ReceiptRefused, "the ticket was already released once by an observer"
-	case errors.Is(err, ticket.ErrActionConflict), errors.Is(err, ticket.ErrTransitionNotPermitted):
-		record.Outcome, record.Reason = observercontract.ReceiptRefused, err.Error()
-	default:
-		record.Outcome, record.Reason = observercontract.ReceiptFailed, err.Error()
 	}
+	record.Outcome, record.Reason = tkWriteOutcome(action.Kind, err)
 	record.At = stamp(p.now())
+}
+
+// tkWriteOutcome is the receipt outcome and reason a failed tk write of an
+// action of kind is recorded with: a refusal by the ticket, or a failure.
+func tkWriteOutcome(kind string, err error) (string, string) {
+	switch {
+	case errors.Is(err, ticket.ErrConflict):
+		return observercontract.ReceiptRefused, "the ticket changed since it was read; re-read it before deciding again"
+	case errors.Is(err, ticket.ErrActionConflict) && kind == observercontract.ActionTicketReopen:
+		return observercontract.ReceiptRefused, "the ticket was already reopened once by an observer"
+	case errors.Is(err, ticket.ErrActionConflict) && kind == observercontract.ActionTicketRelease:
+		return observercontract.ReceiptRefused, "the ticket was already released once by an observer"
+	case errors.Is(err, ticket.ErrActionConflict), errors.Is(err, ticket.ErrTransitionNotPermitted):
+		return observercontract.ReceiptRefused, err.Error()
+	default:
+		return observercontract.ReceiptFailed, err.Error()
+	}
+}
+
+// ReleaseObserved applies the release a person's effect-observed authorizes,
+// for the observer door (docs/observer-contract.md §11, §12). The rules are a
+// run's: the entry's provenance ticket, in the registration's configured
+// projects, released under observerReleaseActionID through tk's release
+// transition, held against the precondition read here, and only while it is a
+// backlog non-epic ticket parked on a nonblank waiting_on. The observation is
+// the authority in place of a run's assessment. The note is composed from the
+// validated observation and the request id and reads no clock, so a repeat of
+// the same door call composes the same note and tk answers it as a replay;
+// another person's observation composes another and is refused by the
+// ticket's receipt, as a second observer release is.
+func ReleaseObserved(cfg *config.Config, entry *observercontract.Entry, observation *observercontract.Assessment, requestID string) observercontract.DoorRelease {
+	action := &observercontract.Action{
+		Kind: observercontract.ActionTicketRelease, QuestionID: entry.ID, Ticket: entryProvenance(entry),
+	}
+	refused := func(reason string) observercontract.DoorRelease {
+		return observercontract.DoorRelease{Status: observercontract.ReceiptRefused, Ticket: action.Ticket, Reason: reason}
+	}
+	failed := func(reason string) observercontract.DoorRelease {
+		return observercontract.DoorRelease{Status: observercontract.ReceiptFailed, Ticket: action.Ticket, Reason: reason}
+	}
+	registration, err := heldRegistration(cfg, entry.Identity)
+	if err != nil {
+		return failed(err.Error())
+	}
+	state := &observerRunState{Snapshot: observerSnapshot{Entries: []*observercontract.Entry{entry}}}
+	if reason := authorizeObserverAction(registration.Tickets, state, observation, 0, action); reason != "" {
+		return refused(reason)
+	}
+	tk, err := tkconfig.Load(cfg.Paths.TKConfig)
+	if err != nil {
+		return failed("tk config: " + err.Error())
+	}
+	identity := entry.Identity
+	store := ticket.WithSource(ticket.NewMultiStore(tk.TicketsRoot()), "observer-door:"+identity.Domain+"/"+identity.Observer)
+	t, err := store.Get(action.Ticket)
+	if err != nil {
+		return failed("read ticket: " + err.Error())
+	}
+	if reason := releasePrecondition(action, t); reason != "" {
+		return refused(reason)
+	}
+	_, err = ticket.ApplyAction(store, ticket.ActionRequest{
+		ID: action.Ticket, ActionID: observerReleaseActionID, Precondition: t.Precondition(),
+		Note: personReleaseNote(entry, observation, requestID), Transition: ticket.TransitionRelease,
+	})
+	if err != nil {
+		outcome, reason := tkWriteOutcome(action.Kind, err)
+		return observercontract.DoorRelease{Status: outcome, Ticket: action.Ticket, Reason: reason}
+	}
+	return observercontract.DoorRelease{Status: observercontract.ReceiptApplied, Ticket: action.Ticket}
+}
+
+// personReleaseNote is the release note for a person's observation, composed
+// from its validated fields: whose it is, the entry, the outcome and its time,
+// the door request it came in under, and the facts as stated. Each fact is
+// one literal line, so none can open a heading, a note delimiter or anything
+// else tk's format reads as structure.
+func personReleaseNote(entry *observercontract.Entry, observation *observercontract.Assessment, requestID string) string {
+	who := "a person"
+	if ref := singleLine(observation.Author.Ref); ref != "" {
+		who = ref
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Observed by %s (%s) on %s: %s at %s (observer door request %s)\n\n",
+		who, observation.Author.Kind, singleLine(entry.ID), observation.Outcome, singleLine(observation.At), singleLine(requestID))
+	if observation.Interpretation != "" {
+		b.WriteString(inertProse(observation.Interpretation))
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Facts:\n")
+	for _, fact := range observation.Facts {
+		fmt.Fprintf(&b, "- %s\n", singleLine(fact))
+	}
+	return b.String()
 }
 
 // discoveryTarget decides, before the claim, what a discovery's write is: a

@@ -1,0 +1,18 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "shuttle",
+    "domain": "harness"
+  },
+  "question_id": "harness/shuttle/days-repeating",
+  "author": {
+    "kind": "human",
+    "ref": "steve"
+  },
+  "outcome": "effect-observed",
+  "facts": [
+    "The 2026-09-09 report's headline names the ledger; the 2026-09-08 report's named the sandbox.",
+    "The 2026-09-10 report's headline names delivery, which neither earlier report led with."
+  ],
+  "at": "2026-09-10T07:40:00-07:00"
+}

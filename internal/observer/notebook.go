@@ -174,28 +174,71 @@ func (m *Memory) Record(req Request, a *Assessment) (*Entry, error) {
 	}
 	// The reading has to be of the entry's subject. Nothing downstream checks
 	// this for a standing question, a finding, or an insufficient-evidence
-	// outcome, so a reading of another instance would file silently here.
+	// outcome, so a reading of another instance would file silently here. A
+	// person's observation carries no bundle to check.
 	subject := e.subject()
-	if a.Evidence.Subject != subject {
+	if a.Evidence != nil && a.Evidence.Subject != subject {
 		return nil, fieldErr("evidence.subject", "%s %s, the entry is about %s %s", a.Evidence.Subject.Kind, a.Evidence.Subject.Instance, subject.Kind, subject.Instance)
 	}
-	if err := CheckRequirements(e, a); err != nil {
-		return nil, err
+	// §3's sufficiency rule is a rule about the observer's bundle. A person's
+	// statement has none to hold to it, and a correction or a carried-over
+	// reading moves nothing for it to guard.
+	if a.Kind() == ObservationAssessment {
+		if err := CheckRequirements(e, a); err != nil {
+			return nil, err
+		}
 	}
-	state, err := TransitionFrom(e.State, a.Outcome)
-	if err != nil {
-		return nil, err
+	if a.Kind() == ObservationCorrection {
+		if err := checkCorrection(e.Observations, a); err != nil {
+			return nil, err
+		}
+	}
+	state := e.State
+	if a.movesState() {
+		if state, err = TransitionFrom(e.State, a.Outcome); err != nil {
+			return nil, err
+		}
 	}
 	if opened {
 		m.entries[e.ID] = e
 	}
-	// Append-only: a second reading of the same window is another row, never a
-	// correction of the first, and the row is the notebook's copy of it.
+	// Append-only: a second reading of the same window is another row, and a
+	// correction is another row naming the one it corrects; neither edits the
+	// first, and the row is the notebook's copy of it.
 	e.Observations = append(e.Observations, a.clone())
 	e.State = state
 	stored := &applied{entry: snapshot(e)}
 	m.commit(req, "record", a, stored)
 	return entryOf(stored), nil
+}
+
+// checkCorrection holds a correction to an observation recorded before it. A
+// correction of a correction is refused: the row that was believed is the one
+// corrected, and every correction of it names that row, so the mark on it is
+// the whole account of what was found wrong.
+func checkCorrection(earlier []*Assessment, a *Assessment) error {
+	n := a.Corrects.Observation
+	if n < 1 || n > len(earlier) {
+		return fieldErr("corrects.observation", "%d, the entry holds %d observations before it", n, len(earlier))
+	}
+	if target := earlier[n-1]; target.Corrects != nil {
+		return fieldErr("corrects.observation", "%d is itself a correction; correct observation %d, the one it names", n, target.Corrects.Observation)
+	}
+	return nil
+}
+
+// corrected is the 1-based positions, ascending, of the observations a later
+// correction names. It is derived from the rows whenever an entry is read and
+// never stored on its own, so marking a row corrected never edits it.
+func corrected(observations []*Assessment) []int {
+	var out []int
+	for _, a := range observations {
+		if a.Corrects != nil && !slices.Contains(out, a.Corrects.Observation) {
+			out = append(out, a.Corrects.Observation)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // subject is the one path from either entry shape to the instance its
@@ -507,6 +550,7 @@ func snapshot(e *Entry) *Entry {
 			out.Observations[i] = a.clone()
 		}
 	}
+	out.Corrected = corrected(out.Observations)
 	return &out
 }
 

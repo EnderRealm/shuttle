@@ -687,6 +687,48 @@ func TestObserverReleaseAppliesOnEffectObserved(t *testing.T) {
 	}
 }
 
+func TestObserverRunRecordsOnlyTheObserversAssessment(t *testing.T) {
+	answer := observedAnswer(t)
+	person := harnessAssessment(t, "assessment-person.json")
+	correction := harnessAssessment(t, "assessment-correction.json")
+	carried := *answer
+	carried.Author = &observercontract.Author{Kind: observercontract.AuthorObserver}
+	carried.CarriedOver = &observercontract.CarriedOver{Source: "~/.shuttle/observer/readings.toml#days-repeating"}
+	for _, test := range []struct {
+		name string
+		row  *observercontract.Assessment
+	}{
+		{name: "a person's observation", row: person},
+		{name: "a correction", row: correction},
+		{name: "a carried-over reading", row: &carried},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+			to.park(t, nil)
+			parked, err := os.ReadFile(to.ticketFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release := proposal(to.question.Identity, "release", observercontract.ActionTicketRelease, to.question.ID, to.ticketID,
+				"The gate the ticket waited on was met.", answer.Evidence.Sources[:1])
+			run, _, err := to.run(t, silentManifest([]any{test.row}, []any{release}))
+			if err == nil || !strings.Contains(err.Error(), "a run records only the observer's own assessment") {
+				t.Fatalf("run = %v, want the row refused as not the observer's own", err)
+			}
+			row, err := to.f.store.Get(run.ID)
+			if err != nil || row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Output {
+				t.Fatalf("row = %+v, %v, want failed output", row, err)
+			}
+			if n := len(to.entry(t, to.question.ID).Observations); n != 0 {
+				t.Fatalf("%d observations recorded, want none", n)
+			}
+			if after, err := os.ReadFile(to.ticketFile); err != nil || string(after) != string(parked) {
+				t.Fatalf("ticket after the refused run = %s, %v, want it left parked as it was", after, err)
+			}
+		})
+	}
+}
+
 func TestObserverReleaseRefusals(t *testing.T) {
 	answer := observedAnswer(t)
 	absent := harnessAssessment(t, "assessment.json")

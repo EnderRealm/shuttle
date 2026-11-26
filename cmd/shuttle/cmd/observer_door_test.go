@@ -56,6 +56,14 @@ type doorEnv struct {
 
 func startObserverDoor(t *testing.T) *doorEnv {
 	t.Helper()
+	return startObserverDoorWith(t, "")
+}
+
+// startObserverDoorWith is startObserverDoor whose registration, when
+// tkConfig names a tk config, carries a ticket write scope over its shuttle
+// project.
+func startObserverDoorWith(t *testing.T, tkConfig string) *doorEnv {
+	t.Helper()
 	shuttleEnv(t)
 	home := os.Getenv("SHUTTLE_HOME")
 	// os.TempDir() rather than t.TempDir(): the socket path has to fit the
@@ -77,7 +85,12 @@ func startObserverDoor(t *testing.T) *doorEnv {
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	writeConfig(t, fmt.Sprintf(`{"observers": {"fixture": {"definition": %q, "held_notebook": true}}}`, definition))
+	if tkConfig == "" {
+		writeConfig(t, fmt.Sprintf(`{"observers": {"fixture": {"definition": %q, "held_notebook": true}}}`, definition))
+	} else {
+		writeConfig(t, fmt.Sprintf(`{"paths": {"tk_config": %q}, "observers": {"fixture": {"definition": %q, "held_notebook": true,
+  "tickets": {"projects": ["shuttle"], "discovery_project": "shuttle", "max_discoveries": 0}}}}`, tkConfig, definition))
+	}
 
 	logs := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())

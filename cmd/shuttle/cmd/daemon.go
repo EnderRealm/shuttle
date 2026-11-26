@@ -56,7 +56,8 @@ two run workers active across agents.
 When an observer registration names held_notebook, the daemon also serves the
 observer door that shuttle observer calls (docs/observer-contract.md §12), at
 $SHUTTLE_OBSERVER_SOCKET or /Users/Shared/weft/observer/door.sock, logging
-each call's peer uid, operation, entry and outcome.
+each call's peer uid, operation, entry and outcome, and what became of the
+release a person's observed event authorizes.
 
 An error that ends the daemon before its loop is running is recorded in
 ~/.shuttle/daemon-start-failure until a start succeeds. The same error again
@@ -178,7 +179,11 @@ exits 1 without printing it a second time; shuttle status shows the record.`,
 				Notebook: func(identity observercontract.Identity) (observercontract.Held, error) {
 					return runner.HeldNotebook(home, cfg, identity)
 				},
-				Log: logger,
+				Release: func(entry *observercontract.Entry, observation *observercontract.Assessment, requestID string) observercontract.DoorRelease {
+					return runner.ReleaseObserved(cfg, entry, observation, requestID)
+				},
+				Operator: doorOperator(),
+				Log:      logger,
 			}
 			ch := make(chan error, 1)
 			doorErr = ch
@@ -245,6 +250,10 @@ exits 1 without printing it a second time; shuttle status shows the record.`,
 func init() {
 	rootCmd.AddCommand(daemonCmd)
 }
+
+// doorOperator is the uid the observer door records a person's observation
+// for: the daemon's own, which is the operator's. A test stands in another.
+var doorOperator = os.Getuid
 
 // holdsNotebooks reports whether any observer registration names the notebook
 // Shuttle holds, which is what the observer door serves.

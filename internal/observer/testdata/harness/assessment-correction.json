@@ -1,0 +1,21 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "shuttle",
+    "domain": "harness"
+  },
+  "question_id": "harness/shuttle/days-repeating",
+  "author": {
+    "kind": "human",
+    "ref": "steve"
+  },
+  "outcome": "effect-observed",
+  "facts": [
+    "The 2026-09-06 report repeated its headline because it was a rerun I asked for, not a nightly report."
+  ],
+  "corrects": {
+    "observation": 1,
+    "wrong": "counted the 2026-09-06 rerun as a nightly report that repeated a headline"
+  },
+  "at": "2026-09-09T09:00:00-07:00"
+}

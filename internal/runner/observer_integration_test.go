@@ -812,9 +812,65 @@ func TestObserverBoundingRemovesGloballyOldestHistory(t *testing.T) {
 	if !removeOldestObservation(entries) {
 		t.Fatal("no observation removed")
 	}
-	if len(entries[0].Observations) != 1 || len(entries[1].Observations) != 1 ||
-		entries[1].Observations[0].At != "2026-09-03T00:00:00Z" {
-		t.Fatalf("entries = %+v", entries)
+	if len(entries[0].Observations) != 1 || len(entries[1].Observations) != 2 ||
+		entries[1].Observations[0] != nil || entries[1].Observations[1].At != "2026-09-03T00:00:00Z" {
+		t.Fatalf("entries = %+v, want the oldest row null in its place", entries)
+	}
+}
+
+func TestObserverBoundingKeepsCorrectedPositions(t *testing.T) {
+	question := harnessQuestion(t)
+	identity := question.Identity
+	insufficient := harnessAssessment(t, "assessment.json")
+	insufficient.Outcome = observercontract.OutcomeInsufficient
+	person := harnessAssessment(t, "assessment-person.json")
+	correction := harnessAssessment(t, "assessment-correction.json")
+	correction.Corrects.Observation = 2
+	correction.At = "2026-09-11T09:00:00-07:00"
+	notebook := observercontract.NewMemory()
+	if _, err := notebook.Register(observercontract.Request{Identity: identity, Revision: 0, RequestID: "ask"}, question); err != nil {
+		t.Fatal(err)
+	}
+	// The observer's reading on 2026-09-08 is the oldest row; the person's
+	// on 2026-09-10 is the one corrected, by the third.
+	for i, row := range []*observercontract.Assessment{insufficient, person, correction} {
+		if _, err := notebook.Record(observercontract.Request{Identity: identity, Revision: int64(i + 1), RequestID: fmt.Sprintf("record-%d", i)}, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry, err := notebook.Entry(question.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := &observerDefinition{ContractVersion: observerRunVersion, Revision: "r1", Identity: identity, Instructions: "Observe."}
+	collection := &validatedCollection{Status: "empty", Evidence: []*observercontract.Bundle{}}
+	snapshot := observerSnapshot{Revision: 4, Entries: []*observercontract.Entry{entry}}
+	whole, err := boundPresentation(definition, snapshot, collection, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.MarshalIndent(whole, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One byte short of the whole history forces exactly one row out.
+	presentation, err := boundPresentation(definition, snapshot, collection, len(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if presentation.OmittedHistory != 1 {
+		t.Fatalf("omitted %d rows, want 1", presentation.OmittedHistory)
+	}
+	presented := presentation.Entries[0]
+	if len(presented.Observations) != 3 || presented.Observations[0] != nil {
+		t.Fatalf("presented %d rows, first %+v; want three with the oldest null in its place", len(presented.Observations), presented.Observations[0])
+	}
+	named := presented.Observations[2].Corrects.Observation
+	if !slices.Equal(presented.Corrected, []int{2}) || named != 2 {
+		t.Fatalf("corrected = %v, the correction names %d; want both naming row 2", presented.Corrected, named)
+	}
+	if got := presented.Observations[named-1]; got == nil || got.Kind() != observercontract.ObservationPerson || got.At != person.At {
+		t.Fatalf("row %d = %+v, want the person's observation the correction named", named, got)
 	}
 }
 

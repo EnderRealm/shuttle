@@ -1,0 +1,18 @@
+{
+  "contract_version": "observer/v1",
+  "identity": {
+    "observer": "shuttle",
+    "domain": "harness"
+  },
+  "question_id": "harness/shuttle/days-repeating",
+  "author": {
+    "kind": "observer",
+    "ref": "shuttle"
+  },
+  "outcome": "insufficient-evidence",
+  "interpretation": "Two nightly reports ran before the question was asked; too few to say whether headlines repeat.",
+  "carried_over": {
+    "source": "~/.shuttle/observer/readings.toml#days-repeating"
+  },
+  "at": "2026-08-28"
+}

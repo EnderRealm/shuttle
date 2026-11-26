@@ -163,10 +163,18 @@ func (c CommandNotebook) Record(ctx context.Context, req Request, assessment *As
 		if err := validateAssessmentAgainstEntry(before, assessment); err != nil {
 			return nil, err
 		}
-		var err error
-		expectedState, err = TransitionFrom(before.State, assessment.Outcome)
-		if err != nil {
-			return nil, err
+		if assessment.Corrects != nil {
+			if err := checkCorrection(before.Observations, assessment); err != nil {
+				return nil, err
+			}
+		}
+		expectedState = before.State
+		if assessment.movesState() {
+			var err error
+			expectedState, err = TransitionFrom(before.State, assessment.Outcome)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	entry, err := c.entryMutation(ctx, "record", req, assessment)
@@ -199,7 +207,7 @@ func (c CommandNotebook) Record(ctx context.Context, req Request, assessment *As
 			return nil, fmt.Errorf("notebook record response state %q, transition from %q with %q requires %q",
 				entry.State, before.State, assessment.Outcome, expectedState)
 		}
-		if !exactTransition && assessment.Outcome != OutcomeInsufficient && entry.State != StateAnswered {
+		if !exactTransition && assessment.movesState() && assessment.Outcome != OutcomeInsufficient && entry.State != StateAnswered {
 			return nil, fmt.Errorf("notebook replay response state %q, conclusive assessment requires %q", entry.State, StateAnswered)
 		}
 		if !exactTransition && entry.State == StateRetired {
@@ -210,10 +218,13 @@ func (c CommandNotebook) Record(ctx context.Context, req Request, assessment *As
 }
 
 func validateAssessmentAgainstEntry(entry *Entry, assessment *Assessment) error {
-	if assessment.Evidence.Subject != entry.subject() {
+	if assessment.Evidence != nil && assessment.Evidence.Subject != entry.subject() {
 		return fieldErr("evidence.subject", "%s %s, the entry is about %s %s",
 			assessment.Evidence.Subject.Kind, assessment.Evidence.Subject.Instance,
 			entry.subject().Kind, entry.subject().Instance)
+	}
+	if assessment.Kind() != ObservationAssessment {
+		return nil
 	}
 	return CheckRequirements(entry, assessment)
 }

@@ -82,8 +82,12 @@ type Entry struct {
 	ExperimentStatus string        `json:"experiment_status,omitempty"`
 	State            string        `json:"state"`
 	Observations     []*Assessment `json:"observations"`
-	InFlight         []string      `json:"in_flight"`
-	Retirement       *Retirement   `json:"retirement,omitempty"`
+	// Corrected marks the observations a later correction names, by 1-based
+	// position. It is derived from Observations on every read, never stored,
+	// so the corrected row stays exactly as it was recorded.
+	Corrected  []int       `json:"corrected,omitempty"`
+	InFlight   []string    `json:"in_flight"`
+	Retirement *Retirement `json:"retirement,omitempty"`
 }
 
 // EntrySummary is one line of a notebook's listing: the entry, its state, who
@@ -146,7 +150,8 @@ func (r *Retirement) clone() *Retirement {
 //     with ErrStaleRevision and writes nothing.
 //   - Observations are append-only. Recording adds a row; it never edits or
 //     removes one, and a later reading of the same window is another row rather
-//     than a correction of the first.
+//     than a correction of the first. A correction is a row of its own naming
+//     the one it corrects, which is marked corrected when read and kept.
 //   - A duplicate request id returns the original outcome. Changed content
 //     under a request id already applied is refused with ErrRequestConflict.
 //     Request ids are scoped to the identity that issued them, so an adapter
@@ -183,8 +188,10 @@ type Notebook interface {
 	// measured against.
 	Activate(req Request, exp *Experiment) (*Entry, error)
 
-	// Record appends an assessment, applying the transition rules. An
-	// assessment carrying a finding opens the entry it names.
+	// Record appends an assessment, applying the transition rules to the
+	// observer's and a person's; a correction and a carried-over reading are
+	// appended and move no state. An assessment carrying a finding opens the
+	// entry it names.
 	Record(req Request, a *Assessment) (*Entry, error)
 
 	// Claim puts an action id in flight. It is what makes the action
