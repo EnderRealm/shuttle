@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -57,7 +58,10 @@ When an observer registration names held_notebook, the daemon also serves the
 observer door that shuttle observer calls (docs/observer-contract.md §12), at
 $SHUTTLE_OBSERVER_SOCKET or /Users/Shared/weft/observer/door.sock, logging
 each call's peer uid, operation, entry and outcome, and what became of the
-release a person's observed event authorizes.
+release a person's observed event authorizes. A write the door applies is
+pushed to the notebook's origin once it is answered, unless the registration
+is local-only; the push's outcome, a failure included, is logged, and a
+failed push is carried by the next.
 
 An error that ends the daemon before its loop is running is recorded in
 ~/.shuttle/daemon-start-failure until a start succeeds. The same error again
@@ -181,6 +185,9 @@ exits 1 without printing it a second time; shuttle status shows the record.`,
 				},
 				Release: func(entry *observercontract.Entry, observation *observercontract.Assessment, requestID string) observercontract.DoorRelease {
 					return runner.ReleaseObserved(cfg, entry, observation, requestID)
+				},
+				Push: func(ctx context.Context, identity observercontract.Identity) (string, error) {
+					return runner.PushHeldNotebook(ctx, home, cfg, identity)
 				},
 				Operator: doorOperator(),
 				Log:      logger,

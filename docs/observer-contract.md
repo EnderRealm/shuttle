@@ -242,9 +242,10 @@ under `~/.shuttle`), and it is never rebuilt from anywhere else:
   one-for-one history.
 - **Its own copy off the machine.** Nothing else under the state root has a copy
   off the Studio, so the repository's `origin`, when the operator adds one, is
-  pushed by the end of every observer run that reaches its model, and of every
-  reconciliation that writes to it. A `local-only` registration's notebook is
-  never pushed, whatever remote it has. A failed push is recorded in
+  pushed by the end of every observer run that reaches its model, of every
+  reconciliation that writes to it, and of every write the door applies
+  between runs (§12). A `local-only` registration's notebook is never pushed,
+  whatever remote it has. A failed push is recorded in
   `observer-result.json` as `notebook_push: failed` with the git error, and
   logged; it does not fail the run, since the commits are durable locally and
   the next push carries them.
@@ -790,6 +791,14 @@ shuttle observer list <name>
   Nothing else from the notebook travels back: watching is one direction (§4).
   The release's ticket is the one exception, and it is the caller's own
   question's provenance.
+- **Pushed once written.** A write the door applies — a replay of one
+  included — is pushed to the notebook's `origin` after the answer is written,
+  as the end of a run pushes it (§5), so a change made between runs does not
+  sit only on this machine until the next one. A notebook with no `origin`,
+  and a `local-only` registration's whatever its remote, is not pushed. A
+  failed push is logged and changes nothing: the write is committed and
+  answered, and the next push — the door's next write or the next run's end —
+  carries it. Nothing about the push travels back to the caller.
 - **Refusals.** `refused` carries §8's `exit` for its class and the `field`,
   and `shuttle observer` exits with it: 10 stale revision, 11 retired, 12 no
   entry, 14 request conflict. `invalid` is a call or payload the validators
@@ -802,13 +811,15 @@ shuttle observer list <name>
   (`LOCAL_PEERCRED`) and logs one line per call to `daemon.log`: uid,
   operation, request id, entry id and outcome, with exit, field and error for
   anything not ok. An observe logs a line beside it with the request id, entry
-  id and the release's status, ticket and reason. A call whose peer cannot be
-  read is not applied, so off darwin the door applies nothing. For `register`,
-  `activate`, `retire`, `reopen` and `carry` the uid is a record, not an
-  authority: the author is what the payload declares (§1). For `observe` and
-  `correct` it is the authority. A person's observation carries the release
-  authority of §11, and the door's socket is open to the `weftagents` group,
-  so a hosted agent user could otherwise declare itself `human` and release a
-  ticket. Those two are applied only when the peer uid is the daemon's own —
-  the operator's — and any other peer is refused as `invalid` naming
-  `author.kind`, applying and releasing nothing.
+  id and the release's status, ticket and reason, and an applied write one
+  with the request id, entry id and the push's outcome — `pushed`,
+  `nothing-to-push`, `no-remote`, `local-only`, or `failed` with the error. A
+  call whose peer cannot be read is not applied, so off darwin the door
+  applies nothing. For `register`, `activate`, `retire`, `reopen` and `carry`
+  the uid is a record, not an authority: the author is what the payload
+  declares (§1). For `observe` and `correct` it is the authority. A person's
+  observation carries the release authority of §11, and the door's socket is
+  open to the `weftagents` group, so a hosted agent user could otherwise
+  declare itself `human` and release a ticket. Those two are applied only when
+  the peer uid is the daemon's own — the operator's — and any other peer is
+  refused as `invalid` naming `author.kind`, applying and releasing nothing.

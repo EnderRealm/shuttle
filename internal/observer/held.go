@@ -19,11 +19,13 @@ import (
 	"shuttle/internal/gitenv"
 )
 
-// Held push outcomes. A failed push is the error Push returns.
+// Held push outcomes. A failed push is the error Push returns, and
+// HeldPushFailed is what its callers record for it.
 const (
 	HeldPushed        = "pushed"
 	HeldNoRemote      = "no-remote"
 	HeldNothingToPush = "nothing-to-push"
+	HeldPushFailed    = "failed"
 )
 
 const (
@@ -212,8 +214,14 @@ func (h Held) Reopen(ctx context.Context, req Request, entryID, condition string
 
 // Push pushes the notebook's branch to its origin remote. A repository with
 // no origin, or with no commit yet, has nothing to push and says which.
-// Push takes no lock: git reads the branch ref atomically, so a commit landing
-// from another process meanwhile is either in this push or in the next.
+//
+// Pushes are serialized on an exclusive flock of their own, on the sibling
+// Dir+".push.lock": two pushes reading the remote's ref at once would have the
+// later refused by receive-pack's old-value check, leaving its commit only
+// here. One that waited reads the branch after the push before it, so it
+// carries every commit. The mutation lock is not taken, so a slow remote never
+// holds a write; git reads the branch ref atomically, so a commit landing
+// meanwhile is either in this push or in the next.
 func (h Held) Push(ctx context.Context) (string, error) {
 	if err := h.checkDir(); err != nil {
 		return "", err
@@ -225,6 +233,15 @@ func (h Held) Push(ctx context.Context) (string, error) {
 	if !slices.Contains(strings.Fields(remotes), heldRemote) {
 		return HeldNoRemote, nil
 	}
+	lock, err := os.OpenFile(h.Dir+".push.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("notebook %s: %w", h.Dir, err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return "", fmt.Errorf("notebook %s: push lock: %w", h.Dir, err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	head, err := h.git(ctx, "for-each-ref", "--count=1", "refs/heads/"+heldBranch)
 	if err != nil {
 		return "", err

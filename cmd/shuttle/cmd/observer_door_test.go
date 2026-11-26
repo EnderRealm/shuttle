@@ -64,6 +64,13 @@ func startObserverDoor(t *testing.T) *doorEnv {
 // project.
 func startObserverDoorWith(t *testing.T, tkConfig string) *doorEnv {
 	t.Helper()
+	return startObserverDoorAs(t, tkConfig, "")
+}
+
+// startObserverDoorAs is startObserverDoorWith whose registration, when
+// dataPolicy is set, carries it.
+func startObserverDoorAs(t *testing.T, tkConfig, dataPolicy string) *doorEnv {
+	t.Helper()
 	shuttleEnv(t)
 	home := os.Getenv("SHUTTLE_HOME")
 	// os.TempDir() rather than t.TempDir(): the socket path has to fit the
@@ -85,11 +92,15 @@ func startObserverDoorWith(t *testing.T, tkConfig string) *doorEnv {
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	policy := ""
+	if dataPolicy != "" {
+		policy = fmt.Sprintf(`, "data_policy": %q`, dataPolicy)
+	}
 	if tkConfig == "" {
-		writeConfig(t, fmt.Sprintf(`{"observers": {"fixture": {"definition": %q, "held_notebook": true}}}`, definition))
+		writeConfig(t, fmt.Sprintf(`{"observers": {"fixture": {"definition": %q, "held_notebook": true%s}}}`, definition, policy))
 	} else {
-		writeConfig(t, fmt.Sprintf(`{"paths": {"tk_config": %q}, "observers": {"fixture": {"definition": %q, "held_notebook": true,
-  "tickets": {"projects": ["shuttle"], "discovery_project": "shuttle", "max_discoveries": 0}}}}`, tkConfig, definition))
+		writeConfig(t, fmt.Sprintf(`{"paths": {"tk_config": %q}, "observers": {"fixture": {"definition": %q, "held_notebook": true%s,
+  "tickets": {"projects": ["shuttle"], "discovery_project": "shuttle", "max_discoveries": 0}}}}`, tkConfig, definition, policy))
 	}
 
 	logs := &syncBuffer{}
@@ -632,4 +643,249 @@ func TestObserverRegisterNeedsNoStoreAccess(t *testing.T) {
 		t.Fatalf("commits = %s, want the one registration", count)
 	}
 	env.requireLog(t, fmt.Sprintf("uid=%d operation=\"register\" request=%q entry=%q outcome=ok", os.Getuid(), "from-a-slot", id))
+}
+
+// withRemote opens the notebook, which creates its repository, and adds remote
+// as its origin, as the operator does.
+func (e *doorEnv) withRemote(t *testing.T, remote string) {
+	t.Helper()
+	if _, err := e.held.Revision(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	git(t, e.held.Dir, "remote", "add", "origin", remote)
+}
+
+// bareRemote creates a bare repository at path to push to.
+func bareRemote(t *testing.T, path string) string {
+	t.Helper()
+	if out, err := exec.Command("git", "init", "--quiet", "--bare", path).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	return path
+}
+
+// awaitPush waits for the daemon log's push line for requestID and returns
+// it. The push follows the answer, so a caller holding the answer may not
+// see it logged yet.
+func (e *doorEnv) awaitPush(t *testing.T, requestID string) string {
+	t.Helper()
+	prefix := fmt.Sprintf("observer door: request=%q ", requestID)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		for _, line := range strings.Split(e.logs.String(), "\n") {
+			if i := strings.Index(line, prefix); i >= 0 && strings.Contains(line, " push=") {
+				return line[i:]
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no push logged for %s:\n%s", requestID, e.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestNotebookChangeOutsideRunIsPushed(t *testing.T) {
+	env := startObserverDoor(t)
+	remote := bareRemote(t, filepath.Join(t.TempDir(), "remote.git"))
+	env.withRemote(t, remote)
+	id := doorIdentity.Qualify("days-repeating")
+	for _, change := range []struct {
+		requestID string
+		stdin     string
+		args      []string
+	}{
+		{"ask", doorPayload(t, "question.json", nil), []string{"register"}},
+		{"live", doorPayload(t, "experiment.json", nil), []string{"activate"}},
+		{"seen", doorPayload(t, "assessment-person.json", nil), []string{"observe"}},
+		{"reopen", "", []string{"reopen", id, "--condition", observercontract.ReopenContradicted}},
+		{"retire", "", []string{"retire", id, "--reason", "the prompt was rewritten; the question no longer applies"}},
+	} {
+		if _, err := execObserver(t, change.stdin, append(change.args, "--request-id", change.requestID)...); err != nil {
+			t.Fatalf("%s: %v\n%s", change.args[0], err, env.logs.String())
+		}
+		want := fmt.Sprintf("observer door: request=%q entry=%q push=%s", change.requestID, id, observercontract.HeldPushed)
+		if line := env.awaitPush(t, change.requestID); line != want {
+			t.Fatalf("%s push logged %q, want %q", change.args[0], line, want)
+		}
+		if local, pushed := git(t, env.held.Dir, "rev-parse", "main"), git(t, remote, "rev-parse", "main"); local != pushed {
+			t.Fatalf("after %s the remote's main is %s, the notebook's %s", change.args[0], pushed, local)
+		}
+	}
+	if count := git(t, remote, "rev-list", "--count", "main"); count != "5" {
+		t.Fatalf("remote holds %s commits, want the five changes", count)
+	}
+	if state := env.entry(t, id).State; state != observercontract.StateRetired {
+		t.Fatalf("state = %s, want retired", state)
+	}
+}
+
+// holdPushes has the origin's receive-pack hold every push open until the
+// returned unblock is called, as a remote that stops answering would.
+func (e *doorEnv) holdPushes(t *testing.T) (unblock func()) {
+	t.Helper()
+	release := filepath.Join(t.TempDir(), "release")
+	receivePack := filepath.Join(t.TempDir(), "receive-pack")
+	if err := os.WriteFile(receivePack, []byte(fmt.Sprintf("#!/bin/sh\nwhile [ ! -e %q ]; do sleep 0.05; done\nexec git receive-pack \"$@\"\n", release)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git(t, e.held.Dir, "config", "remote.origin.receivepack", receivePack)
+	return func() {
+		if err := os.WriteFile(release, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestObserverDoorAnswersBeforePush(t *testing.T) {
+	env := startObserverDoor(t)
+	remote := bareRemote(t, filepath.Join(t.TempDir(), "remote.git"))
+	env.withRemote(t, remote)
+	unblock := env.holdPushes(t)
+
+	type result struct {
+		out string
+		err error
+	}
+	answered := make(chan result, 1)
+	go func() {
+		out, err := execObserver(t, doorPayload(t, "question.json", nil), "register", "--request-id", "ask")
+		answered <- result{out, err}
+	}()
+	select {
+	case got := <-answered:
+		if got.err != nil {
+			unblock()
+			t.Fatalf("register: %v\n%s", got.err, env.logs.String())
+		}
+		decodeAnswer(t, got.out, "entry_id", "state")
+	case <-time.After(10 * time.Second):
+		unblock()
+		<-answered
+		t.Fatalf("register was not answered while the push was held open:\n%s", env.logs.String())
+	}
+	if strings.Contains(env.logs.String(), "push=") {
+		unblock()
+		t.Fatalf("a push was logged before the remote answered:\n%s", env.logs.String())
+	}
+
+	unblock()
+	want := fmt.Sprintf("observer door: request=%q entry=%q push=%s", "ask", doorIdentity.Qualify("days-repeating"), observercontract.HeldPushed)
+	if line := env.awaitPush(t, "ask"); line != want {
+		t.Fatalf("push logged %q, want %q", line, want)
+	}
+	if local, pushed := git(t, env.held.Dir, "rev-parse", "main"), git(t, remote, "rev-parse", "main"); local != pushed {
+		t.Fatalf("the remote's main is %s, the notebook's %s", pushed, local)
+	}
+}
+
+func TestObserverDoorSerializesPushes(t *testing.T) {
+	env := startObserverDoor(t)
+	remote := bareRemote(t, filepath.Join(t.TempDir(), "remote.git"))
+	env.withRemote(t, remote)
+	unblock := env.holdPushes(t)
+	// Two writes back to back: the second is answered while the first's push
+	// is still talking to the remote, so both pushes are under way at once.
+	for _, change := range []struct {
+		requestID, stdin, operation string
+	}{
+		{"ask", doorPayload(t, "question.json", nil), "register"},
+		{"live", doorPayload(t, "experiment.json", nil), "activate"},
+	} {
+		if _, err := execObserver(t, change.stdin, change.operation, "--request-id", change.requestID); err != nil {
+			unblock()
+			t.Fatalf("%s: %v\n%s", change.operation, err, env.logs.String())
+		}
+	}
+	// Time for the second push to reach the remote, or its lock, before the
+	// remote answers either.
+	time.Sleep(500 * time.Millisecond)
+	unblock()
+	id := doorIdentity.Qualify("days-repeating")
+	for _, requestID := range []string{"ask", "live"} {
+		want := fmt.Sprintf("observer door: request=%q entry=%q push=%s", requestID, id, observercontract.HeldPushed)
+		if line := env.awaitPush(t, requestID); line != want {
+			t.Fatalf("push logged %q, want %q", line, want)
+		}
+	}
+	if local, pushed := git(t, env.held.Dir, "rev-parse", "main"), git(t, remote, "rev-parse", "main"); local != pushed {
+		t.Fatalf("the remote's main is %s, the notebook's %s", pushed, local)
+	}
+}
+
+func TestNotebookOutsideRunPushFailureKeepsWrite(t *testing.T) {
+	env := startObserverDoor(t)
+	// The origin names a repository that does not exist yet.
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	env.withRemote(t, remote)
+	id := doorIdentity.Qualify("days-repeating")
+	out, err := execObserver(t, doorPayload(t, "question.json", nil), "register", "--request-id", "ask")
+	if err != nil {
+		t.Fatalf("register: %v\n%s", err, env.logs.String())
+	}
+	// The answer is the write's, whatever became of the push.
+	answer := decodeAnswer(t, out, "entry_id", "state")
+	if answer["entry_id"] != id || answer["state"] != observercontract.StateObserving {
+		t.Fatalf("answer = %v, want %s observing", answer, id)
+	}
+	line := env.awaitPush(t, "ask")
+	if !strings.HasPrefix(line, fmt.Sprintf("observer door: request=%q entry=%q push=%s error=", "ask", id, observercontract.HeldPushFailed)) ||
+		!strings.Contains(line, "git push") || !strings.Contains(line, env.held.Dir) {
+		t.Fatalf("push logged %q, want it failed naming the notebook and the command", line)
+	}
+	if env.entry(t, id).State != observercontract.StateObserving || env.commits(t) != "1" {
+		t.Fatalf("the registration was not kept after the failed push")
+	}
+
+	// The remote comes back; the next write's push carries the first too.
+	bareRemote(t, remote)
+	if _, err := execObserver(t, doorPayload(t, "experiment.json", nil), "activate", "--request-id", "live"); err != nil {
+		t.Fatalf("activate: %v\n%s", err, env.logs.String())
+	}
+	want := fmt.Sprintf("observer door: request=%q entry=%q push=%s", "live", id, observercontract.HeldPushed)
+	if line := env.awaitPush(t, "live"); line != want {
+		t.Fatalf("push logged %q, want %q", line, want)
+	}
+	if local, pushed := git(t, env.held.Dir, "rev-parse", "main"), git(t, remote, "rev-parse", "main"); local != pushed {
+		t.Fatalf("the remote's main is %s, the notebook's %s", pushed, local)
+	}
+	if count := git(t, remote, "rev-list", "--count", "main"); count != "2" {
+		t.Fatalf("remote holds %s commits, want the registration and the activation", count)
+	}
+}
+
+func TestNotebookOutsideRunNeverPushesLocalOnly(t *testing.T) {
+	t.Run("no remote", func(t *testing.T) {
+		env := startObserverDoor(t)
+		id := doorIdentity.Qualify("days-repeating")
+		if _, err := execObserver(t, doorPayload(t, "question.json", nil), "register", "--request-id", "ask"); err != nil {
+			t.Fatalf("register: %v\n%s", err, env.logs.String())
+		}
+		want := fmt.Sprintf("observer door: request=%q entry=%q push=%s", "ask", id, observercontract.HeldNoRemote)
+		if line := env.awaitPush(t, "ask"); line != want {
+			t.Fatalf("push logged %q, want %q", line, want)
+		}
+		if remotes := git(t, env.held.Dir, "remote"); remotes != "" {
+			t.Fatalf("notebook remotes = %q, want none", remotes)
+		}
+	})
+
+	t.Run("local-only", func(t *testing.T) {
+		env := startObserverDoorAs(t, "", "local-only")
+		remote := bareRemote(t, filepath.Join(t.TempDir(), "remote.git"))
+		env.withRemote(t, remote)
+		id := doorIdentity.Qualify("days-repeating")
+		if _, err := execObserver(t, doorPayload(t, "question.json", nil), "register", "--request-id", "ask"); err != nil {
+			t.Fatalf("register: %v\n%s", err, env.logs.String())
+		}
+		want := fmt.Sprintf("observer door: request=%q entry=%q push=local-only", "ask", id)
+		if line := env.awaitPush(t, "ask"); line != want {
+			t.Fatalf("push logged %q, want %q", line, want)
+		}
+		if env.commits(t) != "1" {
+			t.Fatalf("the registration was not written")
+		}
+		if refs := git(t, remote, "for-each-ref"); refs != "" {
+			t.Fatalf("remote holds %s, want nothing pushed", refs)
+		}
+	})
 }

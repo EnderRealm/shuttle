@@ -143,6 +143,13 @@ type DoorRetirement struct {
 // the observation and the request id. It lives outside the contract package
 // because the ticket store is the runner's; nil applies none and says so.
 //
+// Push sends the notebook for identity off the machine after a write the door
+// applied — a replay included, so a push that failed is tried again by the
+// next write or the next run — returning Held.Push's outcome or the runner's
+// own. It runs after the answer is written: the write stands whatever the
+// push does, and the caller never waits on the remote. Its outcome is logged
+// and never answered. nil pushes nothing.
+//
 // Operator is the uid observe and correct are applied for, the operator's
 // own: a person's observation carries release authority, and the door is
 // reachable by every hosted agent user, so the author a payload declares
@@ -151,6 +158,7 @@ type DoorRetirement struct {
 type Door struct {
 	Notebook func(Identity) (Held, error)
 	Release  func(entry *Entry, observation *Assessment, requestID string) DoorRelease
+	Push     func(ctx context.Context, identity Identity) (string, error)
 	Operator int
 	Log      *log.Logger
 }
@@ -309,6 +317,32 @@ func (d Door) handle(ctx context.Context, conn *net.UnixConn) {
 		line += fmt.Sprintf(" reply=%q", err.Error())
 	}
 	d.Log.Print(line)
+	if resp.Status == DoorOK {
+		// The caller reads to EOF, so the connection is closed before the
+		// push: a slow remote must not hold the answer. The deferred Close
+		// is then a no-op.
+		conn.Close()
+		d.push(ctx, call.Request.RequestID, entryID)
+	}
+}
+
+// push pushes the notebook an applied write went to and logs the outcome. The
+// entry id of an applied write is qualified for that notebook's identity: the
+// notebook refused it otherwise.
+func (d Door) push(ctx context.Context, requestID, entryID string) {
+	if d.Push == nil {
+		return
+	}
+	status := ""
+	identity, err := entryIdentity(entryID)
+	if err == nil {
+		status, err = d.Push(ctx, identity)
+	}
+	if err != nil {
+		d.Log.Printf("observer door: request=%q entry=%q push=%s error=%q", requestID, entryID, HeldPushFailed, err.Error())
+		return
+	}
+	d.Log.Printf("observer door: request=%q entry=%q push=%s", requestID, entryID, status)
 }
 
 func readDoorCall(conn *net.UnixConn) (DoorCall, error) {

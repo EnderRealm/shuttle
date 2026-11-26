@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"shuttle/internal/agentdef"
+	"shuttle/internal/config"
 	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	observercontract "shuttle/internal/observer"
@@ -115,7 +116,7 @@ func observerOutcome(state *observerRunState, out *validatedObserverOutput, appl
 // Push outcomes a run records beyond the ones Held.Push reports.
 const (
 	notebookPushLocalOnly = "local-only"
-	notebookPushFailed    = "failed"
+	notebookPushFailed    = observercontract.HeldPushFailed
 )
 
 type notebookPush struct {
@@ -124,26 +125,45 @@ type notebookPush struct {
 }
 
 // pushObserverNotebook pushes a held notebook by the end of the run. A
-// local-only registration's notebook never leaves the machine, so it is not
-// pushed whatever remote the repository has. A failed push is recorded and
-// logged and does not fail the run: the commits are already durable here, and
-// the next run's push carries them.
+// failed push is recorded and logged and does not fail the run: the commits
+// are already durable here, and the next push carries them.
 func (p *Pipeline) pushObserverNotebook(ctx context.Context, state *observerRunState) {
 	held, ok := state.Notebook.(observercontract.Held)
 	if !ok {
 		return
 	}
-	if state.Registration.DataPolicy == "local-only" {
-		state.Push = notebookPush{Status: notebookPushLocalOnly}
-		return
-	}
-	status, err := held.Push(ctx)
+	status, err := pushHeld(ctx, state.Registration, held)
 	if err != nil {
 		state.Push = notebookPush{Status: notebookPushFailed, Error: err.Error()}
 		p.logger().Printf("observer notebook push: %v", err)
 		return
 	}
 	state.Push = notebookPush{Status: status}
+}
+
+// PushHeldNotebook pushes the notebook Shuttle holds for identity, as the end
+// of a run does, for a change written outside one. Its registration is
+// resolved as HeldNotebook resolves it.
+func PushHeldNotebook(ctx context.Context, home string, cfg *config.Config, identity observercontract.Identity) (string, error) {
+	registration, err := heldRegistration(cfg, identity)
+	if err != nil {
+		return "", err
+	}
+	held, err := heldNotebook(home, identity)
+	if err != nil {
+		return "", err
+	}
+	return pushHeld(ctx, registration, held)
+}
+
+// pushHeld pushes held under its registration's data policy. A local-only
+// registration's notebook never leaves the machine, so it is not pushed
+// whatever remote the repository has.
+func pushHeld(ctx context.Context, registration config.Observer, held observercontract.Held) (string, error) {
+	if registration.DataPolicy == "local-only" {
+		return notebookPushLocalOnly, nil
+	}
+	return held.Push(ctx)
 }
 
 func assessmentStatus(out *validatedObserverOutput) string {
