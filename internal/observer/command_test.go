@@ -349,6 +349,50 @@ func TestCommandNotebookChecksMutationPostconditions(t *testing.T) {
 	}
 }
 
+// A listing is validated entry by entry as an entry response is, and its id
+// order is held, so a duplicate or out-of-order copy is refused rather than
+// read as a second entry.
+func TestCommandNotebookListValidatesEntries(t *testing.T) {
+	memory := NewMemory()
+	for i, name := range []string{"question.json", "question-hand-written.json"} {
+		q := mustQuestion(t, "wren", name)
+		if _, err := memory.Register(Request{Identity: q.Identity, Revision: int64(i), RequestID: name}, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed := memory.List()
+	path := filepath.Join(t.TempDir(), "response.json")
+	client := CommandNotebook{
+		Argv: []string{os.Args[0], "-test.run=TestCommandNotebookHelper", "--", "static", path},
+		Dir:  filepath.Dir(path), Env: []string{}, Timeout: 5 * time.Second,
+	}
+
+	writeCommandFixtureJSON(t, path, map[string]any{"entries": listed})
+	got, err := client.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalTestJSON(got) != canonicalTestJSON(listed) {
+		t.Fatalf("listing = %s, want %s", canonicalTestJSON(got), canonicalTestJSON(listed))
+	}
+
+	invalid := *listed[0]
+	invalid.State = "pondering"
+	for name, response := range map[string]any{
+		"missing entries": map[string]any{},
+		"null entry":      map[string]any{"entries": []any{nil}},
+		"invalid entry":   map[string]any{"entries": []any{&invalid}},
+		"out of order":    map[string]any{"entries": []any{listed[1], listed[0]}},
+		"duplicate":       map[string]any{"entries": []any{listed[0], listed[0]}},
+		"unknown field":   map[string]any{"entries": listed, "revision": 2},
+	} {
+		writeCommandFixtureJSON(t, path, response)
+		if _, err := client.List(context.Background()); err == nil {
+			t.Errorf("%s: listing accepted", name)
+		}
+	}
+}
+
 func TestCommandNotebookBoundsInheritedPipeWait(t *testing.T) {
 	notebook := CommandNotebook{
 		Argv: []string{os.Args[0], "-test.run=TestCommandNotebookHelper", "--", "held-pipe"},

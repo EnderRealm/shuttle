@@ -1,0 +1,128 @@
+{
+  "name": "list returns every entry in id order",
+  "steps": [
+    {
+      "operation": "list",
+      "expect": {
+        "status": "ok",
+        "revision": 0,
+        "entries": []
+      }
+    },
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 0,
+        "request_id": "register-unprompted-starts"
+      },
+      "payload": "../../wren/question-hand-written.json",
+      "expect": {
+        "status": "ok",
+        "revision": 1,
+        "entry": {
+          "id": "wren/mead/unprompted-starts",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "register",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 1,
+        "request_id": "register-days-repeating"
+      },
+      "payload": "../../wren/question.json",
+      "expect": {
+        "status": "ok",
+        "revision": 2,
+        "entry": {
+          "id": "wren/mead/days-repeating",
+          "state": "observing",
+          "observations": [],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "record",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 2,
+        "request_id": "record-finding"
+      },
+      "payload": "../../wren/assessment-unprompted.json",
+      "expect": {
+        "status": "ok",
+        "revision": 3,
+        "entry": {
+          "id": "wren/mead/unprompted-pattern",
+          "state": "observing",
+          "observations": [
+            {
+              "at": "2026-09-17T07:05:00-07:00",
+              "outcome": "insufficient-evidence"
+            }
+          ],
+          "in_flight": []
+        }
+      }
+    },
+    {
+      "operation": "retire",
+      "request": {
+        "identity": { "observer": "mead", "domain": "wren" },
+        "revision": 3,
+        "request_id": "retire-unprompted-starts"
+      },
+      "entry_id": "wren/mead/unprompted-starts",
+      "reason": "asked again as a narrower question",
+      "expect": {
+        "status": "ok",
+        "revision": 4,
+        "retirement": {
+          "entry_id": "wren/mead/unprompted-starts",
+          "reason": "asked again as a narrower question",
+          "in_flight": [],
+          "revision": 4,
+          "at": "*"
+        }
+      }
+    },
+    {
+      "operation": "list",
+      "expect": {
+        "status": "ok",
+        "revision": 4,
+        "entries": [
+          {
+            "id": "wren/mead/days-repeating",
+            "state": "observing",
+            "observations": [],
+            "in_flight": []
+          },
+          {
+            "id": "wren/mead/unprompted-pattern",
+            "state": "observing",
+            "observations": [
+              {
+                "at": "2026-09-17T07:05:00-07:00",
+                "outcome": "insufficient-evidence"
+              }
+            ],
+            "in_flight": []
+          },
+          {
+            "id": "wren/mead/unprompted-starts",
+            "state": "retired",
+            "observations": [],
+            "in_flight": []
+          }
+        ]
+      }
+    }
+  ]
+}

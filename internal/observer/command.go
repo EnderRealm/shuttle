@@ -60,6 +60,34 @@ func (c CommandNotebook) Entry(ctx context.Context, id string) (*Entry, error) {
 	return &entry, nil
 }
 
+// List validates every listed entry as Entry validates one, and refuses a
+// listing out of id order or naming an id twice: §8 orders it by id, so a
+// duplicate is a second, conflicting copy of one entry.
+func (c CommandNotebook) List(ctx context.Context) ([]*Entry, error) {
+	var response struct {
+		Entries *[]*Entry `json:"entries"`
+	}
+	if err := c.call(ctx, map[string]any{"operation": "list"}, &response); err != nil {
+		return nil, err
+	}
+	if response.Entries == nil {
+		return nil, errors.New("notebook list response: entries is required")
+	}
+	entries := *response.Entries
+	for i, entry := range entries {
+		if entry == nil {
+			return nil, fmt.Errorf("notebook list response: entries[%d] is null", i)
+		}
+		if err := validateEntry(entry); err != nil {
+			return nil, fmt.Errorf("notebook list response: entries[%d]: %w", i, err)
+		}
+		if i > 0 && entries[i-1].ID >= entry.ID {
+			return nil, fmt.Errorf("notebook list response: entries[%d] %q does not follow %q; entries are listed once each, ordered by id", i, entry.ID, entries[i-1].ID)
+		}
+	}
+	return entries, nil
+}
+
 func (c CommandNotebook) Register(ctx context.Context, req Request, q *Question) (*Entry, error) {
 	if q == nil {
 		return nil, fieldErr("payload", "question is null")

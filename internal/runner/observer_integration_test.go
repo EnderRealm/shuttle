@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1402,7 +1404,7 @@ func runNotebookHelper(path string, input []byte) {
 		os.Exit(85)
 	}
 	var req observercontract.Request
-	if request.Operation != "revision" && request.Operation != "entry" {
+	if request.Operation != "revision" && request.Operation != "entry" && request.Operation != "list" {
 		if json.Unmarshal(request.Request, &req) != nil {
 			os.Exit(86)
 		}
@@ -1437,6 +1439,12 @@ func runNotebookHelper(path string, input []byte) {
 			os.Exit(12)
 		}
 		_, _ = os.Stdout.Write(entry)
+	case "list":
+		entries := make([]json.RawMessage, 0, len(state.Entries))
+		for _, id := range slices.Sorted(maps.Keys(state.Entries)) {
+			entries = append(entries, state.Entries[id])
+		}
+		writeHelperStdout(map[string]any{"entries": entries})
 	case "record":
 		var assessment observercontract.Assessment
 		if json.Unmarshal(request.Payload, &assessment) != nil {
@@ -1679,6 +1687,11 @@ func helperArgsAfterDash() []string {
 		}
 	}
 	return nil
+}
+
+func writeHelperStdout(value any) {
+	data, _ := json.Marshal(value)
+	_, _ = os.Stdout.Write(data)
 }
 
 func writeHelperJSON(path string, value any) {

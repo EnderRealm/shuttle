@@ -61,6 +61,10 @@ and a ticket-open must carry a title and a finding. Anything else is refused
 after you exit.
 `
 
+// observerDefinition is the strict observer-run/v1 definition. Questions is
+// still accepted and validated, so a definition written before the snapshot
+// read every observing entry loads unchanged, but it no longer selects what a
+// run reads (docs/observer-contract.md §10).
 type observerDefinition struct {
 	ContractVersion string                    `json:"contract_version"`
 	Revision        string                    `json:"revision"`
@@ -108,6 +112,7 @@ type validatedCollection struct {
 type observerNotebook interface {
 	Revision(ctx context.Context) (int64, error)
 	Entry(ctx context.Context, id string) (*observercontract.Entry, error)
+	List(ctx context.Context) ([]*observercontract.Entry, error)
 	Register(ctx context.Context, req observercontract.Request, q *observercontract.Question) (*observercontract.Entry, error)
 	Activate(ctx context.Context, req observercontract.Request, exp *observercontract.Experiment) (*observercontract.Entry, error)
 	Record(ctx context.Context, req observercontract.Request, a *observercontract.Assessment) (*observercontract.Entry, error)
@@ -297,6 +302,38 @@ func HeldNotebook(home string, cfg *config.Config, identity observercontract.Ide
 		"%s/%s: no held_notebook observer registration names it", identity.Domain, identity.Observer)}, unread...)...)
 }
 
+// ObserverEntries lists every entry of the observer registered under name in
+// config.json, retired and answered ones included. The notebook is built as a
+// run builds it: the one Shuttle holds under home for the definition's
+// identity, or the domain command with a run's minimal environment, its HOME
+// homeDir and its zone UTC since no agent's trigger names one here. It is the
+// operator's local read; the observer door reads nothing out (§12).
+func ObserverEntries(ctx context.Context, home, homeDir string, cfg *config.Config, name string) ([]*observercontract.Entry, error) {
+	registration, ok := cfg.Observers[name]
+	if !ok {
+		return nil, fmt.Errorf("observer %q is not registered in config.json", name)
+	}
+	_, definition, _, err := loadObserverDefinition(registration.Definition)
+	if err != nil {
+		return nil, fmt.Errorf("observer %q definition: %w", name, err)
+	}
+	notebook, err := newObserverNotebook(home, registration, definition.Identity, domainCommandEnv(homeDir, time.UTC))
+	if err != nil {
+		return nil, err
+	}
+	listed, err := notebook.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("observer %q notebook: %w", name, err)
+	}
+	entries := make([]*observercontract.Entry, 0, len(listed))
+	for _, entry := range listed {
+		if entry.Identity == definition.Identity {
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
+}
+
 // heldNotebookDir is where Shuttle holds one observer identity's notebook:
 // <state root>/notebooks/<domain>/<observer>. The definition already refuses
 // a separator in either part; "." and ".." are refused here because they
@@ -343,7 +380,7 @@ func (p *Pipeline) collectObserver(ctx context.Context, def *agentdef.Definition
 	if err != nil {
 		return nil, &observerCollectionError{Status: "invalid-configuration", Err: err}
 	}
-	snapshot, err := snapshotNotebook(ctx, notebook, definition.Questions)
+	snapshot, err := snapshotNotebook(ctx, notebook, definition.Identity)
 	if err != nil {
 		return nil, &observerCollectionError{Status: "notebook-failed", Err: fmt.Errorf("observer notebook snapshot: %w", err)}
 	}
@@ -466,25 +503,32 @@ func loadObserverDefinition(path string) ([]byte, *observerDefinition, string, e
 	return data, &definition, hex.EncodeToString(sum[:]), nil
 }
 
-func snapshotNotebook(ctx context.Context, notebook observerNotebook, ids []string) (observerSnapshot, error) {
+// snapshotNotebook reads every entry of identity's that is still observing,
+// between two reads of the revision. A retired entry is not read. An answered
+// one is not read either until a reopen returns it to observing, which is the
+// only way back the rules allow (§3). An entry of another identity, which a
+// domain notebook shared between observers may list, is not this run's.
+func snapshotNotebook(ctx context.Context, notebook observerNotebook, identity observercontract.Identity) (observerSnapshot, error) {
 	for attempt := 0; attempt < notebookSnapshotAttempts; attempt++ {
 		before, err := notebook.Revision(ctx)
 		if err != nil {
 			return observerSnapshot{}, err
 		}
-		entries := make([]*observercontract.Entry, 0, len(ids))
-		for _, id := range ids {
-			entry, err := notebook.Entry(ctx, id)
-			if err != nil {
-				return observerSnapshot{}, err
-			}
-			entries = append(entries, entry)
+		listed, err := notebook.List(ctx)
+		if err != nil {
+			return observerSnapshot{}, err
 		}
 		after, err := notebook.Revision(ctx)
 		if err != nil {
 			return observerSnapshot{}, err
 		}
 		if before == after {
+			entries := make([]*observercontract.Entry, 0, len(listed))
+			for _, entry := range listed {
+				if entry.Identity == identity && entry.State == observercontract.StateObserving {
+					entries = append(entries, entry)
+				}
+			}
 			return observerSnapshot{Revision: before, Entries: entries}, nil
 		}
 	}

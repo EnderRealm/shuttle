@@ -208,16 +208,6 @@ func (to *ticketObserver) run(t *testing.T, manifest map[string]any) (*ledger.Ru
 	return run, result, err
 }
 
-// selectQuestions rewrites the observer definition to name these entries, the
-// way an operator widens or moves an observer's standing list.
-func (to *ticketObserver) selectQuestions(t *testing.T, ids ...string) {
-	t.Helper()
-	writeJSONFixture(t, to.o.definition, observerDefinition{
-		ContractVersion: observerRunVersion, Revision: "fixture-r2", Identity: to.question.Identity,
-		Questions: ids, Instructions: "Assess the retained evidence and keep uncertainty explicit.",
-	})
-}
-
 func (to *ticketObserver) notebook(t *testing.T) observerNotebookState {
 	t.Helper()
 	var state observerNotebookState
@@ -266,7 +256,6 @@ func TestObserverConfirmationNotesTheTicketWithoutChangingStatus(t *testing.T) {
 	other := *to.question
 	other.ID = to.question.Identity.Qualify("other-question")
 	seedQuestion(t, to.o, &other, nil)
-	to.selectQuestions(t, to.question.ID, other.ID)
 	identity := to.question.Identity
 	confirm := proposal(identity, "confirm", observercontract.ActionTicketNote, to.question.ID, to.ticketID,
 		"Three nights after the restart every report still repeated a headline.", answer.Evidence.Sources[:2])
@@ -388,7 +377,6 @@ func TestObserverMissingEffectReopensADoneTicketOnce(t *testing.T) {
 	seedQuestion(t, to.o, &again, experiment)
 	absentAgain := *absent
 	absentAgain.QuestionID = again.ID
-	to.selectQuestions(t, again.ID)
 	second := proposal(identity, "reopen-again", observercontract.ActionTicketReopen, again.ID, to.ticketID,
 		"Still no movement after the second landing.", absent.Evidence.Sources)
 	_, secondResult, err := to.run(t, silentManifest([]any{&absentAgain}, []any{second}))
@@ -674,7 +662,6 @@ func TestObserverReleaseAppliesOnEffectObserved(t *testing.T) {
 	again := *to.question
 	again.ID = identity.Qualify("days-repeating-again")
 	seedQuestion(t, to.o, &again, nil)
-	to.selectQuestions(t, again.ID)
 	answerAgain := *answer
 	answerAgain.QuestionID = again.ID
 	second := proposal(identity, "release-again", observercontract.ActionTicketRelease, again.ID, to.ticketID,
@@ -837,7 +824,6 @@ func TestObserverReleaseRefusals(t *testing.T) {
 			Title: "Wait on the foreign gate", Extra: map[string]string{ticket.WaitingOnField: foreign.ID},
 		})
 		seedQuestion(t, to.o, &foreign, nil)
-		to.selectQuestions(t, foreign.ID)
 		foreignAnswer := *answer
 		foreignAnswer.QuestionID = foreign.ID
 		foreignFile := to.tk.file(foreignProject, "parked-ticket-5678")
@@ -1163,7 +1149,6 @@ func TestObserverDiscoveryRespectsCapRelatedTicketsAndScope(t *testing.T) {
 		seedQuestion(t, to.o, &foreign, nil)
 		foreignAnswer := *answer
 		foreignAnswer.QuestionID = foreign.ID
-		to.selectQuestions(t, foreign.ID)
 		note := proposal(to.question.Identity, "note", observercontract.ActionTicketNote, foreign.ID, foreign.Ticket,
 			"A note bound for another project.", answer.Evidence.Sources[:1])
 		_, result, err := to.run(t, silentManifest([]any{&foreignAnswer}, []any{note}))
@@ -1337,9 +1322,20 @@ func TestObserverHeldActionIDIsRefusedWithoutAWrite(t *testing.T) {
 	if _, _, err := to.run(t, silentManifest([]any{answer}, []any{confirm})); err != nil {
 		t.Fatal(err)
 	}
-	// The next night's run proposes the same stable id for the same standing
-	// question. The notebook holds it settled; the proposal is refused ahead
-	// of any write and the run goes on.
+	// The answer is reopened, the one way an answered entry is read again
+	// (§3), and the next night's run proposes the same stable id for the same
+	// standing question. The notebook holds it settled; the proposal is
+	// refused ahead of any write and the run goes on.
+	reopened := to.entry(t, to.question.ID)
+	reopened.State = observercontract.StateObserving
+	state := to.notebook(t)
+	data, err := json.Marshal(reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Entries[to.question.ID] = data
+	state.Revision++
+	writeJSONFixture(t, to.o.state, state)
 	_, result, err := to.run(t, silentManifest([]any{answer}, []any{confirm}))
 	if err != nil {
 		t.Fatal(err)
@@ -1374,7 +1370,6 @@ func TestObserverClaimFailureDrivesTheRemainingActions(t *testing.T) {
 		ID: "other-ticket-2222", Status: ticket.StatusDone, Type: ticket.TypeFeature, Priority: 2, Title: "Vary the subject line",
 	})
 	seedQuestion(t, to.o, &other, nil)
-	to.selectQuestions(t, to.question.ID, other.ID)
 	otherAnswer := *answer
 	otherAnswer.QuestionID = other.ID
 	state := to.notebook(t)

@@ -80,6 +80,9 @@ case "$request" in
     fi
     cat %q
     ;;
+  *'"operation":"list"'*)
+    printf '%%s\n' '{"entries":[]}'
+    ;;
   *)
     printf '%%s\n' '{"revision":0}'
     ;;

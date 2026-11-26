@@ -296,6 +296,7 @@ their additional fields are:
 |---|---|---|
 | `revision` | none | `{"revision":<integer>}` |
 | `entry` | `entry_id` | the Entry payload |
+| `list` | none | `{"entries":[<Entry>,...]}`, every entry, retired and answered ones included, ordered by id |
 | `register` | `request`, `payload` (Question) | the Entry payload |
 | `activate` | `request`, `payload` (Experiment) | the Entry payload |
 | `record` | `request`, `payload` (Assessment) | the Entry payload |
@@ -308,7 +309,10 @@ their additional fields are:
 as the conformance data. `payload` is the already validated `observer/v1`
 object, not a path; paths belong only to the conformance files that load those
 objects. Retirement has the fields `entry_id`, `reason`, `at`, `in_flight` and
-`revision`.
+`revision`. Each entry in a `list` response is validated as an `entry`
+response is, and the listing is refused unless its ids ascend bytewise with
+none repeated. An adapter that does not implement `list` fails every run's
+snapshot as `notebook-failed` (§10) until it does.
 
 Exit status carries the sentinel refusal class. On a refusal stdout is empty and
 stderr may contain a diagnostic:
@@ -375,7 +379,8 @@ produce. `status` is `ok` or `refused`; a refusal also names one of
 or `action-held`. `revision` is the notebook revision after the operation.
 Entry expectations project the stable protocol facts used by these scenarios:
 `id`, `state`, optional `experiment_status`, ordered observations as `at` and
-`outcome`, and ordered `in_flight` ids. Receipt and retirement expectations use
+`outcome`, and ordered `in_flight` ids. A `list` step expects `entries`, those
+projections in id order. Receipt and retirement expectations use
 their corresponding fields; `"at":"*"` accepts any non-empty generated
 timestamp in a direct expectation. `{"same_as":3}` means the complete outcome,
 including such a generated timestamp, must equal the third step's actual
@@ -439,12 +444,18 @@ observer run denies the union across all registrations, so a cloud observer
 cannot read another observer's local-only store. A denied root inside the run
 directory is refused because the run-directory allowance would reopen it. The
 observer definition is strict `observer-run/v1` JSON with `revision`,
-`identity`, `questions` and `instructions`. Question ids select notebook
-entries; an empty list is valid for an exploratory observer.
+`identity`, `questions` and `instructions`. `questions` is still validated —
+each id qualified for the identity, none twice, an empty list allowed — but it
+no longer selects what a run reads: a question registered after the
+definition was written, by a person, a book or a worker whose ticket landed,
+is read like any other.
 
 Before model execution Shuttle takes a stable notebook snapshot by reading the
-revision, each configured entry and the revision again. It retries a moving
-snapshot three times. The collector receives one `collect` request containing
+revision, the notebook's `list` and the revision again. It retries a moving
+snapshot three times. The snapshot is every listed entry of the definition's
+identity that is `observing`. A retired entry is not read. An answered one is
+not read either until a reopen returns it to `observing`, which is the only way
+back §3 allows. The collector receives one `collect` request containing
 the run, window, definition identity/revision and that snapshot. Its successful
 response is:
 
@@ -627,6 +638,7 @@ shuttle observer register [question.json] --request-id ID
 shuttle observer activate [experiment.json] --request-id ID
 shuttle observer retire <entry-id> --reason TEXT --request-id ID
 shuttle observer reopen <entry-id> --condition NAME --request-id ID
+shuttle observer list <name>
 ```
 
 - **Transport.** A unix socket the daemon serves whenever a registration names
@@ -643,6 +655,16 @@ shuttle observer reopen <entry-id> --condition NAME --request-id ID
   Experiment, `retire` an `entry_id` and `reason`, `reopen` an `entry_id` and
   `condition`. Nothing else in the notebook is reachable: no entry, no
   observation, no revision is ever read out through the door.
+- **The one read is local.** `shuttle observer list <name>` does not use the
+  door. It is the operator's: it loads config.json, takes the registration
+  named `<name>`, loads its definition and builds the notebook exactly as a run
+  does — the one held under the state root, or the §8 command adapter with a
+  run's minimal environment — and prints every entry of the definition's
+  identity as a JSON array of `id`, `state`, `author` and `latest` (the outcome
+  and `at` of the last observation, or null). A question's author is the one
+  it declares; an entry a finding opened is authored by the observer. A hosted
+  agent user cannot open the held notebook's files, so this read stays on the
+  operator's side of §4's one direction.
 - **Wire.** One JSON object per connection, then the write side closed, and
   one object back:
   `{"operation":"register","request":{"request_id":"..."},"payload":{...}}`.

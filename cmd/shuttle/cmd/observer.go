@@ -13,6 +13,7 @@ import (
 
 	"shuttle/internal/config"
 	observercontract "shuttle/internal/observer"
+	"shuttle/internal/runner"
 )
 
 // observerCallTimeout bounds one call on the door. The door applies the call
@@ -22,18 +23,26 @@ const observerCallTimeout = 5 * time.Minute
 
 var observerCmd = &cobra.Command{
 	Use:   "observer",
-	Short: "Register, activate, retire and reopen questions through the running Shuttle",
+	Short: "Register, activate, retire and reopen questions through the running Shuttle; list an observer's entries",
 	Long: `Hand a question, an experiment, a retirement or a reopen to the notebook
 Shuttle holds for an observer (docs/observer-contract.md §12). The call goes to
 the running daemon over its observer door, $SHUTTLE_OBSERVER_SOCKET or
 /Users/Shared/weft/observer/door.sock; the daemon validates it, applies it at
 the notebook's current revision and answers with the entry's id and state. No
-file under the state root is read here.
+file under the state root is read by these four.
 
   shuttle observer register [question.json] --request-id ID
   shuttle observer activate [experiment.json] --request-id ID
   shuttle observer retire <entry-id> --reason TEXT --request-id ID
   shuttle observer reopen <entry-id> --condition NAME --request-id ID
+  shuttle observer list <name>
+
+list is the one read, and it is local and the operator's: it does not use the
+door, which reads nothing out. It reads the notebook of the observer registered
+under <name> in config.json as a run reads it — the one Shuttle holds under the
+state root, or the registration's notebook command — and prints every entry,
+retired and answered ones included, as a JSON array of id, state, author and
+the outcome and time of the latest observation.
 
 A payload is an observer/v1 object, read from the file named or from stdin. The
 request id makes a repeat safe: the same call again returns the original
@@ -92,6 +101,38 @@ var observerReopenCmd = &cobra.Command{
 	},
 }
 
+var observerListCmd = &cobra.Command{
+	Use:           "list <name>",
+	Short:         "Print every entry of an observer's notebook, read locally",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		home, err := config.Home()
+		if err != nil {
+			return err
+		}
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		entries, err := runner.ObserverEntries(cmd.Context(), home, homeDir, cfg, args[0])
+		if err != nil {
+			return err
+		}
+		data, err := json.Marshal(observercontract.Summarize(entries))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return nil
+	},
+}
+
 func observerPayloadCall(cmd *cobra.Command, args []string, operation string) error {
 	var payload []byte
 	var err error
@@ -134,6 +175,7 @@ func init() {
 		sub.Flags().String("request-id", "", "The id a repeat of this call is answered under")
 		observerCmd.AddCommand(sub)
 	}
+	observerCmd.AddCommand(observerListCmd)
 	observerRetireCmd.Flags().String("reason", "", "Why the question comes off the list")
 	observerReopenCmd.Flags().String("condition", "", "re-activated, method-revised or contradicted")
 	rootCmd.AddCommand(observerCmd)

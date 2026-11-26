@@ -127,6 +127,19 @@ func (h Held) Entry(ctx context.Context, id string) (*Entry, error) {
 	return out, err
 }
 
+func (h Held) List(ctx context.Context) ([]*Entry, error) {
+	var out []*Entry
+	err := h.locked(ctx, func() error {
+		m, _, err := h.load()
+		if err != nil {
+			return err
+		}
+		out = m.List()
+		return nil
+	})
+	return out, err
+}
+
 func (h Held) Register(ctx context.Context, req Request, q *Question) (*Entry, error) {
 	var out *Entry
 	err := h.mutate(ctx, "register", req, func(m *Memory) (string, error) {

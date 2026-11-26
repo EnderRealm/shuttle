@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"shuttle/internal/config"
 	"shuttle/internal/ledger"
@@ -334,5 +336,244 @@ func TestHeldNotebookRegistrationNamesNoCommand(t *testing.T) {
 	}
 	if _, err := heldNotebookDir(f.root, observercontract.Identity{Domain: "..", Observer: "mead"}); err == nil {
 		t.Fatal("an identity of .. named a held notebook outside the notebooks root")
+	}
+}
+
+// heldRequest composes a request against the held notebook's current
+// revision, the way the door does for an author.
+func heldRequest(t *testing.T, held observercontract.Held, identity observercontract.Identity, requestID string) observercontract.Request {
+	t.Helper()
+	revision, err := held.Revision(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return observercontract.Request{Identity: identity, Revision: revision, RequestID: requestID}
+}
+
+// heldQuestion is the harness question under another name, by author.
+func heldQuestion(t *testing.T, name string, author observercontract.Author) *observercontract.Question {
+	t.Helper()
+	question := harnessQuestion(t)
+	question.ID = question.Identity.Qualify(name)
+	question.Author = author
+	return question
+}
+
+// silentObserverRun runs the fixture observer once, silent, on a slot of its
+// own, and returns the snapshot and the presentation it retained.
+func silentObserverRun(t *testing.T, f *liveFixture) (observerSnapshot, observerPresentation) {
+	t.Helper()
+	installObserverModel(t, f, map[string]any{"silent": true, "assessments": []any{}, "actions": []any{}}, "")
+	f.slot = f.slot.Add(-24 * time.Hour)
+	run := f.claim(t, ledger.TriggerManual)
+	result, err := f.pipeline.Run(context.Background(), f.def, run, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot observerSnapshot
+	readJSONFixture(t, filepath.Join(result.RunDir, "observer", "notebook.json"), &snapshot)
+	var presentation observerPresentation
+	readJSONFixture(t, filepath.Join(result.RunDir, "inputs", "observer.json"), &presentation)
+	return snapshot, presentation
+}
+
+func entryIDs(entries []*observercontract.Entry) []string {
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.ID)
+	}
+	return ids
+}
+
+// A question registered once the definition is written — by a worker when its
+// ticket lands, here — is read by the next run, though the definition's
+// questions list never names it.
+func TestRunSnapshotReadsEveryObservingEntry(t *testing.T) {
+	ctx := context.Background()
+	f := newLiveFixture(t, "success")
+	standing := harnessQuestion(t)
+	held := registerHeldObserver(t, f, "fixture", standing.Identity, []string{standing.ID},
+		[]*observercontract.Bundle{observedAnswer(t).Evidence})
+	registerHeldQuestion(t, held, standing)
+	observerAgent(f, "fixture")
+
+	snapshot, _ := silentObserverRun(t, f)
+	if got := entryIDs(snapshot.Entries); !reflect.DeepEqual(got, []string{standing.ID}) {
+		t.Fatalf("first snapshot = %v, want the one registered question", got)
+	}
+
+	landed := heldQuestion(t, "landed-change", observercontract.Author{Kind: observercontract.AuthorWorker, Ref: "shuttle/landed-1234"})
+	if _, err := held.Register(ctx, heldRequest(t, held, landed.Identity, "register-landed"), landed); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, presentation := silentObserverRun(t, f)
+	want := []string{standing.ID, landed.ID}
+	if got := entryIDs(snapshot.Entries); !reflect.DeepEqual(got, want) || snapshot.Revision != 2 {
+		t.Fatalf("next snapshot = %v at revision %d, want %v at 2", got, snapshot.Revision, want)
+	}
+	if got := entryIDs(presentation.Entries); !reflect.DeepEqual(got, want) {
+		t.Fatalf("model input entries = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(snapshot.Entries[1].Question, landed) {
+		t.Fatalf("snapshot entry = %+v, want the worker's question as registered", snapshot.Entries[1].Question)
+	}
+}
+
+// A retired entry is not read. An answered one is not read either, until a
+// reopen returns it to observing.
+func TestRunSnapshotLeavesOutRetired(t *testing.T) {
+	ctx := context.Background()
+	f := newLiveFixture(t, "success")
+	human := observercontract.Author{Kind: observercontract.AuthorHuman, Ref: "steve"}
+	observing := heldQuestion(t, "a-observing", human)
+	retired := heldQuestion(t, "b-retired", human)
+	answered := heldQuestion(t, "c-answered", human)
+	reopened := heldQuestion(t, "d-reopened", human)
+	held := registerHeldObserver(t, f, "fixture", observing.Identity,
+		[]string{observing.ID, retired.ID, answered.ID, reopened.ID}, []*observercontract.Bundle{observedAnswer(t).Evidence})
+	for _, question := range []*observercontract.Question{observing, retired, answered, reopened} {
+		if _, err := held.Register(ctx, heldRequest(t, held, question.Identity, "register-"+question.ID), question); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := held.Retire(ctx, heldRequest(t, held, retired.Identity, "retire"), retired.ID, "asked again as a narrower question"); err != nil {
+		t.Fatal(err)
+	}
+	for _, question := range []*observercontract.Question{answered, reopened} {
+		answer := observedAnswer(t)
+		answer.QuestionID = question.ID
+		if _, err := held.Record(ctx, heldRequest(t, held, question.Identity, "answer-"+question.ID), answer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := held.Reopen(ctx, heldRequest(t, held, reopened.Identity, "reopen"), reopened.ID, observercontract.ReopenReactivated); err != nil {
+		t.Fatal(err)
+	}
+	observerAgent(f, "fixture")
+
+	snapshot, presentation := silentObserverRun(t, f)
+	want := []string{observing.ID, reopened.ID}
+	if got := entryIDs(snapshot.Entries); !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshot = %v, want only the observing and the reopened entry", got)
+	}
+	if got := entryIDs(presentation.Entries); !reflect.DeepEqual(got, want) {
+		t.Fatalf("model input entries = %v, want %v", got, want)
+	}
+	// The notebook still holds all four: leaving one out of a run is not
+	// losing it.
+	listed, err := held.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 4 {
+		t.Fatalf("notebook lists %v, want all four entries kept", entryIDs(listed))
+	}
+}
+
+// Every observing entry is read, so the model's input can outgrow its limit
+// on history alone. It is bounded as before — the globally oldest history
+// dropped first — and records how much it dropped; the retained snapshot
+// keeps all of it.
+func TestRunSnapshotBoundedWithLosses(t *testing.T) {
+	ctx := context.Background()
+	f := newLiveFixture(t, "success")
+	human := observercontract.Author{Kind: observercontract.AuthorHuman, Ref: "steve"}
+	first := heldQuestion(t, "first", human)
+	second := heldQuestion(t, "second", human)
+	evidence := observedAnswer(t).Evidence
+	held := registerHeldObserver(t, f, "fixture", first.Identity, []string{}, []*observercontract.Bundle{evidence})
+	const limit = 16 << 10
+	registration := f.pipeline.Config.Observers["fixture"]
+	registration.MaxModelInputBytes = limit
+	f.pipeline.Config.Observers["fixture"] = registration
+	start := time.Date(2026, 9, 1, 6, 0, 0, 0, time.UTC)
+	recorded := 0
+	for i, question := range []*observercontract.Question{first, second} {
+		if _, err := held.Register(ctx, heldRequest(t, held, question.Identity, "register-"+question.ID), question); err != nil {
+			t.Fatal(err)
+		}
+		// Insufficient evidence answers nothing, so the entry stays observing
+		// and its history grows night by night. The two entries' nights
+		// interleave, so the oldest history is spread across both.
+		for night := 0; night < 6; night++ {
+			reading := harnessAssessment(t, "assessment.json")
+			reading.QuestionID = question.ID
+			reading.Outcome = observercontract.OutcomeInsufficient
+			reading.At = start.AddDate(0, 0, 2*night+i).Format(time.RFC3339)
+			if _, err := held.Record(ctx, heldRequest(t, held, question.Identity, fmt.Sprintf("record-%s-%d", question.ID, night)), reading); err != nil {
+				t.Fatal(err)
+			}
+			recorded++
+		}
+	}
+	observerAgent(f, "fixture")
+
+	installObserverModel(t, f, map[string]any{"silent": true, "assessments": []any{}, "actions": []any{}}, "")
+	run := f.claim(t, ledger.TriggerManual)
+	result, err := f.pipeline.Run(ctx, f.def, run, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot observerSnapshot
+	readJSONFixture(t, filepath.Join(result.RunDir, "observer", "notebook.json"), &snapshot)
+	retained := 0
+	for _, entry := range snapshot.Entries {
+		retained += len(entry.Observations)
+	}
+	if got := entryIDs(snapshot.Entries); !reflect.DeepEqual(got, []string{first.ID, second.ID}) || retained != recorded {
+		t.Fatalf("retained snapshot = %v with %d observations, want both entries with all %d", got, retained, recorded)
+	}
+
+	path := filepath.Join(result.RunDir, "inputs", "observer.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > limit {
+		t.Fatalf("model input is %d bytes, over the %d-byte limit", info.Size(), limit)
+	}
+	var presentation observerPresentation
+	readJSONFixture(t, path, &presentation)
+	if got := entryIDs(presentation.Entries); !reflect.DeepEqual(got, []string{first.ID, second.ID}) {
+		t.Fatalf("model input entries = %v, want both questions kept", got)
+	}
+	shown := 0
+	var oldestShown time.Time
+	for _, entry := range presentation.Entries {
+		for _, observation := range entry.Observations {
+			at, err := time.Parse(time.RFC3339, observation.At)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if shown == 0 || at.Before(oldestShown) {
+				oldestShown = at
+			}
+			shown++
+		}
+	}
+	if presentation.OmittedHistory == 0 || shown+presentation.OmittedHistory != recorded {
+		t.Fatalf("model input shows %d observations and omits %d, want a recorded loss accounting for all %d",
+			shown, presentation.OmittedHistory, recorded)
+	}
+	// What was dropped is the globally oldest: every retained observation
+	// older than the oldest one shown is one the presentation omitted.
+	older := 0
+	for _, entry := range snapshot.Entries {
+		for _, observation := range entry.Observations {
+			at, err := time.Parse(time.RFC3339, observation.At)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if at.Before(oldestShown) {
+				older++
+			}
+		}
+	}
+	if older != presentation.OmittedHistory {
+		t.Fatalf("%d observations are older than the oldest shown, %d omitted; want the omitted history to be the oldest", older, presentation.OmittedHistory)
+	}
+	if presentation.OmittedEvidence != 0 || presentation.TruncatedExploration || len(presentation.Evidence) != 1 {
+		t.Fatalf("model input = evidence %d (omitted %d), truncated %t; want history dropped before evidence or prose",
+			len(presentation.Evidence), presentation.OmittedEvidence, presentation.TruncatedExploration)
 	}
 }

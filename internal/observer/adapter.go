@@ -86,6 +86,42 @@ type Entry struct {
 	Retirement       *Retirement   `json:"retirement,omitempty"`
 }
 
+// EntrySummary is one line of a notebook's listing: the entry, its state, who
+// wrote it, and the outcome and time of the latest observation recorded
+// against it. Latest is null for an entry nothing has been recorded against.
+type EntrySummary struct {
+	ID     string             `json:"id"`
+	State  string             `json:"state"`
+	Author Author             `json:"author"`
+	Latest *LatestObservation `json:"latest"`
+}
+
+// LatestObservation is the last row of an entry's append-only history.
+type LatestObservation struct {
+	Outcome string `json:"outcome"`
+	At      string `json:"at"`
+}
+
+// Summarize lists entries in the order given. A question's author is the one
+// it declares. An entry a finding opened has no author field of its own: it
+// was opened by the observer's unprompted assessment, so the observer is its
+// author.
+func Summarize(entries []*Entry) []EntrySummary {
+	out := make([]EntrySummary, 0, len(entries))
+	for _, e := range entries {
+		summary := EntrySummary{ID: e.ID, State: e.State, Author: Author{Kind: AuthorObserver}}
+		if e.Question != nil {
+			summary.Author = e.Question.Author
+		}
+		if n := len(e.Observations); n > 0 {
+			last := e.Observations[n-1]
+			summary.Latest = &LatestObservation{Outcome: last.Outcome, At: last.At}
+		}
+		out = append(out, summary)
+	}
+	return out
+}
+
 func (r *Retirement) clone() *Retirement {
 	if r == nil {
 		return nil
@@ -133,6 +169,10 @@ type Notebook interface {
 
 	// Entry returns a snapshot of one entry, or ErrNoEntry.
 	Entry(id string) (*Entry, error)
+
+	// List returns a snapshot of every entry, retired and answered ones
+	// included, ordered by id.
+	List() []*Entry
 
 	// Register admits a standing question under its own id.
 	Register(req Request, q *Question) (*Entry, error)

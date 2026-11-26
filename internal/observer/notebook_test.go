@@ -1,7 +1,11 @@
 package observer
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -371,4 +375,71 @@ func TestRecordRefusesAnotherSubject(t *testing.T) {
 			t.Fatalf("observations = %d, want the later reading refused", len(e.Observations))
 		}
 	})
+}
+
+// A notebook lists every entry, whatever its state and whoever wrote it, and
+// the listing carries each one's author and latest outcome. It is read from a
+// held notebook, so the listing survives the repository round trip.
+func TestNotebookListsEntries(t *testing.T) {
+	ctx := context.Background()
+	h := newHeld(t)
+	landed := mustQuestion(t, "wren", "question.json")
+	landed.Author = Author{Kind: AuthorWorker, Ref: landed.Ticket}
+	if _, err := h.Register(ctx, heldAt(t, h, landed.Identity, "register-landed"), landed); err != nil {
+		t.Fatal(err)
+	}
+	hand := mustQuestion(t, "wren", "question-hand-written.json")
+	if _, err := h.Register(ctx, heldAt(t, h, hand.Identity, "register-hand"), hand); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Activate(ctx, heldAt(t, h, landed.Identity, "activate"), mustExperiment(t, "wren", "experiment.json")); err != nil {
+		t.Fatal(err)
+	}
+	answer := mustAssessment(t, "wren", "assessment.json")
+	if _, err := h.Record(ctx, heldAt(t, h, answer.Identity, "record-answer"), answer); err != nil {
+		t.Fatal(err)
+	}
+	finding := mustAssessment(t, "wren", "assessment-unprompted.json")
+	if _, err := h.Record(ctx, heldAt(t, h, finding.Identity, "record-finding"), finding); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Retire(ctx, heldAt(t, h, hand.Identity, "retire-hand"), hand.ID, "asked again as a narrower question"); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := h.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Summarize(entries)
+	want := []EntrySummary{
+		{ID: landed.ID, State: StateAnswered, Author: landed.Author,
+			Latest: &LatestObservation{Outcome: answer.Outcome, At: answer.At}},
+		{ID: finding.EntryID(), State: StateObserving, Author: Author{Kind: AuthorObserver},
+			Latest: &LatestObservation{Outcome: finding.Outcome, At: finding.At}},
+		{ID: hand.ID, State: StateRetired, Author: hand.Author},
+	}
+	if !reflect.DeepEqual(got, want) {
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(want)
+		t.Fatalf("listing = %s\nwant %s", gotJSON, wantJSON)
+	}
+	// The listing is the notebook's own entries, not a projection that has
+	// lost them: each one is the entry Entry returns.
+	for _, listed := range entries {
+		one, err := h.Entry(ctx, listed.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(one, listed) {
+			t.Fatalf("listed %s differs from the entry the notebook returns", listed.ID)
+		}
+	}
+	data, err := json.Marshal(got[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"latest":null`) {
+		t.Fatalf("an entry with no observations lists as %s, want latest null", data)
+	}
 }

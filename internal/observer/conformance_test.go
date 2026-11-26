@@ -229,6 +229,8 @@ func runConformanceStep(t *testing.T, nb Notebook, scenarioDir string, step conf
 	case "revision":
 	case "entry":
 		result, err = nb.Entry(step.EntryID)
+	case "list":
+		result = nb.List()
 	case "register":
 		result, err = nb.Register(requestFor(t, step), questionPayload(t, scenarioDir, step.Payload))
 	case "activate":
@@ -350,20 +352,13 @@ func conformanceOutcome(revision int64, result any, err error) (any, error) {
 	out["status"] = "ok"
 	switch value := result.(type) {
 	case *Entry:
-		entry := conformanceEntry{
-			ID:               value.ID,
-			State:            value.State,
-			ExperimentStatus: value.ExperimentStatus,
-			Observations:     make([]conformanceObservation, 0, len(value.Observations)),
-			InFlight:         append([]string{}, value.InFlight...),
+		out["entry"] = conformanceEntryOf(value)
+	case []*Entry:
+		entries := make([]conformanceEntry, 0, len(value))
+		for _, entry := range value {
+			entries = append(entries, conformanceEntryOf(entry))
 		}
-		for _, observation := range value.Observations {
-			entry.Observations = append(entry.Observations, conformanceObservation{
-				At:      observation.At,
-				Outcome: observation.Outcome,
-			})
-		}
-		out["entry"] = entry
+		out["entries"] = entries
 	case *Receipt:
 		out["receipt"] = conformanceReceipt{
 			ActionID:  value.ActionID,
@@ -382,6 +377,23 @@ func conformanceOutcome(revision int64, result any, err error) (any, error) {
 		}
 	}
 	return normalizeConformance(out), nil
+}
+
+func conformanceEntryOf(value *Entry) conformanceEntry {
+	entry := conformanceEntry{
+		ID:               value.ID,
+		State:            value.State,
+		ExperimentStatus: value.ExperimentStatus,
+		Observations:     make([]conformanceObservation, 0, len(value.Observations)),
+		InFlight:         append([]string{}, value.InFlight...),
+	}
+	for _, observation := range value.Observations {
+		entry.Observations = append(entry.Observations, conformanceObservation{
+			At:      observation.At,
+			Outcome: observation.Outcome,
+		})
+	}
+	return entry
 }
 
 func conformanceRefusal(err error) (string, bool) {

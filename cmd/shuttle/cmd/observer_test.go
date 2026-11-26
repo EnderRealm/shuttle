@@ -8,11 +8,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"shuttle/internal/config"
 	"shuttle/internal/ledger"
+	observercontract "shuttle/internal/observer"
 	"shuttle/internal/runner"
 )
 
@@ -73,9 +76,12 @@ printf 'collector %%s [%%s]\n' "$(pwd -P)" "$SHUTTLE_PROJECT_SECRET" >> %q
 printf '%%s\n' '{"status":"empty","evidence":[],"exploration":"Nothing moved in the window."}'
 `, domainCalls))
 	writeScript(t, filepath.Join(root, "notebook"), fmt.Sprintf(`#!/bin/sh
-cat >/dev/null
+request=$(cat)
 printf 'notebook %%s [%%s]\n' "$(pwd -P)" "$SHUTTLE_PROJECT_SECRET" >> %q
-printf '%%s\n' '{"revision":0}'
+case "$request" in
+  *'"operation":"list"'*) printf '%%s\n' '{"entries":[]}' ;;
+  *) printf '%%s\n' '{"revision":0}' ;;
+esac
 `, domainCalls))
 	definition := filepath.Join(root, "definition.json")
 	if err := os.WriteFile(definition, []byte(`{
@@ -317,4 +323,91 @@ func TestDaemonExecutesAConfiguredObserverThroughTheScheduledEntryPoint(t *testi
 		t.Fatalf("runs = %v, want the tick's cron claim, log:\n%s", runs, logs.String())
 	}
 	env.assertObserverRun(t, claimed)
+}
+
+// `shuttle observer list` reads the notebook locally, as a run builds it, and
+// needs no daemon: the socket it names here does not exist. Every entry is
+// printed, the retired one included.
+func TestObserverListPrintsEntries(t *testing.T) {
+	ctx := context.Background()
+	shuttleEnv(t)
+	home := os.Getenv("SHUTTLE_HOME")
+	t.Setenv(config.EnvObserverSocket, filepath.Join(home, "no-door.sock"))
+	definition := filepath.Join(home, "definition.json")
+	if err := os.WriteFile(definition, []byte(`{
+  "contract_version": "observer-run/v1",
+  "revision": "list-r1",
+  "identity": {"domain": "harness", "observer": "shuttle"},
+  "questions": [],
+  "instructions": "Report only what the retained evidence supports."
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, fmt.Sprintf(`{"observers": {"fixture": {"definition": %q, "held_notebook": true}}}`, definition))
+	held := observercontract.Held{Dir: filepath.Join(home, "notebooks", "harness", "shuttle"), Identity: doorIdentity}
+	data, err := os.ReadFile(filepath.Join(doorFixtures, "question.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	standing, err := observercontract.ValidateQuestion(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	landed := *standing
+	landed.ID = doorIdentity.Qualify("landed-change")
+	landed.Author = observercontract.Author{Kind: observercontract.AuthorWorker, Ref: "shuttle/landed-1234"}
+	for i, question := range []*observercontract.Question{standing, &landed} {
+		request := observercontract.Request{Identity: doorIdentity, Revision: int64(i), RequestID: question.ID}
+		if _, err := held.Register(ctx, request, question); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := held.Retire(ctx, observercontract.Request{Identity: doorIdentity, Revision: 2, RequestID: "retire"},
+		standing.ID, "asked again as a narrower question"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := execObserver(t, "", "list", "fixture")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var listed []observercontract.EntrySummary
+	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+		t.Fatalf("list printed %q: %v", out, err)
+	}
+	want := []observercontract.EntrySummary{
+		{ID: standing.ID, State: observercontract.StateRetired, Author: standing.Author},
+		{ID: landed.ID, State: observercontract.StateObserving, Author: landed.Author},
+	}
+	if !reflect.DeepEqual(listed, want) {
+		t.Fatalf("list printed %s, want %+v", out, want)
+	}
+
+	if _, err := execObserver(t, "", "list", "unregistered"); err == nil || !strings.Contains(err.Error(), `"unregistered" is not registered`) {
+		t.Fatalf("list of an unregistered observer: %v", err)
+	}
+}
+
+// A registration naming a domain command is listed through that command,
+// from its working directory and with a built environment, as a run calls it.
+func TestObserverListReadsTheDomainNotebook(t *testing.T) {
+	env := newObserverEnv(t)
+	out, err := execObserver(t, "", "list", "fixture")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("list printed %q, want the adapter's empty listing", out)
+	}
+	calls, err := os.ReadFile(env.domainCalls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDir, err := filepath.EvalSymlinks(env.domainRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(calls)); got != "notebook "+wantDir+" []" {
+		t.Fatalf("domain calls = %q, want one notebook call from %s with no inherited environment", got, wantDir)
+	}
 }

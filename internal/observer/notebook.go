@@ -3,6 +3,8 @@ package observer
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -59,6 +61,17 @@ func (m *Memory) Entry(id string) (*Entry, error) {
 		return nil, &Error{Field: "id", Err: fmt.Errorf("%q: %w", id, ErrNoEntry)}
 	}
 	return snapshot(e), nil
+}
+
+func (m *Memory) List() []*Entry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*Entry, 0, len(m.entries))
+	for _, e := range m.entries {
+		out = append(out, snapshot(e))
+	}
+	slices.SortFunc(out, func(a, b *Entry) int { return strings.Compare(a.ID, b.ID) })
+	return out
 }
 
 func (m *Memory) Register(req Request, q *Question) (*Entry, error) {

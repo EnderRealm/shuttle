@@ -52,6 +52,14 @@ func (n heldConformance) Entry(id string) (*Entry, error) {
 	return n.h.Entry(context.Background(), id)
 }
 
+func (n heldConformance) List() []*Entry {
+	entries, err := n.h.List(context.Background())
+	if err != nil {
+		n.t.Fatalf("list: %v", err)
+	}
+	return entries
+}
+
 func (n heldConformance) Register(req Request, q *Question) (*Entry, error) {
 	return n.h.Register(context.Background(), req, q)
 }
