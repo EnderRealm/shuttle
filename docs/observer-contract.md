@@ -39,7 +39,7 @@ guessed at from its shape.
 | Person's observation | an outcome and the facts as a person states them, with the time, and no bundle | a person, `author.kind` `human`, calling as the operator's uid | into the notebook through the door (§12) |
 | Correction | a person's observation that also names, in `corrects`, the observation it corrects and what was wrong with it | a person, `author.kind` `human`, calling as the operator's uid | into the notebook through the door |
 | Carried-over reading | a reading first recorded elsewhere, with the source it came from in `carried_over` and its original date in `at` | any declared author | into the notebook through the door |
-| Action | ticket-facing feedback under a stable id: a `ticket-note` on the entry's ticket, a `ticket-reopen` or `ticket-release` of it, or a `ticket-open` carrying the title of a ticket to create | the observer | out toward the ticket store, as a proposal (§11) |
+| Action | ticket-facing feedback under a stable id: a `ticket-note` on the entry's ticket, a `ticket-reopen`, `ticket-release` or `ticket-finish` of it, or a `ticket-open` carrying the title of a ticket to create | the observer | out toward the ticket store, as a proposal (§11) |
 | Receipt | what became of an action, under that same id | the observer, recording what the far store did | back from that store: `applied`, `refused` or `failed`, with its reference |
 
 `author` is a kind from a fixed vocabulary — `human`, `worker`, `observer` — and an
@@ -489,13 +489,14 @@ in model-authored output or the agent prompt:
 ```
 
 `tickets` is the observer's ticket write scope and is optional. `projects` names
-the tk projects its notes, reopens and releases may land in; `discovery_project`, one of
-them, is where a discovery is created; `max_discoveries` caps the tickets one
-run may create, and `0` refuses discoveries outright. When the block is present
-`paths.tk_config` must be an absolute path to a loadable tk config, since the
-store is opened from its `central_root` the way the tk providers open it. A
-registration without the block applies nothing: every action is retained and
-refused with the reason `ticket output is not configured for this observer`.
+the tk projects its notes, reopens, releases and finishes may land in;
+`discovery_project`, one of them, is where a discovery is created;
+`max_discoveries` caps the tickets one run may create, and `0` refuses
+discoveries outright. When the block is present `paths.tk_config` must be an
+absolute path to a loadable tk config, since the store is opened from its
+`central_root` the way the tk providers open it. A registration without the
+block applies nothing: every action is retained and refused with the reason
+`ticket output is not configured for this observer`.
 
 Both commands — the collector alone, for a held notebook — are executed directly
 as argv, never through a shell, from their declared working directories and with
@@ -578,7 +579,7 @@ widen it, target another ticket, or stand in for a person's decision.
 
 - **Authorization.** Exactly one assessment in the run must be about the
   action's entry, and `insufficient-evidence` authorizes nothing. A note,
-  reopen or release must name a standing question's own ticket — the
+  reopen, release or finish must name a standing question's own ticket — the
   experiment's, else the question's — in a configured project; a finding
   opened this run has no ticket and takes no note. A note follows a
   confirmation or an absence and never changes status. A reopen needs
@@ -586,19 +587,25 @@ widen it, target another ticket, or stand in for a person's decision.
   sufficiency rule re-run by shuttle against the snapshot entry; a pending
   activation, an incompatible baseline, a short window or too few
   opportunities refuses it. A release needs `effect-observed` — the event the
-  ticket was parked on occurred — and nothing else from the assessment. On a
-  parked ticket an absence never releases and never closes: however long it is
-  sustained, it only adds a note, and the ticket stays for a person to decide. A
-  discovery needs a finding, a title, and room under `max_discoveries`. An
-  action is applied only after its authorizing assessment's record receipt —
-  the request id the notebook admitted it under — is in `applied.json`;
-  without one the action is held as failed, never written.
+  ticket was parked on occurred — and nothing else from the assessment. A
+  finish needs the same `effect-observed` and nothing else from the
+  assessment, on a generic step — `workflow_kind: generic` — parked on
+  `waiting_on`: the event the step waits on occurred, so the step is done
+  without a person marking it. On a parked ticket an absence never releases,
+  never finishes and never closes: however long it is sustained, it only adds a
+  note, and the ticket stays for a person to decide. A discovery needs a
+  finding, a title, and room under `max_discoveries`. An action is applied only
+  after its authorizing assessment's record receipt — the request id the
+  notebook admitted it under — is in `applied.json`; without one the action is
+  held as failed, never written.
 - **Order.** Authorize; read the store once (a reopen needs its ticket `done` —
   `closed` is a decision and is not reopened; a release needs its ticket
   `backlog` with a non-blank `waiting_on`, and not an epic, whose status is
-  derived from its children; a ticket already holding a receipt under the
-  reopen or release id is left to tk, which replays an identical write and
-  refuses a different one; a discovery looks for the ticket already holding
+  derived from its children; a finish needs its ticket generic — a coding
+  ticket finishes by landing — with a non-blank `waiting_on`, neither `done`
+  nor `closed`, and not an epic; a ticket already holding a receipt under the
+  reopen, release or finish id is left to tk, which replays an identical write
+  and refuses a different one; a discovery looks for the ticket already holding
   its finding key, else a related one); claim in the notebook; write to tk;
   settle the receipt. What was read — the ticket precondition, or
   the prior or related ticket — is persisted with the claim's request id before
@@ -627,6 +634,12 @@ widen it, target another ticket, or stand in for a person's decision.
   proposal on the ticket carries a different note and is refused by the
   ticket's own receipt, even after a person parks it again, and the refusal is
   recorded.
+- **The finish cap.** Every finish is written under the fixed tk action id
+  `observer-finish`, through tk's `finish` transition: it clears `waiting_on`,
+  makes the generic step `done`, and lands the note and the receipt in the same
+  write. The cap is the reopen cap's: a second finish proposal on the ticket
+  carries a different note and is refused by the ticket's own receipt, and the
+  refusal is recorded.
 - **Discovery.** A finding key already claimed in the project is answered by
   the key — the same content replays, different content is refused. Otherwise
   the discovery project is searched for a related ticket: one whose title
@@ -662,55 +675,56 @@ widen it, target another ticket, or stand in for a person's decision.
   that lost a response, or died between stages, is resumed from the recorded
   stage by `ReconcileObserverActions`: a claim or settle replays under its id,
   a tk write that landed is answered `Replayed`, and a conflict — a moved
-  precondition, a different note under the reopen or release id — is recorded
-  as refused rather than written over. A release reconciles on the same terms:
-  a lost claim or settle, or a run that died after the claim or after the
-  release landed, resumes from its stage and leaves the ticket released once
-  under `observer-release`. The destination is bound at the decision: the
-  tk store root and, for a discovery, the project are persisted with the
-  record before the claim, and a resume whose registration now names another
-  store or `discovery_project` does not redirect the write; it records the
-  action `failed` with both destinations and leaves it for a person. An
-  assessment without a record receipt is replayed first under its original
-  request id; one the notebook still refuses is reported as the failure it is
-  and its action stays unadmitted. The operator entry point is
-  `shuttle reconcile <run-id>`. It takes only a failed run and refuses any
-  other before a notebook call. A failed run with nothing left to drive — every
-  assessment holds its receipt and every action is settled or refused — makes
-  no notebook call, so the retained `notebook_revision` is not rewritten, and
-  goes straight to the finish. A reconciliation that converges finishes the
-  run as a live one would: the report is prepared, `observer-result.json` is
-  rewritten as `applied` with the reconciled counts over the retained
-  collection, the row moves to `completed`, `result.json` follows it, and the
-  report is delivered. The failure streak, its incident and any pause it
-  caused stand. A report already filed for the run is not filed again. One
-  that does not converge rewrites `observer-result.json` with its counts as
-  `conflict-or-failure`; one whose finish fails rewrites it as `applied` with
-  the failure as its detail. Either leaves the row `failed`, and running the
-  reconciliation again resumes from there.
+  precondition, a different note under the reopen, release or finish id — is
+  recorded as refused rather than written over. A release reconciles on the
+  same terms: a lost claim or settle, or a run that died after the claim or
+  after the release landed, resumes from its stage and leaves the ticket
+  released once under `observer-release`. A finish reconciles on the terms a
+  release does and leaves the step finished once under `observer-finish`. The
+  destination is bound at the decision: the tk store root and, for a discovery,
+  the project are persisted with the record before the claim, and a resume
+  whose registration now names another store or `discovery_project` does not
+  redirect the write; it records the action `failed` with both destinations and
+  leaves it for a person. An assessment without a record receipt is replayed
+  first under its original request id; one the notebook still refuses is
+  reported as the failure it is and its action stays unadmitted. The operator
+  entry point is `shuttle reconcile <run-id>`. It takes only a failed run and
+  refuses any other before a notebook call. A failed run with nothing left to
+  drive — every assessment holds its receipt and every action is settled or
+  refused — makes no notebook call, so the retained `notebook_revision` is not
+  rewritten, and goes straight to the finish. A reconciliation that converges
+  finishes the run as a live one would: the report is prepared,
+  `observer-result.json` is rewritten as `applied` with the reconciled counts
+  over the retained collection, the row moves to `completed`, `result.json`
+  follows it, and the report is delivered. The failure streak, its incident and
+  any pause it caused stand. A report already filed for the run is not filed
+  again. One that does not converge rewrites `observer-result.json` with its
+  counts as `conflict-or-failure`; one whose finish fails rewrites it as
+  `applied` with the failure as its detail. Either leaves the row `failed`, and
+  running the reconciliation again resumes from there.
 - **Retirement.** §6's ordering holds at the apply layer: a retirement ahead of
   the claim refuses it, and one behind it reports the action in flight while
   the write lands and settles under its own id, leaving the question retired.
 - **A person's observed event.** A person who saw the event a ticket is parked
   on says so with an `observe` carrying `effect-observed` (§12), and that
-  authorizes the release a run's `effect-observed` would. tk has no finish
-  transition, so "release or finish" is the release today. The door applies it
-  right after the observation is recorded, on the run's terms: the standing
-  question's own ticket, the experiment's else the question's, in the
-  registration's configured `projects`; a `backlog` non-epic ticket with a
-  non-blank `waiting_on`, read once and held against that precondition; tk's
-  `release` under `observer-release`, so the release cap is the same cap. The
-  observation is the authority in place of a run's assessment, so there is no
-  claim or receipt in the notebook; the observation's own record is the
-  admission. The note is composed by shuttle from the validated observation —
-  author, entry, outcome, its `at`, the door request id and each fact as one
-  literal line — and reads no clock, so a repeat of the same door call replays
-  identically at tk, and that repeat is how a release that failed is tried
-  again. Another person's observation composes another note and is refused by
-  the ticket's receipt. A refused or failed release never undoes the
-  observation. Any other outcome from a person, every correction and every
-  carried-over reading authorize nothing: no ticket is read or written for
-  them.
+  authorizes the release a run's `effect-observed` would. The door never
+  finishes: a finish is a run's action alone, so "release or finish" is the
+  release here. The door applies it right after the observation is recorded, on
+  the run's terms: the standing question's own ticket, the experiment's else
+  the question's, in the registration's configured `projects`; a `backlog`
+  non-epic ticket with a non-blank `waiting_on`, read once and held against
+  that precondition; tk's `release` under `observer-release`, so the release
+  cap is the same cap. The observation is the authority in place of a run's
+  assessment, so there is no claim or receipt in the notebook; the
+  observation's own record is the admission. The note is composed by shuttle
+  from the validated observation — author, entry, outcome, its `at`, the door
+  request id and each fact as one literal line — and reads no clock, so a
+  repeat of the same door call replays identically at tk, and that repeat is
+  how a release that failed is tried again. Another person's observation
+  composes another note and is refused by the ticket's receipt. A refused or
+  failed release never undoes the observation. Any other outcome from a person,
+  every correction and every carried-over reading authorize nothing: no ticket
+  is read or written for them.
 
 ## 12. The observer door
 

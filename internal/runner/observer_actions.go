@@ -48,6 +48,12 @@ const observerReopenActionID = "observer-reopen"
 // ticket's own receipt, so a ticket is released by an observer once.
 const observerReleaseActionID = "observer-release"
 
+// observerFinishActionID is the tk action id every observer finish is written
+// under, fixed per ticket for the reason observerReopenActionID is: a second
+// finish proposal carries a different note and is refused by the ticket's own
+// receipt, so a step is finished by an observer once.
+const observerFinishActionID = "observer-finish"
+
 // relatedTitleTerms is the number of distinct query terms (relatedTicketTerms)
 // that must occur as whole words in an existing ticket's title for it to be
 // taken as already tracking a discovery. Only the title counts: body and note
@@ -64,11 +70,11 @@ const reasonTicketsNotConfigured = "ticket output is not configured for this obs
 //
 // What the ticket store was read as is persisted, with the claim's request
 // id, before the claim is attempted, and reused by every retry of the claim
-// and the write, never re-read: Precondition is the token a note, reopen or
-// release is held against; Prior is the ticket already holding a discovery's
-// finding key; Related is the ticket a discovery notes instead of creating,
-// with Precondition read from it. Created is set when this run's write made
-// the discovery's ticket.
+// and the write, never re-read: Precondition is the token a note, reopen,
+// release or finish is held against; Prior is the ticket already holding a
+// discovery's finding key; Related is the ticket a discovery notes instead of
+// creating, with Precondition read from it. Created is set when this run's
+// write made the discovery's ticket.
 //
 // Store and Project are the destination the decision was taken against — the
 // tk store root the ticket was read from and, for a discovery, the project it
@@ -218,6 +224,9 @@ func (p *Pipeline) applyObserverAction(ctx context.Context, runID, runDir string
 			if reason == "" {
 				reason = releasePrecondition(action, t)
 			}
+			if reason == "" {
+				reason = finishPrecondition(action, t)
+			}
 			if reason != "" {
 				return refuse(reason)
 			}
@@ -356,6 +365,14 @@ func authorizeObserverAction(tickets *config.ObserverTickets, state *observerRun
 		}
 		return ""
 	}
+	if action.Kind == observercontract.ActionTicketFinish {
+		// The observed event is the finish's whole authority, as it is a
+		// release's. An absence, however sustained, never finishes a step.
+		if assessment.Outcome != observercontract.OutcomeEffectObserved {
+			return fmt.Sprintf("a finish needs %s; the assessment found %s", observercontract.OutcomeEffectObserved, assessment.Outcome)
+		}
+		return ""
+	}
 	if action.Kind != observercontract.ActionTicketReopen {
 		return ""
 	}
@@ -460,6 +477,35 @@ func releasePrecondition(action *observercontract.Action, t *ticket.Ticket) stri
 	return ""
 }
 
+// finishPrecondition holds a finish to a generic step, not an epic, parked on
+// a nonblank waiting_on and neither done nor closed: a coding ticket finishes
+// by landing, and a step with nothing to wait on is a person's to mark. A
+// ticket already carrying the finish receipt is left to tk: the finish cleared
+// its waiting_on and made it done, so only the receipt can tell an identical
+// replay, which lands, from a different proposal, which tk refuses under the
+// fixed id.
+func finishPrecondition(action *observercontract.Action, t *ticket.Ticket) string {
+	if action.Kind != observercontract.ActionTicketFinish {
+		return ""
+	}
+	if _, ok := tkReceipt(t, ticket.ReceiptApply, observerFinishActionID); ok {
+		return ""
+	}
+	if t.Type == ticket.TypeEpic {
+		return fmt.Sprintf("ticket %s is an epic; its status is derived from its children", t.ID)
+	}
+	if kind := ticket.WorkflowKindOf(t); kind != ticket.WorkflowGeneric {
+		return fmt.Sprintf("ticket %s is %s, not %s; a coding ticket finishes by landing", t.ID, kind, ticket.WorkflowGeneric)
+	}
+	if ticket.WaitingOn(t) == "" {
+		return fmt.Sprintf("ticket %s has no %s; only a step parked on an event is finished", t.ID, ticket.WaitingOnField)
+	}
+	if t.Status == ticket.StatusDone || t.Status == ticket.StatusClosed {
+		return fmt.Sprintf("ticket %s is already %s", t.ID, t.Status)
+	}
+	return ""
+}
+
 func (p *Pipeline) claimObserverAction(ctx context.Context, state *observerRunState, requestID string, action *observercontract.Action) error {
 	revision, err := state.Notebook.Revision(ctx)
 	if err != nil {
@@ -517,9 +563,9 @@ func notebookRefusal(err error) bool {
 
 // writeObserverTicket performs the one tk write an action proposes and fills
 // the record with the receipt outcome. Notes are the whole write surface: a
-// note on the entry's ticket, the reopen or release transition tk permits, or
-// a backlog ticket a discovery creates. No description, acceptance or design is edited
-// on any path.
+// note on the entry's ticket, the reopen, release or finish transition tk
+// permits, or a backlog ticket a discovery creates. No description, acceptance
+// or design is edited on any path.
 func (p *Pipeline) writeObserverTicket(store ticket.Store, runID string, identity observercontract.Identity, tickets *config.ObserverTickets, action *observercontract.Action, assessment *observercontract.Assessment, record *observerActionRecord) {
 	var result *ticket.ActionResult
 	var err error
@@ -538,6 +584,11 @@ func (p *Pipeline) writeObserverTicket(store ticket.Store, runID string, identit
 		result, err = ticket.ApplyAction(store, ticket.ActionRequest{
 			ID: action.Ticket, ActionID: observerReleaseActionID, Precondition: record.Precondition,
 			Note: observerNoteText(runID, identity, action, assessment), Transition: ticket.TransitionRelease,
+		})
+	case observercontract.ActionTicketFinish:
+		result, err = ticket.ApplyAction(store, ticket.ActionRequest{
+			ID: action.Ticket, ActionID: observerFinishActionID, Precondition: record.Precondition,
+			Note: observerNoteText(runID, identity, action, assessment), Transition: ticket.TransitionFinish,
 		})
 	case observercontract.ActionTicketOpen:
 		result, err = p.discoverObserverTicket(store, runID, identity, tickets, action, assessment, record)
@@ -569,6 +620,8 @@ func tkWriteOutcome(kind string, err error) (string, string) {
 		return observercontract.ReceiptRefused, "the ticket was already reopened once by an observer"
 	case errors.Is(err, ticket.ErrActionConflict) && kind == observercontract.ActionTicketRelease:
 		return observercontract.ReceiptRefused, "the ticket was already released once by an observer"
+	case errors.Is(err, ticket.ErrActionConflict) && kind == observercontract.ActionTicketFinish:
+		return observercontract.ReceiptRefused, "the ticket was already finished once by an observer"
 	case errors.Is(err, ticket.ErrActionConflict), errors.Is(err, ticket.ErrTransitionNotPermitted):
 		return observercontract.ReceiptRefused, err.Error()
 	default:

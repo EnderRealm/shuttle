@@ -976,6 +976,291 @@ func TestObserverReleaseRefusals(t *testing.T) {
 	}
 }
 
+// genericStep marks the provenance ticket a generic step, the kind an
+// observer may finish.
+func genericStep(tkt *ticket.Ticket) { tkt.WorkflowKind = ticket.WorkflowGeneric }
+
+// finishFor is a ticket-finish proposal on the observer's own question and
+// ticket, carrying the observed answer's first source as its evidence.
+func finishFor(to *ticketObserver, answer *observercontract.Assessment, name, body string) *observercontract.Action {
+	return proposal(to.question.Identity, name, observercontract.ActionTicketFinish, to.question.ID, to.ticketID, body, answer.Evidence.Sources[:1])
+}
+
+func TestObserverFinishAuthorizedOnObserved(t *testing.T) {
+	answer := observedAnswer(t)
+	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+	to.park(t, genericStep)
+	identity := to.question.Identity
+	finish := finishFor(to, answer, "finish", "The event the step waited on happened on all three nights.")
+	parked := to.tk.get(t, to.ticketID)
+
+	_, result, err := to.run(t, silentManifest([]any{answer}, []any{finish}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := to.tk.get(t, to.ticketID)
+	if finished.Status != ticket.StatusDone || len(finished.Notes) != 1 || !strings.Contains(finished.Notes[0].Text, "Evidence:") {
+		t.Fatalf("ticket = %s, %d notes; want it done with the evidence note", finished.Status, len(finished.Notes))
+	}
+	if _, ok := finished.Extra[ticket.WaitingOnField]; ok {
+		t.Fatal("waiting_on is still on the finished ticket")
+	}
+	receipt, ok := tkReceipt(finished, ticket.ReceiptApply, observerFinishActionID)
+	if !ok || receipt.Outcome != string(ticket.StatusDone) || len(finished.Actions) != 1 {
+		t.Fatalf("tk receipts = %+v; want the finish recorded under the fixed observer id", finished.Actions)
+	}
+	if settled := to.receipt(t, finish.ID); settled.Outcome != observercontract.ReceiptApplied || settled.Reference != to.ticketID+"@"+receipt.At {
+		t.Fatalf("notebook receipt = %+v", settled)
+	}
+	if a := readApplied(t, result.RunDir).Actions[0]; a.Stage != actionStageSettled || a.Outcome != observercontract.ReceiptApplied ||
+		a.Kind != observercontract.ActionTicketFinish || a.Ticket != to.ticketID || a.Precondition != parked.Precondition() || a.Reason != "" {
+		t.Fatalf("record = %+v, want it settled applied against the parked step's precondition", a)
+	}
+	if outcome := readObserverResult(t, result.RunDir); outcome.ActionsApplied != 1 || outcome.ActionsRefused != 0 {
+		t.Fatalf("observer-result.json = %+v", outcome)
+	}
+
+	// A person parks the step again and a later question on it reads the event
+	// again. The ticket itself refuses a second finish: the fixed action id
+	// already carries a different note.
+	to.park(t, nil)
+	again := *to.question
+	again.ID = identity.Qualify("days-repeating-again")
+	seedQuestion(t, to.o, &again, nil)
+	answerAgain := *answer
+	answerAgain.QuestionID = again.ID
+	second := proposal(identity, "finish-again", observercontract.ActionTicketFinish, again.ID, to.ticketID,
+		"The event happened again.", answer.Evidence.Sources[:1])
+	_, secondResult, err := to.run(t, silentManifest([]any{&answerAgain}, []any{second}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	still := to.tk.get(t, to.ticketID)
+	if still.Status != ticket.StatusBacklog || ticket.WaitingOn(still) == "" || len(still.Notes) != 1 || len(still.Actions) != 1 {
+		t.Fatalf("ticket after the second proposal = %s, waiting_on %q, %d notes, %d receipts; want it left parked with the first note only",
+			still.Status, ticket.WaitingOn(still), len(still.Notes), len(still.Actions))
+	}
+	a := readApplied(t, secondResult.RunDir).Actions[0]
+	if a.Stage != actionStageSettled || a.Outcome != observercontract.ReceiptRefused || a.Reason != "the ticket was already finished once by an observer" {
+		t.Fatalf("second record = %+v", a)
+	}
+	if settled := to.receipt(t, second.ID); settled.Outcome != observercontract.ReceiptRefused {
+		t.Fatalf("second notebook receipt = %+v, want the refusal settled under the claim", settled)
+	}
+	if outcome := readObserverResult(t, secondResult.RunDir); outcome.ActionsRefused != 1 || outcome.ActionsApplied != 0 {
+		t.Fatalf("observer-result.json = %+v", outcome)
+	}
+}
+
+func TestObserverFinishRefusals(t *testing.T) {
+	answer := observedAnswer(t)
+	absent := harnessAssessment(t, "assessment.json")
+	insufficient := *absent
+	insufficient.Outcome = observercontract.OutcomeInsufficient
+	insufficient.Interpretation = "One night ran after the gate; that is too little to say whether the event occurred."
+	const body = "The event the step waited on happened."
+	// unfinished fails unless the ticket is left with the status and
+	// waiting_on it had before the run and carries no observer finish.
+	unfinished := func(t *testing.T, to *ticketObserver, before *ticket.Ticket) {
+		t.Helper()
+		after := to.tk.get(t, to.ticketID)
+		if _, ok := tkReceipt(after, ticket.ReceiptApply, observerFinishActionID); ok ||
+			after.Status != before.Status || ticket.WaitingOn(after) != ticket.WaitingOn(before) {
+			t.Fatalf("ticket = %s, waiting_on %q, %d receipts; want it left %s waiting on %q with no observer finish",
+				after.Status, ticket.WaitingOn(after), len(after.Actions), before.Status, ticket.WaitingOn(before))
+		}
+	}
+
+	t.Run("an absence only notes", func(t *testing.T) {
+		to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{absent.Evidence})
+		to.park(t, genericStep)
+		before := to.tk.get(t, to.ticketID)
+		note := proposal(to.question.Identity, "absent", observercontract.ActionTicketNote, to.question.ID, to.ticketID,
+			"The event has had its opportunity and has not happened.", absent.Evidence.Sources)
+		finish := finishFor(to, answer, "finish", body)
+		_, result, err := to.run(t, silentManifest([]any{absent}, []any{note, finish}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		unfinished(t, to, before)
+		if after := to.tk.get(t, to.ticketID); len(after.Notes) != 1 || after.Status == ticket.StatusClosed || after.Status == ticket.StatusDone {
+			t.Fatalf("ticket = %s with %d notes; want the absence noted and the step still parked for a person", after.Status, len(after.Notes))
+		}
+		records := readApplied(t, result.RunDir).Actions
+		if records[0].Stage != actionStageSettled || records[0].Outcome != observercontract.ReceiptApplied {
+			t.Fatalf("note record = %+v", records[0])
+		}
+		if a := records[1]; a.Stage != actionStageRefused || a.Outcome != observercontract.ReceiptRefused ||
+			a.Reason != "a finish needs "+observercontract.OutcomeEffectObserved+"; the assessment found "+observercontract.OutcomeEffectAbsent {
+			t.Fatalf("finish record = %+v", a)
+		}
+		if _, ok := to.notebook(t).Receipts[finish.ID]; ok {
+			t.Fatal("a refused finish was claimed")
+		}
+		if outcome := readObserverResult(t, result.RunDir); outcome.ActionsApplied != 1 || outcome.ActionsRefused != 1 {
+			t.Fatalf("observer-result.json = %+v", outcome)
+		}
+	})
+
+	t.Run("insufficient evidence never finishes", func(t *testing.T) {
+		to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{insufficient.Evidence})
+		to.park(t, genericStep)
+		before := to.tk.get(t, to.ticketID)
+		finish := finishFor(to, answer, "finish", body)
+		_, result, err := to.run(t, silentManifest([]any{&insufficient}, []any{finish}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		unfinished(t, to, before)
+		if a := readApplied(t, result.RunDir).Actions[0]; a.Stage != actionStageRefused || !strings.Contains(a.Reason, "insufficient evidence") {
+			t.Fatalf("record = %+v", a)
+		}
+		if _, ok := to.notebook(t).Receipts[finish.ID]; ok {
+			t.Fatal("a refused finish was claimed")
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		edit func(*ticket.Ticket)
+		want string
+	}{
+		{name: "a coding ticket", want: "is coding, not generic"},
+		{name: "a step not parked on an event", edit: func(tkt *ticket.Ticket) {
+			genericStep(tkt)
+			delete(tkt.Extra, ticket.WaitingOnField)
+		}, want: "has no waiting_on"},
+		{name: "an epic", edit: func(tkt *ticket.Ticket) {
+			genericStep(tkt)
+			tkt.Type = ticket.TypeEpic
+		}, want: "is an epic"},
+		{name: "already done", edit: func(tkt *ticket.Ticket) {
+			genericStep(tkt)
+			tkt.Status = ticket.StatusDone
+		}, want: "is already done"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+			to.park(t, test.edit)
+			before := to.tk.get(t, to.ticketID)
+			beforeFile, err := os.ReadFile(to.ticketFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finish := finishFor(to, answer, "finish", body)
+			_, result, err := to.run(t, silentManifest([]any{answer}, []any{finish}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := readApplied(t, result.RunDir).Actions[0]
+			if a.Stage != actionStageRefused || a.Outcome != observercontract.ReceiptRefused || !strings.Contains(a.Reason, test.want) {
+				t.Fatalf("record = %+v, want it refused with a reason naming %q", a, test.want)
+			}
+			unfinished(t, to, before)
+			if _, ok := to.notebook(t).Receipts[finish.ID]; ok {
+				t.Fatal("a refused finish was claimed")
+			}
+			current, err := os.ReadFile(to.ticketFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(current) != string(beforeFile) {
+				t.Fatal("ticket file changed under a refused finish")
+			}
+			if outcome := readObserverResult(t, result.RunDir); outcome.ActionsRefused != 1 || outcome.ActionsApplied != 0 {
+				t.Fatalf("observer-result.json = %+v", outcome)
+			}
+		})
+	}
+}
+
+func TestObserverFinishReconciles(t *testing.T) {
+	answer := observedAnswer(t)
+	for _, test := range []struct {
+		name    string
+		prepare func(state *observerNotebookState)
+		// crashed rewrites the failed run's record to the stage a crash a
+		// moment later would have left, or leaves it as the run did.
+		crashed  string
+		detail   string
+		replayed bool
+	}{
+		{name: "claim response lost twice", prepare: func(s *observerNotebookState) { s.CrashClaim = 2 }, detail: "-claim-001"},
+		{name: "crash after the claim was recorded", prepare: func(s *observerNotebookState) { s.CrashClaim = 2 }, crashed: actionStageClaimed, detail: "-claim-001"},
+		{name: "settle response lost twice", prepare: func(s *observerNotebookState) { s.FailSettle = 2 }, detail: "-settle-001"},
+		{name: "crash after the finish landed", prepare: func(s *observerNotebookState) { s.FailSettle = 2 }, crashed: actionStageClaimed, detail: "-settle-001", replayed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{answer.Evidence})
+			to.park(t, genericStep)
+			state := to.notebook(t)
+			test.prepare(&state)
+			writeJSONFixture(t, to.o.state, state)
+			finish := finishFor(to, answer, "finish", "The event the step waited on happened.")
+			run, _, err := to.run(t, silentManifest([]any{answer}, []any{finish}))
+			if err == nil || !strings.Contains(err.Error(), run.ID+test.detail) {
+				t.Fatalf("err = %v, want the lost request named", err)
+			}
+			row, err := to.f.store.Get(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.Status != ledger.StatusFailed || row.FailureClass.String != failure.Output {
+				t.Fatalf("row = %+v", row)
+			}
+			if outcome := readObserverResult(t, row.RunDir.String); outcome.NotebookStatus != "conflict-or-failure" || !strings.Contains(outcome.Detail, test.detail) {
+				t.Fatalf("observer-result.json = %+v", outcome)
+			}
+			if test.crashed != "" {
+				applied := readApplied(t, row.RunDir.String)
+				applied.Actions[0].Stage = test.crashed
+				if err := writeObserverApplied(to.f.pipeline, run.ID, row.RunDir.String, &applied); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := to.f.pipeline.ReconcileObserverActions(context.Background(), to.f.def, row); err != nil {
+				t.Fatal(err)
+			}
+			after := to.tk.get(t, to.ticketID)
+			receipt, ok := tkReceipt(after, ticket.ReceiptApply, observerFinishActionID)
+			if !ok || after.Status != ticket.StatusDone || ticket.WaitingOn(after) != "" || len(after.Notes) != 1 || len(after.Actions) != 1 {
+				t.Fatalf("ticket = %s, waiting_on %q, %d notes, %d receipts; want it finished exactly once after reconciliation",
+					after.Status, ticket.WaitingOn(after), len(after.Notes), len(after.Actions))
+			}
+			settled := to.receipt(t, finish.ID)
+			if settled.Status != observercontract.ReceiptSettled || settled.Outcome != observercontract.ReceiptApplied ||
+				settled.Reference != to.ticketID+"@"+receipt.At {
+				t.Fatalf("notebook receipt = %+v", settled)
+			}
+			a := readApplied(t, row.RunDir.String).Actions[0]
+			if a.Stage != actionStageSettled || a.Outcome != observercontract.ReceiptApplied || a.Replayed != test.replayed ||
+				a.ClaimRequest != run.ID+"-claim-001" || a.SettleRequest != run.ID+"-settle-001" {
+				t.Fatalf("record = %+v", a)
+			}
+			notebook := to.notebook(t)
+			if len(notebook.Requests) != 3 || notebook.CrashClaim != 0 || notebook.FailSettle != 0 {
+				t.Fatalf("notebook requests = %d, want record, claim and settle once each", len(notebook.Requests))
+			}
+			if entry := to.entry(t, to.question.ID); len(entry.InFlight) != 0 {
+				t.Fatalf("entry still carries %v in flight", entry.InFlight)
+			}
+			converged, err := to.f.store.Get(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if converged.Status != ledger.StatusCompleted || converged.FailureClass.String != failure.Output || !converged.Silent {
+				t.Fatalf("row after reconciliation = %+v, want it completed with its failure class kept", converged)
+			}
+			reconciled := readObserverResult(t, row.RunDir.String)
+			if reconciled.NotebookStatus != "applied" || reconciled.Detail != "" ||
+				reconciled.ActionsApplied != 1 || reconciled.ActionsRefused != 0 || reconciled.ActionsFailed != 0 ||
+				reconciled.NotebookRevision != readApplied(t, row.RunDir.String).NotebookRevision {
+				t.Fatalf("observer-result.json after reconciliation = %+v", reconciled)
+			}
+		})
+	}
+}
+
 func TestObserverRetirementDuringTheRunLeavesTheTicketAlone(t *testing.T) {
 	absent := harnessAssessment(t, "assessment.json")
 	to := newTicketObserver(t, "experiment.json", []*observercontract.Bundle{absent.Evidence})

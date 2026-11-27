@@ -54,11 +54,12 @@ may carry a Finding instead of question_id.
 
 You have no shell and no access to the domain stores. Write nothing outside out/.
 The harness validates and records assessments, then applies actions only within
-the operator's configured ticket scope: a note, reopen or release must name the
-entry's own ticket and be authorized by this run's assessment of that entry (a
-release only by effect-observed on a ticket parked in backlog on waiting_on),
-and a ticket-open must carry a title and a finding. Anything else is refused
-after you exit.
+the operator's configured ticket scope: a note, reopen, release or finish must
+name the entry's own ticket and be authorized by this run's assessment of that
+entry (a release only by effect-observed on a ticket parked in backlog on
+waiting_on, a finish only by effect-observed on a generic ticket parked on
+waiting_on), and a ticket-open must carry a title and a finding. Anything else
+is refused after you exit.
 `
 
 // observerDefinition is the strict observer-run/v1 definition. Questions is

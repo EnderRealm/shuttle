@@ -170,8 +170,8 @@ type Observer struct {
 }
 
 // ObserverTickets is the ticket write scope of one observer: the tk projects
-// its notes, reopens and releases may land in and its discoveries may be
-// created in, which of those a discovery is created in, and how many
+// its notes, reopens, releases and finishes may land in and its discoveries
+// may be created in, which of those a discovery is created in, and how many
 // discoveries one run may create. Absent, the observer's actions are retained
 // and refused rather than applied.
 type ObserverTickets struct {
