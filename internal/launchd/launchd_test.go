@@ -146,6 +146,45 @@ func TestUpdaterSpecKeepsATunedInterval(t *testing.T) {
 	}
 }
 
+// The export job is a daily calendar start, not a kept-alive service: the
+// plist carries StartCalendarInterval and neither KeepAlive nor RunAtLoad.
+func TestExportSpecStartsDaily(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+	t.Setenv(config.EnvAgentsDir, filepath.Join(home, "agents"))
+	spec, err := ExportSpec("/bin/shuttle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Label != ExportLabel || !reflect.DeepEqual(spec.Args, []string{"state", "export"}) ||
+		spec.LogPath != filepath.Join(home, "export.log") || spec.Env[config.EnvHome] != home {
+		t.Fatalf("export spec = %+v", spec)
+	}
+	plist := spec.PlistXML()
+	want := "    <key>StartCalendarInterval</key>\n    <dict>\n" +
+		"        <key>Hour</key>\n        <integer>5</integer>\n" +
+		"        <key>Minute</key>\n        <integer>30</integer>\n" +
+		"    </dict>\n"
+	if !strings.Contains(plist, want) {
+		t.Fatalf("plist lacks the daily start:\n%s", plist)
+	}
+	for _, key := range []string{"KeepAlive", "RunAtLoad", "ThrottleInterval"} {
+		if strings.Contains(plist, "<key>"+key+"</key>") {
+			t.Fatalf("plist carries %s:\n%s", key, plist)
+		}
+	}
+	if _, err := exec.LookPath("plutil"); err != nil {
+		return
+	}
+	path := filepath.Join(t.TempDir(), spec.Label+".plist")
+	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("plutil", "-lint", path).CombinedOutput(); err != nil {
+		t.Fatalf("plutil -lint: %v: %s\n%s", err, out, plist)
+	}
+}
+
 func TestDaemonPlistLints(t *testing.T) {
 	if _, err := exec.LookPath("plutil"); err != nil {
 		t.Skip("plutil not available")

@@ -135,7 +135,9 @@ forward-only ledger migrated, and reaches desktops that decode strictly. So a cy
    `shuttle.previous`. A rename, never a write in place: macOS kills a process whose signed
    executable's pages change.
 6. **Restart** the daemon and watchdog: `<new binary> updater rebootstrap`, which is bootout and
-   bootstrap. `launchctl kickstart` leaves a running job alone, and `-k` has launchd refuse a
+   bootstrap. It re-registers the export job first, following config.json as `install daemon`
+   does (installed when `export.destination` is set, removed when not): launchd spawns that job
+   afresh every day and would refuse the new binary under the old registration. `launchctl kickstart` leaves a running job alone, and `-k` has launchd refuse a
    binary signed differently from the one it bootstrapped; see loom's "macOS caveat".
 7. **Confirm** `/v2/service` reports `shuttle <tag>`, exactly.
 8. **Resume,** lifting the pause and the barrier together, then restart the updater itself, last,

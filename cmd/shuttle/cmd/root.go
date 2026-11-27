@@ -17,7 +17,7 @@ Usage: shuttle <command> [args]
 
 Implemented: 'version', 'agents', 'daemon', 'status', 'runs', 'show', 'ack',
 'preflight', 'pause', 'resume', 'install', 'uninstall', 'deliver', 'reconcile',
-'updater', 'weft', 'observer' and 'run'.
+'updater', 'weft', 'observer', 'state' and 'run'.
 Manual and daemon claims execute the same retained, sandboxed pipeline; --dry-run
 stops after inputs and prompt. The rest is the phase 1 surface (docs/phase1-design.md §12) that the
 remaining phase 1 tickets fill in.
@@ -61,7 +61,10 @@ Lifecycle:
   install [daemon|updater]     Create the state root and the reports repo;
                                  'daemon' also installs the launchd jobs,
                                  'updater' the updater's alone
-  uninstall                    Remove the updater, watchdog and daemon jobs
+  uninstall                    Remove the updater, export, watchdog and daemon
+                                 jobs
+  state export                 Copy the ledger, run directories and reports
+                                 repo to config.json's export.destination
   updater daemon | once        Install new releases: the launchd job, or one
                                  check by hand (docs/releasing.md)
   version                      Print the version string

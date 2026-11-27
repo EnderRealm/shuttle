@@ -18,7 +18,7 @@ var uninstallCmd = &cobra.Command{
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// The updater first, so it cannot restart what the rest of this removes.
-		for _, label := range []string{launchd.UpdaterLabel, launchd.WatchdogLabel, launchd.DaemonLabel} {
+		for _, label := range []string{launchd.UpdaterLabel, launchd.ExportLabel, launchd.WatchdogLabel, launchd.DaemonLabel} {
 			if err := uninstallLaunchAgent(label); err != nil {
 				return err
 			}

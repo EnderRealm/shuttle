@@ -85,6 +85,8 @@ State lives under `$SHUTTLE_HOME`, default `~/.shuttle`:
   notebooks/<domain>/<observer>/ a held observer notebook, a git repo of its own
                                  (docs/observer-contract.md §5)
   daemon.log                     launchd stdout+stderr
+  export.log                     what each `shuttle state export` did (§13)
+  export-staging/                where the export stages the ledger's backup (§4.2)
   daemon-start-failure           the error the daemon last failed to start on
   notify.state                   notification cooldowns
 ```
@@ -178,9 +180,37 @@ email"; `config.json` says to whom. A prompt cannot change where mail goes.
     "loom_bin": "/Users/steve/.local/bin/loom"
   },
   "notify": { "enabled": true, "cooldown_minutes": 60 },
-  "limits": { "daily_runs_per_agent": 3, "daily_spend_usd": 10.0 }
+  "limits": { "daily_runs_per_agent": 3, "daily_spend_usd": 10.0 },
+  "export": { "destination": "/Volumes/shuttle/studio" }
 }
 ```
+
+`export.destination` is where `shuttle state export` copies the run state, an
+absolute path to a mounted share; unset, `shuttle install daemon` installs no
+export job. The export never creates it, so an unmounted share fails the export
+rather than filling its mount point on the local disk. The copy is laid out as
+the state root is: `runs.db`, taken through SQLite's online backup from a
+read-only connection so it is one commit's ledger while the daemon writes, then
+`runs/` and `reports/` (its `.git` included) as plain files, a file the same size
+and modification second as its copy left alone (a share keeps coarser mtimes than
+APFS). Each file, `runs.db` included, replaces its copy by rename. Before anything
+is replaced the export checks that the destination and every directory of the
+previous copy are writable and that none of the copy is a symlink, which no
+export writes, so a refused export replaces nothing; every write then goes
+through an `os.Root` on the destination, so a symlink the share swaps in later
+cannot carry a write out of it either; one that fails
+part way, a full share for instance, can leave a copy whose every file is whole
+but whose set mixes the previous export and this one until the next completes.
+The copy never deletes: a file pruned from the state root stays in it. Symlinks
+are not followed and not copied, and every file is looked at and opened through
+an `os.Root` on its tree, so an entry a run swaps for a symlink after the walk
+listed it, or below a directory it swapped, is skipped rather than read from
+outside the tree; `notebooks/` has its own remote and is not copied. A restore is a copy of that tree onto a clean state root. The copy holds
+every run's directory, so every sandbox profile denies reads of the destination,
+as configured and as resolved, as it denies the state root (§11). The ledger's
+backup is staged in `export-staging/` under the state root, never the system
+temporary directory, and the profile denies that directory by name too, since it
+denies the state root itself only when that is `~/.shuttle`.
 
 Secrets are never in this file and never in a plist. Both are Keychain generic
 password items read at use time with `security find-generic-password -s <item> -w`,
@@ -856,6 +886,7 @@ shuttle ack <incident-id>
 shuttle pause <agent> | resume <agent>
 shuttle prune --older 30d
 shuttle install daemon | uninstall  launchd (§13)
+shuttle state export                copy the run state to export.destination (§4.2)
 shuttle version
 ```
 
@@ -894,7 +925,18 @@ carrying none of them. The binary reaches `~/.local/bin/shuttle` by `make instal
 once, and by release from then on: `shuttle install daemon` also installs
 `com.shuttle.updater`, a third job running `Args: ["updater", "daemon"]` with the same
 environment plus `SHUTTLE_UPDATER_INTERVAL_MINUTES`, logging to
-`~/.shuttle/updater.log`, and `shuttle uninstall` removes it first.
+`~/.shuttle/updater.log`, and `shuttle uninstall` removes it first. Where
+config.json sets `export.destination`, `shuttle install daemon` also installs
+`com.shuttle.export`, ahead of the other three: `Args: ["state", "export"]`, the
+daemon's environment, `StartCalendarInterval` daily at 05:30 local (after the
+daily agent's slot; launchd runs a start missed in sleep on wake), no
+`KeepAlive` or `RunAtLoad`, logging to `~/.shuttle/export.log`. It depends on
+neither the daemon nor the scheduler, and install does not wait on a process for
+it. Where `export.destination` is unset, `shuttle install daemon` removes an
+export job installed before. The updater's `updater rebootstrap` does the same
+ahead of the daemon and watchdog, so the job is re-registered under each new
+binary ([`releasing.md`](releasing.md) step 6). `shuttle uninstall` removes it
+after the updater.
 [`releasing.md`](releasing.md) has the release, and the drain the updater does before
 it restarts anything.
 

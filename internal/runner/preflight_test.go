@@ -3,16 +3,19 @@ package runner
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/export"
 	"shuttle/internal/failure"
 	"shuttle/internal/ledger"
 	"shuttle/internal/observer"
@@ -383,5 +386,50 @@ func TestAuthFitsRunDirectoryAcceptedByPreflight(t *testing.T) {
 	}
 	if _, err := (&AuthTick{}).Check(context.Background(), p, d, dir); err != nil {
 		t.Fatalf("auth rejected an accepted run directory: %v", err)
+	}
+}
+
+// The export's copy holds every run's directory, so the model may not read it
+// any more than it may read the state root: by the configured path and by the
+// path it resolves to. Nor the directory under the state root the export
+// stages the ledger in, whatever the state root is.
+func TestSandboxDeniesTheExportDestination(t *testing.T) {
+	ctx := context.Background()
+	p, def, dir, _ := preflightFixture(t)
+	// A state root of its own, apart from the run directory, as it is in
+	// production; the fixture shares one.
+	p.Home = t.TempDir()
+	if err := os.Mkdir(filepath.Join(p.Home, reportsDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	share := t.TempDir()
+	link := filepath.Join(t.TempDir(), "share")
+	if err := os.Symlink(share, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Config.Export.Destination = link
+	if _, err := p.Check(ctx, def, dir); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := os.ReadFile(filepath.Join(dir, "srt.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Filesystem struct {
+			DenyRead []string `json:"denyRead"`
+		} `json:"filesystem"`
+	}
+	if err := json.Unmarshal(profile, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{link, resolved, filepath.Join(p.Home, export.StagingDir)} {
+		if !slices.Contains(parsed.Filesystem.DenyRead, want) {
+			t.Errorf("denyRead = %v, want %s", parsed.Filesystem.DenyRead, want)
+		}
 	}
 }

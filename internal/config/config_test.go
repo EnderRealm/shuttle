@@ -220,6 +220,23 @@ func TestLoadRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+// A relative destination would resolve against whatever directory launchd
+// started the export in, never the share.
+func TestLoadRefusesARelativeExportDestination(t *testing.T) {
+	writeConfig(t, `{"export": {"destination": "/Volumes/shuttle/studio"}}`)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Export.Destination != "/Volumes/shuttle/studio" {
+		t.Errorf("export.destination = %q", c.Export.Destination)
+	}
+	writeConfig(t, `{"export": {"destination": "Volumes/shuttle"}}`)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "export.destination") {
+		t.Fatalf("Load = %v, want export.destination refused", err)
+	}
+}
+
 func TestAgentsDirPrecedence(t *testing.T) {
 	writeConfig(t, sampleConfig)
 	got, err := AgentsDir()

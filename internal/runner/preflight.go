@@ -12,6 +12,7 @@ import (
 
 	"shuttle/internal/agentdef"
 	"shuttle/internal/config"
+	"shuttle/internal/export"
 	"shuttle/internal/failure"
 	"shuttle/internal/keychain"
 	"shuttle/internal/provider"
@@ -205,17 +206,31 @@ func (p Preflight) sandbox(def *agentdef.Definition, dir string) sandbox.Options
 		SRTBin: p.Config.Paths.SRTBin, RunDir: dir, HomeDir: p.HomeDir,
 		PATH: p.PATH, AllowedDomains: def.Manifest.Sandbox.AllowedDomains,
 	}
+	var denied []string
+	// The export's copy is every run's directory and the ledger again, so it
+	// is denied as the state root is, and by its resolved path as well, which
+	// is the one a read through a symlink to it opens. The export stages the
+	// whole ledger under the state root, which the profile denies only when it
+	// is ~/.shuttle, so the staging directory is denied by name as the held
+	// notebooks are.
+	if destination := p.Config.Export.Destination; destination != "" {
+		denied = append(denied, filepath.Join(p.Home, export.StagingDir), filepath.Clean(destination))
+		if resolved, err := filepath.EvalSymlinks(destination); err == nil {
+			denied = append(denied, resolved)
+		}
+	}
 	if def.Manifest.Observer != nil {
-		seen := map[string]bool{}
 		// The notebooks Shuttle holds sit under the state root, which the
 		// profile denies only when it is ~/.shuttle; they are denied by name
 		// so a state root elsewhere does not open them to the model.
-		denied := append([]string{observerStagingDir(dir), filepath.Join(p.Home, notebooksDir)}, observerDeniedReads(p.Config)...)
-		for _, path := range denied {
-			if !seen[path] {
-				options.DeniedRead = append(options.DeniedRead, path)
-				seen[path] = true
-			}
+		denied = append(denied, observerStagingDir(dir), filepath.Join(p.Home, notebooksDir))
+		denied = append(denied, observerDeniedReads(p.Config)...)
+	}
+	seen := map[string]bool{}
+	for _, path := range denied {
+		if !seen[path] {
+			options.DeniedRead = append(options.DeniedRead, path)
+			seen[path] = true
 		}
 	}
 	return options

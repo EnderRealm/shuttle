@@ -89,7 +89,7 @@ var updaterOnceCmd = &cobra.Command{
 // its own job would end the cycle that is waiting on the result.
 var updaterRebootstrapCmd = &cobra.Command{
 	Use:           "rebootstrap",
-	Short:         "Replace the daemon and watchdog jobs under this binary (internal)",
+	Short:         "Replace the export, daemon and watchdog jobs under this binary (internal)",
 	Hidden:        true,
 	Args:          cobra.NoArgs,
 	SilenceUsage:  true,
@@ -99,8 +99,8 @@ var updaterRebootstrapCmd = &cobra.Command{
 	},
 }
 
-// rebootstrapDaemon is bootout and bootstrap of the daemon and watchdog jobs
-// under the running binary, which is what restarts the daemon: see
+// rebootstrapDaemon is bootout and bootstrap of the export, daemon and
+// watchdog jobs under the running binary, which is what restarts the daemon: see
 // launchdServices.Restart for why nothing lighter does. The binary must be the
 // one the jobs pin, or the restart would re-pin them to it.
 func rebootstrapDaemon() error {
@@ -109,6 +109,10 @@ func rebootstrapDaemon() error {
 	}
 	specs, err := launchSpecs(func(s launchd.Spec) bool { return !isUpdaterSpec(s) })
 	if err != nil {
+		return err
+	}
+	// Ahead of the daemon and watchdog, as install daemon does.
+	if _, _, err := syncExport(specs[0].Program); err != nil {
 		return err
 	}
 	return bootstrapSpecs(specs)

@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,8 +33,9 @@ choice. Both steps are idempotent, so running install against a live tree
 changes nothing.
 
 With the daemon argument, install also writes and bootstraps the launchd jobs
-(§13): the daemon, its watchdog and the updater. That restarts the daemon
-whatever it is running; the updater's own restart drains first. With the updater
+(§13): the daemon, its watchdog and the updater, and the daily state export
+where config.json sets export.destination. That restarts the daemon whatever
+it is running; the updater's own restart drains first. With the updater
 argument, it does so for the updater's job alone, which is the recovery when an
 update left the updater down.`,
 	Args: cobra.MaximumNArgs(1),
@@ -112,7 +115,7 @@ func pinnedExecutable() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, label := range []string{launchd.DaemonLabel, launchd.WatchdogLabel, launchd.UpdaterLabel} {
+	for _, label := range []string{launchd.DaemonLabel, launchd.WatchdogLabel, launchd.UpdaterLabel, launchd.ExportLabel} {
 		program, installed, err := installedProgram(label)
 		if err != nil {
 			return "", err
@@ -166,12 +169,55 @@ func installDaemon(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// Before the others, so the updater's job is still the last replaced.
+	if err := installExport(cmd, specs[0].Program); err != nil {
+		return err
+	}
 	if err := bootstrapSpecs(specs); err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "daemon\t%s\nwatchdog\t%s\nupdater\t%s\nbinary\t%s\nlog\t%s\nupdater log\t%s\n",
 		specs[0].Label, specs[1].Label, specs[2].Label, specs[0].Program, specs[0].LogPath, specs[2].LogPath)
 	return nil
+}
+
+// installExport is syncExport for `install daemon`, naming what it installed.
+func installExport(cmd *cobra.Command, binary string) error {
+	spec, destination, err := syncExport(binary)
+	if err != nil || spec == nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "export\t%s\ndestination\t%s\nexport log\t%s\n", spec.Label, destination, spec.LogPath)
+	return nil
+}
+
+// syncExport installs the daily export job under binary when config.json
+// names an export destination, and removes one installed before when it names
+// none, so the job follows the config. Both `install daemon` and the updater's
+// rebootstrap run it, the latter because launchd refuses to spawn a binary
+// signed differently from the one it bootstrapped, and the export job is
+// spawned afresh every day. It is not awaited: between its daily starts the
+// job has no process. It returns the job installed, or nil, and the
+// destination.
+func syncExport(binary string) (*launchd.Spec, string, error) {
+	cfg, err := config.Load()
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, "", uninstallLaunchAgent(launchd.ExportLabel)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if cfg.Export.Destination == "" {
+		return nil, "", uninstallLaunchAgent(launchd.ExportLabel)
+	}
+	spec, err := launchd.ExportSpec(binary)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := installLaunchAgent(spec); err != nil {
+		return nil, "", err
+	}
+	return &spec, cfg.Export.Destination, nil
 }
 
 func installUpdater(cmd *cobra.Command) error {

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,6 +93,7 @@ func TestInstallDaemonPersistsAndInstallsTheLaunchAgent(t *testing.T) {
 		awaited = append(awaited, [2]string{label, program})
 		return nil
 	}
+	stubUninstall(t, func(string) error { return nil })
 	t.Cleanup(func() {
 		currentExecutable = originalExecutable
 		installLaunchAgent, awaitLaunchAgent = originalInstall, originalAwait
@@ -164,6 +166,10 @@ func recordInstalls(t *testing.T) func() []string {
 		return nil
 	}
 	awaitLaunchAgent = func(string, string) error { return nil }
+	stubUninstall(t, func(label string) error {
+		labels = append(labels, "-"+label)
+		return nil
+	})
 	t.Cleanup(func() {
 		currentExecutable = originalExecutable
 		installLaunchAgent, awaitLaunchAgent = originalInstall, originalAwait
@@ -171,6 +177,59 @@ func recordInstalls(t *testing.T) func() []string {
 		rootCmd.SetOut(nil)
 	})
 	return func() []string { return labels }
+}
+
+// stubUninstall keeps install daemon's removal of a stale export job off the
+// host's launchd.
+func stubUninstall(t *testing.T, fn func(string) error) {
+	t.Helper()
+	original := uninstallLaunchAgent
+	uninstallLaunchAgent = fn
+	t.Cleanup(func() { uninstallLaunchAgent = original })
+}
+
+// The export job is installed with the daemon's only where config.json names
+// a destination, ahead of them so the updater is still replaced last, and is
+// not awaited: between its daily starts it has no process. Where none is
+// named, an export job already installed is removed.
+func TestInstallDaemonInstallsTheExportWhenADestinationIsSet(t *testing.T) {
+	shuttleEnv(t)
+	labels := recordInstalls(t)
+	var awaited []string
+	awaitLaunchAgent = func(label, _ string) error {
+		awaited = append(awaited, label)
+		return nil
+	}
+	writeConfig(t, `{"export": {"destination": "/Volumes/shuttle/studio"}}`)
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetArgs([]string{"install", "daemon"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("install daemon: %v", err)
+	}
+	want := []string{launchd.ExportLabel, launchd.DaemonLabel, launchd.WatchdogLabel, launchd.UpdaterLabel}
+	if got := labels(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("installed = %v, want %v", got, want)
+	}
+	if slices.Contains(awaited, launchd.ExportLabel) {
+		t.Fatalf("awaited = %v, want the export job left to its schedule", awaited)
+	}
+	if !strings.Contains(out.String(), "/Volumes/shuttle/studio") {
+		t.Fatalf("output = %q, want the destination named", out.String())
+	}
+
+	// Unset again, install converges on the config: the job installed above
+	// is removed rather than left to fail every night.
+	writeConfig(t, `{}`)
+	before := len(labels())
+	rootCmd.SetArgs([]string{"install", "daemon"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("install daemon: %v", err)
+	}
+	want = []string{"-" + launchd.ExportLabel, launchd.DaemonLabel, launchd.WatchdogLabel, launchd.UpdaterLabel}
+	if got := labels()[before:]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("installed = %v with no destination set, want %v", got, want)
+	}
 }
 
 func TestInstallUpdaterInstallsOnlyTheUpdater(t *testing.T) {
@@ -192,6 +251,8 @@ func TestInstallUpdaterInstallsOnlyTheUpdater(t *testing.T) {
 
 // The updater waits on this command, so it must leave the updater's own job
 // alone: replacing it would kill the cycle waiting for the answer.
+// The export job is spawned afresh daily, so it is re-registered under the
+// new binary too, following config.json as install daemon does.
 func TestUpdaterRebootstrapLeavesTheUpdatersJob(t *testing.T) {
 	shuttleEnv(t)
 	labels := recordInstalls(t)
@@ -199,8 +260,18 @@ func TestUpdaterRebootstrapLeavesTheUpdatersJob(t *testing.T) {
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("updater rebootstrap: %v", err)
 	}
-	if got := labels(); !reflect.DeepEqual(got, []string{launchd.DaemonLabel, launchd.WatchdogLabel}) {
+	if got := labels(); !reflect.DeepEqual(got, []string{"-" + launchd.ExportLabel, launchd.DaemonLabel, launchd.WatchdogLabel}) {
 		t.Fatalf("installed = %v", got)
+	}
+
+	writeConfig(t, `{"export": {"destination": "/Volumes/shuttle/studio"}}`)
+	before := len(labels())
+	rootCmd.SetArgs([]string{"updater", "rebootstrap"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("updater rebootstrap: %v", err)
+	}
+	if got := labels()[before:]; !reflect.DeepEqual(got, []string{launchd.ExportLabel, launchd.DaemonLabel, launchd.WatchdogLabel}) {
+		t.Fatalf("installed = %v with a destination set", got)
 	}
 }
 
@@ -254,6 +325,7 @@ func TestUpdaterTargetsThePinnedBinary(t *testing.T) {
 		return nil
 	}
 	awaitLaunchAgent = func(string, string) error { return nil }
+	stubUninstall(t, func(string) error { return nil })
 	t.Cleanup(func() {
 		currentExecutable = originalExecutable
 		installLaunchAgent, awaitLaunchAgent = originalInstall, originalAwait
@@ -328,6 +400,7 @@ func TestInstallDaemonFailsWhenTheProcessDoesNotStart(t *testing.T) {
 	currentExecutable = func() (string, error) { return "/bin/shuttle", nil }
 	installLaunchAgent = func(launchd.Spec) error { return nil }
 	awaitLaunchAgent = func(label, program string) error { return errors.New("no process") }
+	stubUninstall(t, func(string) error { return nil })
 	t.Cleanup(func() {
 		currentExecutable = originalExecutable
 		installLaunchAgent, awaitLaunchAgent = originalInstall, originalAwait

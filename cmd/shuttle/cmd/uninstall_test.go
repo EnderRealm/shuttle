@@ -29,8 +29,8 @@ func TestUninstallRemovesOnlyTheDaemonAndIsIdempotent(t *testing.T) {
 		}
 	}
 	want := []string{
-		launchd.UpdaterLabel, launchd.WatchdogLabel, launchd.DaemonLabel,
-		launchd.UpdaterLabel, launchd.WatchdogLabel, launchd.DaemonLabel,
+		launchd.UpdaterLabel, launchd.ExportLabel, launchd.WatchdogLabel, launchd.DaemonLabel,
+		launchd.UpdaterLabel, launchd.ExportLabel, launchd.WatchdogLabel, launchd.DaemonLabel,
 	}
 	if len(labels) != len(want) {
 		t.Fatalf("labels = %v", labels)

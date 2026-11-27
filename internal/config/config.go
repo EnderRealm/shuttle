@@ -30,6 +30,7 @@ const (
 
 	configFile = "config.json"
 	ledgerFile = "runs.db"
+	runsDir    = "runs"
 	reportsDir = "reports"
 
 	// HostedSharedRoot is SHARED_ROOT in scripts/agent-users/common.sh, the
@@ -61,6 +62,7 @@ type Config struct {
 	Output    Output              `json:"output"`
 	Weft      Weft                `json:"weft"`
 	Observers map[string]Observer `json:"observers,omitempty"`
+	Export    Export              `json:"export"`
 }
 
 type Email struct {
@@ -130,6 +132,12 @@ type Weft struct {
 	// ImageReader is where a ticket's pictures are (weft-service/v2 §5.6).
 	// Unset, the host does not serve image_reader.
 	ImageReader ImageReader `json:"image_reader,omitzero"`
+}
+
+// Export is where `shuttle state export` copies the run state: an absolute
+// path to a mounted share. Unset, no export job is installed.
+type Export struct {
+	Destination string `json:"destination"`
 }
 
 // ImageReader is Folio's origin and the Keychain item holding its image-reader
@@ -208,6 +216,15 @@ func LedgerPath() (string, error) {
 	return filepath.Join(home, ledgerFile), nil
 }
 
+// RunsDir returns Home()/runs, one directory per attempt (§7.2).
+func RunsDir() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, runsDir), nil
+}
+
 // ReportsDir returns Home()/reports, §9.3's repo.
 func ReportsDir() (string, error) {
 	home, err := Home()
@@ -271,6 +288,9 @@ func Parse(path string, data []byte) (*Config, error) {
 	}
 	if err := validateImageReader(c.Weft.ImageReader); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if c.Export.Destination != "" && !filepath.IsAbs(c.Export.Destination) {
+		return nil, fmt.Errorf("%s: export.destination: %q is not an absolute path", path, c.Export.Destination)
 	}
 	return &c, nil
 }

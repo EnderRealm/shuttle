@@ -25,6 +25,9 @@ const (
 	// UpdaterLabel installs new releases, its own job so that it outlives the
 	// daemon's restart.
 	UpdaterLabel = "com.shuttle.updater"
+	// ExportLabel copies the run state to export.destination once a day. It
+	// runs the command and exits, independent of the daemon.
+	ExportLabel = "com.shuttle.export"
 
 	// EnvUpdaterInterval tunes the updater's poll cadence, on its plist.
 	EnvUpdaterInterval = "SHUTTLE_UPDATER_INTERVAL_MINUTES"
@@ -34,7 +37,12 @@ const (
 	daemonEnvFile  = "daemon-env"
 	daemonLogFile  = "daemon.log"
 	updaterLogFile = "updater.log"
+	exportLogFile  = "export.log"
 )
+
+// exportTime is when the export job starts each day, local time: after the
+// daily agent's 04:30 slot, so the night's run is in that day's copy.
+var exportTime = Calendar{Hour: 5, Minute: 30}
 
 // Spec describes one LaunchAgent.
 type Spec struct {
@@ -46,6 +54,15 @@ type Spec struct {
 	KeepAlive               bool
 	RunAtLoad               bool
 	ThrottleIntervalSeconds int
+	// StartCalendarInterval, when set, starts the job once a day at that
+	// time. launchd runs a start missed while the Mac slept on wake.
+	StartCalendarInterval *Calendar
+}
+
+// Calendar is a daily StartCalendarInterval entry.
+type Calendar struct {
+	Hour   int
+	Minute int
 }
 
 // PlistXML renders a deterministic LaunchAgent plist.
@@ -86,6 +103,12 @@ func (s Spec) PlistXML() string {
 	}
 	if s.ThrottleIntervalSeconds > 0 {
 		fmt.Fprintf(&b, "    <key>ThrottleInterval</key>\n    <integer>%d</integer>\n", s.ThrottleIntervalSeconds)
+	}
+	if c := s.StartCalendarInterval; c != nil {
+		b.WriteString("    <key>StartCalendarInterval</key>\n    <dict>\n")
+		fmt.Fprintf(&b, "        <key>Hour</key>\n        <integer>%d</integer>\n", c.Hour)
+		fmt.Fprintf(&b, "        <key>Minute</key>\n        <integer>%d</integer>\n", c.Minute)
+		b.WriteString("    </dict>\n")
 	}
 	if s.LogPath != "" {
 		writeStringKey(&b, "StandardOutPath", s.LogPath)
@@ -164,6 +187,25 @@ func DaemonSpecs(program string) ([]Spec, error) {
 		updater.Env[EnvUpdaterInterval] = value
 	}
 	return []Spec{daemon, watchdog, updater}, nil
+}
+
+// ExportSpec is the daily `shuttle state export` job, in the daemon's
+// environment so it reads the same state root and config.json. It is not
+// kept alive and does not run at load: it runs at exportTime and exits.
+func ExportSpec(program string) (Spec, error) {
+	daemon, err := DaemonSpec(program)
+	if err != nil {
+		return Spec{}, err
+	}
+	calendar := exportTime
+	return Spec{
+		Label:                 ExportLabel,
+		Program:               program,
+		Args:                  []string{"state", "export"},
+		LogPath:               filepath.Join(filepath.Dir(daemon.LogPath), exportLogFile),
+		Env:                   daemon.Env,
+		StartCalendarInterval: &calendar,
+	}, nil
 }
 
 // daemonAgentsDir preserves a previously installed explicit override when an
