@@ -16,16 +16,34 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          path: shuttle
           fetch-depth: 0
+
+      # The weftremote and sandbox tests read weft's docs/service-v2 from a weft
+      # checkout beside shuttle's (internal/weftfixtures), and fail without it.
+      # A sibling rather than a subdirectory keeps shuttle's tree clean for
+      # GoReleaser. weft is private, so this takes a read-only token on it.
+      - uses: actions/checkout@v6
+        with:
+          repository: EnderRealm/weft
+          path: weft
+          token: ${{ secrets.WEFT_READ_TOKEN }}
+          persist-credentials: false
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: shuttle/go.mod
+          cache-dependency-path: shuttle/go.sum
+
+      - name: Test
+        working-directory: shuttle
+        run: go test ./...
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
           args: release --clean
+          workdir: shuttle
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

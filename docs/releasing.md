@@ -9,7 +9,12 @@ git push origin v1.2.0
 ```
 
 The `Release` workflow (`.github/workflows/release.yml`) fires on any `v*` tag and runs
-`goreleaser release --clean`, which:
+`go test ./...` first: a failing test fails the job and publishes nothing. The suite needs
+weft's `docs/service-v2` fixtures, so the job checks weft out beside shuttle, at its
+default-branch HEAD as of the tag build; a local run reads the HEAD of the local weft checkout
+instead, whatever that has checked out. There is no pin. weft is private, so
+that checkout takes the `WEFT_READ_TOKEN` secret, a read-only credential on
+`EnderRealm/weft`. Then it runs `goreleaser release --clean`, which:
 
 1. Builds `shuttle` for darwin/arm64 with `CGO_ENABLED=1`. The tag drives `shuttle
    version`, and `host_build` on `/v2/service`, through `-X
@@ -47,7 +52,8 @@ for one target, and two things fail rather than ship a no-cgo binary:
 
 Versioning follows [SemVer](https://semver.org). The updater moves a host forward only: a
 lower tag is never installed, because a ledger a newer release migrated is one the older
-binary refuses. The workflow needs no secrets beyond the built-in `GITHUB_TOKEN`.
+binary refuses. The workflow needs two secrets: the built-in `GITHUB_TOKEN` and
+`WEFT_READ_TOKEN`.
 
 ## The release's compatibility rule
 
