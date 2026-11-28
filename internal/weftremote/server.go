@@ -76,6 +76,9 @@ type Service struct {
 	folders *folderHandles
 	termMu  sync.Mutex
 	terms   map[string]*terminalSession
+	// printPassword is the test seam over keychain.PrintedPassword for the
+	// image-reader item; nil runs the real security.
+	printPassword func(item string) ([]byte, error)
 }
 
 func New(cfg *config.Config, store *ledger.Store, token, home string, logger *log.Logger) (*Service, error) {

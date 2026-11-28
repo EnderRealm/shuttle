@@ -99,6 +99,86 @@ func (s *studio) imageReader() (map[string]any, string) {
 	return last, service["conformance"].(string)
 }
 
+// printedBy is what `security find-generic-password -g` prints for an item
+// holding value, in the two forms measured against /usr/bin/security: quoted
+// for printable ASCII holding neither a quote nor a backslash, and otherwise
+// the bytes in hex and a rendering escaping the rest, and the backslash, in
+// octal.
+func printedBy(value string) []byte {
+	asIs := true
+	var rendered strings.Builder
+	for i := range len(value) {
+		b := value[i]
+		if b >= ' ' && b <= '~' && b != '\\' {
+			rendered.WriteByte(b)
+		} else {
+			fmt.Fprintf(&rendered, "\\%03o", b)
+		}
+		asIs = asIs && b >= ' ' && b <= '~' && b != '"' && b != '\\'
+	}
+	if asIs {
+		return []byte(`password: "` + value + "\"\n")
+	}
+	return []byte(fmt.Sprintf("password: 0x%X  \"%s\"\n", value, rendered.String()))
+}
+
+// imageReaderRefused is GET /v2/image-reader refused as not served, held to
+// error-image-reader-not-served.json, and the message it carries.
+func (s *studio) imageReaderRefused() string {
+	s.t.Helper()
+	rec := s.request(s.t, http.MethodGet, "/v2/image-reader", "", "")
+	doc := decode(s.t, rec.Body.Bytes()).(map[string]any)
+	learn(decode(s.t, fixtureBytes(s.t, "error-image-reader-not-served.json"))).check(s.t, "not served", doc)
+	if rec.Code != http.StatusNotImplemented || doc["error"].(map[string]any)["code"] != "capability_not_served" {
+		s.t.Fatalf("GET /v2/image-reader = %d %s", rec.Code, rec.Body.String())
+	}
+	return doc["error"].(map[string]any)["message"].(string)
+}
+
+// imageReaderRefusal is the message refusing image_reader for reason, as
+// error-image-reader-not-served.json words it for this host.
+func (s *studio) imageReaderRefusal(reason string) string {
+	s.t.Helper()
+	var refusal map[string]any
+	fixtureJSON(s.t, "error-image-reader-not-served.json", &refusal)
+	message := strings.ReplaceAll(refusal["error"].(map[string]any)["message"].(string), "h-studio-7c41e09a", s.service.hostID)
+	return strings.TrimSuffix(message, imageReaderUnconfigured) + reason
+}
+
+// imageReaderNotServed holds discovery and GET /v2/image-reader to
+// image_reader not served while security prints printed for the configured
+// item, or fails with err, with a reason that names the item, says says and
+// carries none of hidden.
+func (s *studio) imageReaderNotServed(name string, printed []byte, err error, says string, hidden ...string) {
+	s.t.Helper()
+	s.service.printPassword = func(item string) ([]byte, error) {
+		if item != imageReaderItem {
+			s.t.Errorf("%s: read keychain item %q", name, item)
+		}
+		// Held over a Keychain prompt, the state lock would stop the host.
+		if !s.service.stateMu.TryLock() {
+			s.t.Errorf("%s: the keychain is read under the state lock", name)
+		} else {
+			s.service.stateMu.Unlock()
+		}
+		return printed, err
+	}
+	declared, conformance := s.imageReader()
+	reason, _ := declared["reason"].(string)
+	if declared["state"] != "not_served" || conformance != "complete" ||
+		!strings.Contains(reason, imageReaderItem) || !strings.Contains(reason, says) {
+		s.t.Errorf("%s: discovery declares %v under %s conformance", name, declared, conformance)
+	}
+	for _, h := range hidden {
+		if strings.Contains(reason, h) {
+			s.t.Errorf("%s: reason %q carries %q", name, reason, h)
+		}
+	}
+	if got := s.imageReaderRefused(); got != s.imageReaderRefusal(reason) {
+		s.t.Errorf("%s: message %q, want %q", name, got, s.imageReaderRefusal(reason))
+	}
+}
+
 func TestCatalogCarriesAttachments(t *testing.T) {
 	s := newStudio(t)
 	t.Setenv("HOME", s.root)
@@ -202,12 +282,12 @@ func TestImageReaderTokenServedToAuthenticatedClient(t *testing.T) {
 	first, rotated := reader["token"].(string), "example-rotated-token-not-a-secret"
 	s.cfg.Weft.ImageReader = config.ImageReader{Origin: reader["origin"].(string), KeychainItem: imageReaderItem}
 	token, reads := first, 0
-	s.service.segments.findKey = func(item string) (string, error) {
+	s.service.printPassword = func(item string) ([]byte, error) {
 		if item != imageReaderItem {
 			t.Errorf("read keychain item %q", item)
 		}
 		reads++
-		return token, nil
+		return printedBy(token), nil
 	}
 	seq := s.asOf()
 
@@ -310,74 +390,109 @@ func TestImageReaderTokenAbsentIsNotServed(t *testing.T) {
 	logs := s.capture()
 	s.probed()
 	want := s.seedPictures()
-	s.service.segments.findKey = func(item string) (string, error) {
+	s.service.printPassword = func(item string) ([]byte, error) {
 		t.Errorf("read keychain item %q with none configured", item)
-		return "", nil
+		return nil, nil
 	}
 
-	var discovery, refusal map[string]any
+	var discovery map[string]any
 	fixtureJSON(t, "service-image-reader-not-served.json", &discovery)
-	fixtureJSON(t, "error-image-reader-not-served.json", &refusal)
 	service, fixture := s.get("/v2/service")["service"].(map[string]any), discovery["service"].(map[string]any)
 	for _, key := range []string{"conformance", "capabilities"} {
 		if !reflect.DeepEqual(service[key], fixture[key]) {
 			t.Errorf("service.%s = %v, service-image-reader-not-served.json has %v", key, service[key], fixture[key])
 		}
 	}
-	refused := func() string {
-		t.Helper()
-		rec := s.request(t, http.MethodGet, "/v2/image-reader", "", "")
-		doc := decode(t, rec.Body.Bytes()).(map[string]any)
-		learn(decode(t, fixtureBytes(t, "error-image-reader-not-served.json"))).check(t, "not served", doc)
-		if rec.Code != http.StatusNotImplemented || doc["error"].(map[string]any)["code"] != "capability_not_served" {
-			t.Fatalf("GET /v2/image-reader = %d %s", rec.Code, rec.Body.String())
-		}
-		return doc["error"].(map[string]any)["message"].(string)
-	}
+	var refusal map[string]any
+	fixtureJSON(t, "error-image-reader-not-served.json", &refusal)
 	message := strings.ReplaceAll(refusal["error"].(map[string]any)["message"].(string), "h-studio-7c41e09a", s.service.hostID)
-	if got := refused(); got != message {
+	if got := s.imageReaderRefused(); got != message {
 		t.Errorf("message %q, want %q", got, message)
 	}
 	s.pictured(want)
 
 	// A configured item that yields no token a client could send is not served
 	// either, with a reason that names the item and never the value.
-	prefix := strings.TrimSuffix(message, imageReaderUnconfigured)
 	s.cfg.Weft.ImageReader = config.ImageReader{Origin: "https://folio.example", KeychainItem: imageReaderItem}
 	for _, c := range []struct {
-		name, value string
-		err         error
-		says        string
+		name    string
+		printed []byte
+		err     error
+		says    string
 	}{
-		{"missing item", "", fmt.Errorf("keychain item %q: exit status 44", imageReaderItem), "exit status 44"},
-		{"empty", "", nil, "visible ASCII"},
-		{"space", "unsendable value", nil, "visible ASCII"},
-		{"line break", "unsendable\nvalue", nil, "visible ASCII"},
-		{"trailing line break", "unsendable-value\n", nil, "visible ASCII"},
-		{"delete", "unsendable\x7fvalue", nil, "visible ASCII"},
-		{"non-ASCII", "unsendablé-value", nil, "visible ASCII"},
+		{"missing item", []byte("security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.\n"),
+			fmt.Errorf("keychain item %q: exit status 44", imageReaderItem), "exit status 44"},
+		{"empty", []byte("password: \n"), nil, "empty value"},
+		{"space", printedBy("unsendable value"), nil, "visible ASCII"},
+		{"no password", []byte("security: unsendable\n"), nil, "printed no password"},
 	} {
-		s.service.segments.findKey = func(string) (string, error) {
-			// Held over a Keychain prompt, the state lock would stop the host.
-			if !s.service.stateMu.TryLock() {
-				t.Errorf("%s: the keychain is read under the state lock", c.name)
-			} else {
-				s.service.stateMu.Unlock()
-			}
-			return c.value, c.err
-		}
-		declared, conformance := s.imageReader()
-		reason, _ := declared["reason"].(string)
-		if declared["state"] != "not_served" || conformance != "complete" ||
-			!strings.Contains(reason, imageReaderItem) || !strings.Contains(reason, c.says) || strings.Contains(reason, "unsendabl") {
-			t.Errorf("%s: discovery declares %v under %s conformance", c.name, declared, conformance)
-		}
-		if got := refused(); got != prefix+reason {
-			t.Errorf("%s: message %q, want %q", c.name, got, prefix+reason)
-		}
+		s.imageReaderNotServed(c.name, c.printed, c.err, c.says, "unsendabl", "SecKeychain")
 		s.pictured(want)
 	}
 	if strings.Contains(logs.String(), "unsendabl") {
 		t.Errorf("log carries the item's value:\n%s", logs.String())
 	}
+}
+
+// security -g prints a value holding a byte outside printable ASCII as hex,
+// which is the only form -w prints it in; the bytes that hex stands for are
+// what discovery judges.
+func TestImageReaderValuePrintedAsHexIsNotServed(t *testing.T) {
+	s := newStudio(t)
+	logs := s.capture()
+	s.probed()
+	want := s.seedPictures()
+	s.cfg.Weft.ImageReader = config.ImageReader{Origin: "https://folio.example", KeychainItem: imageReaderItem}
+	for _, c := range []struct {
+		name, value string
+		printed     []byte
+	}{
+		// As /usr/bin/security printed them for throwaway items.
+		{"control byte", "ab\x01cd", []byte("password: 0x6162016364  \"ab\\001cd\"\n")},
+		{"non-ASCII", "café", []byte("password: 0x636166C3A9  \"caf\\303\\251\"\n")},
+		{"line break", "unsendable\nvalue", printedBy("unsendable\nvalue")},
+		{"trailing line break", "unsendable-value\n", printedBy("unsendable-value\n")},
+		{"delete", "unsendable\x7fvalue", printedBy("unsendable\x7fvalue")},
+		{"non-ASCII token", "unsendablé-value", printedBy("unsendablé-value")},
+	} {
+		if !visibleASCII(fmt.Sprintf("%x", c.value)) {
+			t.Fatalf("%s: its hex is not visible ASCII, so -w's output would not have been served either", c.name)
+		}
+		s.imageReaderNotServed(c.name, c.printed, nil, "visible ASCII",
+			c.value, fmt.Sprintf("%x", c.value), fmt.Sprintf("%X", c.value))
+		s.pictured(want)
+		if text := logs.String(); strings.Contains(text, c.value) || strings.Contains(text, fmt.Sprintf("%X", c.value)) {
+			t.Errorf("%s: log carries the item's value:\n%s", c.name, text)
+		}
+	}
+}
+
+// A token made only of hex digits is printed quoted, as it stands, and served
+// as it is; the bytes those digits spell, printed as hex, are not.
+func TestImageReaderHexDigitTokenIsServed(t *testing.T) {
+	s := newStudio(t)
+	s.probed()
+	s.cfg.Weft.ImageReader = config.ImageReader{Origin: "https://folio.example", KeychainItem: imageReaderItem}
+	for _, c := range []struct {
+		name, token string
+		printed     []byte
+	}{
+		// As /usr/bin/security printed them for throwaway items.
+		{"hex digits", "deadbeef", []byte("password: \"deadbeef\"\n")},
+		{"quote and backslash", `a"b\c`, []byte("password: 0x6122625C63  \"a\"b\\134c\"\n")},
+	} {
+		s.service.printPassword = func(string) ([]byte, error) { return c.printed, nil }
+		if declared, _ := s.imageReader(); declared["state"] != "served" || declared["reason"] != nil {
+			t.Errorf("%s: discovery declares %v", c.name, declared)
+		}
+		rec := s.request(t, http.MethodGet, "/v2/image-reader", "", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: GET /v2/image-reader = %d %s", c.name, rec.Code, rec.Body.String())
+		}
+		got := decode(t, rec.Body.Bytes()).(map[string]any)["image_reader"]
+		if !reflect.DeepEqual(got, map[string]any{"origin": "https://folio.example", "token": c.token}) {
+			t.Errorf("%s: image reader = %v", c.name, got)
+		}
+	}
+	s.imageReaderNotServed("bytes de ad be ef", []byte("password: 0xDEADBEEF \n"), nil, "visible ASCII", "deadbeef", "DEADBEEF")
 }

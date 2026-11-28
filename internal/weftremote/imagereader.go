@@ -38,19 +38,24 @@ func (s *Service) resolvedCapabilities() ([]capability, string) {
 }
 
 // imageReaderToken reads Folio's image-reader token at use time, so a rotation
-// needs no restart (§5.6). The error, which discovery serves, names the item
-// and never the value.
+// needs no restart (§5.6). It reads what security -g prints, so a value holding
+// a byte outside visible ASCII is judged by its bytes and not by their hex. The
+// error, which discovery serves, names the item and never the value.
 func (s *Service) imageReaderToken() (string, error) {
 	item := s.cfg.Weft.ImageReader.KeychainItem
-	find := s.segments.findKey
-	if find == nil {
-		find = func(item string) (string, error) {
+	read := s.printPassword
+	if read == nil {
+		read = func(item string) ([]byte, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), imageReaderReadBound)
 			defer cancel()
-			return keychain.FindContext(ctx, item)
+			return keychain.PrintedPassword(ctx, item)
 		}
 	}
-	token, err := find(item)
+	printed, err := read(item)
+	var token string
+	if err == nil {
+		token, err = keychain.ParsePassword(item, printed)
+	}
 	if err != nil {
 		return "", fmt.Errorf("weft.image_reader.keychain_item: %w", err)
 	}
