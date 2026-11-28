@@ -283,6 +283,9 @@ type statusDoc struct {
 		ID        int64
 		Agent     string
 		Signature string
+		FirstSeen string `json:"first_seen"`
+		LastSeen  string `json:"last_seen"`
+		Count     int
 	} `json:"open_incidents"`
 	OpenIncidentsError *string `json:"open_incidents_error"`
 }
@@ -492,6 +495,67 @@ func TestStatusJSON(t *testing.T) {
 	}
 	if last := doc.agent(t, "fresh").LastRun; last == nil || last.CostUSD == nil || *last.CostUSD != cost.Float64 {
 		t.Fatalf("fresh last_run = %+v, want its cost", last)
+	}
+}
+
+func TestStatusJSONIncidentDates(t *testing.T) {
+	agents := shuttleEnv(t)
+	writeAgentDir(t, agents, "daily", dailyManifest)
+	store, err := openLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// One incident through the ledger's own write, one seeded old and repeated,
+	// and an acknowledged one that is not open.
+	run, ok, err := store.Claim("daily", time.Now().Add(-time.Hour), ledger.TriggerCron)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := store.Fail(run.ID, failure.Died, "exit 1", ledger.Result{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledgerDB(t).Exec(`INSERT INTO incidents(agent,signature,first_seen,last_seen,count,acknowledged_at) VALUES
+		('daily','stale','2026-09-22T08:15:00Z','2026-11-01T04:30:00-07:00',4,NULL),
+		('daily','acked','2026-09-01T00:00:00Z','2026-09-02T00:00:00Z',9,'2026-09-03T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	incidents, err := store.OpenIncidents()
+	if err != nil || len(incidents) != 2 {
+		t.Fatalf("seeded incidents = %v, %v, want 2 open", incidents, err)
+	}
+
+	doc, err := execStatusJSON(t)
+	if err != nil {
+		t.Fatalf("status --json: %v", err)
+	}
+	if len(doc.OpenIncidents) != len(incidents) || doc.OpenIncidentsError != nil {
+		t.Fatalf("open_incidents = %+v (%v), want the ledger's %d", doc.OpenIncidents, doc.OpenIncidentsError, len(incidents))
+	}
+	for i, want := range incidents {
+		got := doc.OpenIncidents[i]
+		if got.ID != want.ID || got.Count != want.Count {
+			t.Fatalf("open_incidents[%d] = %+v, want %+v", i, got, want)
+		}
+		for _, seen := range []struct{ name, got, want string }{
+			{"first_seen", got.FirstSeen, want.FirstSeen},
+			{"last_seen", got.LastSeen, want.LastSeen},
+		} {
+			at, err := time.Parse(time.RFC3339, seen.got)
+			if err != nil {
+				t.Fatalf("open_incidents[%d] %s = %q, want RFC 3339: %v", i, seen.name, seen.got, err)
+			}
+			if w, _ := time.Parse(time.RFC3339, seen.want); !at.Equal(w) {
+				t.Fatalf("open_incidents[%d] %s = %s, want the ledger's %s", i, seen.name, seen.got, seen.want)
+			}
+		}
+	}
+	if stale := doc.OpenIncidents[1]; stale.Signature != "stale" || stale.Count != 4 ||
+		stale.FirstSeen == stale.LastSeen {
+		t.Fatalf("open_incidents[1] = %+v, want the stale incident, seen four times across two dates", stale)
+	}
+	if fresh := doc.OpenIncidents[0]; fresh.Count != 1 || fresh.FirstSeen != fresh.LastSeen {
+		t.Fatalf("open_incidents[0] = %+v, want the run's incident, seen once", fresh)
 	}
 }
 

@@ -177,10 +177,15 @@ type probeStatus struct {
 	Capabilities []string   `json:"capabilities"`
 }
 
+// incidentStatus carries the ledger's first_seen and last_seen as stored: the
+// ledger writes them as RFC 3339.
 type incidentStatus struct {
 	ID        int64  `json:"id"`
 	Agent     string `json:"agent"`
 	Signature string `json:"signature"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+	Count     int    `json:"count"`
 }
 
 func (r *statusReport) close() {
@@ -432,7 +437,9 @@ func (r *statusReport) readIncidents() error {
 	}
 	r.OpenIncidents = make([]incidentStatus, 0, len(incidents))
 	for _, i := range incidents {
-		r.OpenIncidents = append(r.OpenIncidents, incidentStatus{ID: i.ID, Agent: i.Agent, Signature: i.Signature})
+		r.OpenIncidents = append(r.OpenIncidents, incidentStatus{
+			ID: i.ID, Agent: i.Agent, Signature: i.Signature, FirstSeen: i.FirstSeen, LastSeen: i.LastSeen, Count: i.Count,
+		})
 	}
 	return nil
 }
