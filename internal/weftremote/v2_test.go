@@ -721,6 +721,71 @@ func TestServiceRefusesUnauthorizedUnspokenAndNotServed(t *testing.T) {
 	shape.check(t, "upgrade", upgrade)
 }
 
+func TestUnauthorizedMissingVersusWrongToken(t *testing.T) {
+	// Upper case only, so no four-character run of it can occur in a body
+	// whose own text is lower case.
+	const presented = "QZXJVKWPQZXJVKWP"
+	const missing = "a bearer token is required"
+	const wrong = "the bearer token is not this host's"
+	s := newStudio(t)
+	v1 := newServiceFixture(t)
+	shape := errorShape(t)
+	for _, c := range []struct {
+		name, auth, want string
+	}{
+		{"no header", "", missing},
+		{"not bearer", "Basic " + presented, missing},
+		{"bare scheme", "Bearer", missing},
+		{"empty bearer", "Bearer ", missing},
+		{"wrong bearer", "Bearer " + presented, wrong},
+		{"wrong case of the right token", "Bearer SECRET-TOKEN", wrong},
+	} {
+		for _, target := range []struct {
+			path, version string
+			service       *Service
+		}{
+			{"/v1/tickets", ContractVersion, v1.service},
+			{"/v2/service", ServiceVersion, s.service},
+		} {
+			req := httptest.NewRequest(http.MethodGet, target.path, nil)
+			if c.auth != "" {
+				req.Header.Set("Authorization", c.auth)
+			}
+			rec := httptest.NewRecorder()
+			target.service.ServeHTTP(rec, req)
+			body := decode(t, rec.Body.Bytes()).(map[string]any)
+			if target.version == ServiceVersion {
+				shape.check(t, "unauthorized", body)
+			}
+			e, _ := body["error"].(map[string]any)
+			if rec.Code != http.StatusUnauthorized || body["contract_version"] != target.version ||
+				e["code"] != "unauthorized" || e["message"] != c.want {
+				t.Errorf("%s %s = %d %s, want 401 unauthorized %q", c.name, target.path, rec.Code, rec.Body.String(), c.want)
+			}
+			for i := 0; i+4 <= len(presented); i++ {
+				if strings.Contains(rec.Body.String(), presented[i:i+4]) {
+					t.Errorf("%s %s echoes %q of the presented token: %s", c.name, target.path, presented[i:i+4], rec.Body.String())
+				}
+			}
+			if strings.Contains(rec.Body.String(), "SECRET") {
+				t.Errorf("%s %s echoes the presented token: %s", c.name, target.path, rec.Body.String())
+			}
+		}
+	}
+	for _, target := range []struct {
+		path    string
+		service *Service
+	}{{"/v1/tickets", v1.service}, {"/v2/service", s.service}} {
+		req := httptest.NewRequest(http.MethodGet, target.path, nil)
+		req.Header.Set("Authorization", "Bearer secret-token")
+		rec := httptest.NewRecorder()
+		target.service.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("right token %s = %d %s", target.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestCatalogServesEveryProjectAndTicketWithEligibility(t *testing.T) {
 	s := newStudio(t)
 	tickets := s.seedFixtureCatalog()

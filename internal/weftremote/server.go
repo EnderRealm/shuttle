@@ -191,11 +191,11 @@ func (s *Service) Serve(ctx context.Context, listener net.Listener) error {
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	version, _, _ := strings.Cut(strings.TrimPrefix(path, "/"), "/")
-	if !s.authorized(r) {
+	if refusal := s.unauthorized(r); refusal != "" {
 		if version == "v1" {
-			s.writeError(w, http.StatusUnauthorized, "unauthorized", "a bearer token is required")
+			s.writeError(w, http.StatusUnauthorized, "unauthorized", refusal)
 		} else {
-			s.v2Error(w, http.StatusUnauthorized, "unauthorized", "a bearer token is required")
+			s.v2Error(w, http.StatusUnauthorized, "unauthorized", refusal)
 		}
 		return
 	}
@@ -236,15 +236,26 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Service) authorized(r *http.Request) bool {
+const (
+	tokenMissing = "a bearer token is required"
+	tokenWrong   = "the bearer token is not this host's"
+)
+
+// unauthorized names why r is refused, or is empty when its bearer token is
+// this host's. A client that sent no token is told so apart from one whose
+// token does not match; neither message carries any of what was presented.
+func (s *Service) unauthorized(r *http.Request) string {
 	const prefix = "Bearer "
 	value := r.Header.Get("Authorization")
-	if !strings.HasPrefix(value, prefix) {
-		return false
+	if !strings.HasPrefix(value, prefix) || value == prefix {
+		return tokenMissing
 	}
 	got := []byte(strings.TrimPrefix(value, prefix))
 	want := []byte(s.token)
-	return len(got) == len(want) && subtle.ConstantTimeCompare(got, want) == 1
+	if len(got) == len(want) && subtle.ConstantTimeCompare(got, want) == 1 {
+		return ""
+	}
+	return tokenWrong
 }
 
 func (s *Service) handleTickets(w http.ResponseWriter) {
