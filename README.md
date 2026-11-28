@@ -33,15 +33,26 @@ replays.
 Opening an existing `runs.db` migrates it in place (§14.1 of that contract):
 back it up first, as `runs.db.v1-<stamp>`.
 
-Email delivery is still planned; a valid report remains pending for the sender
-ticket, while `--no-deliver` records an intentional skip without losing the
-retained output. `install daemon` installs the KeepAlive launchd job, a
+A completed run whose output is not silent and whose manifest declares an
+`email` output emails its report through Cloudflare Email Service, using
+`config.json`'s `email` block and a Keychain token read at each send:
+`report.md` as the text part, its rendering as HTML, and `X-Shuttle-Run` and
+`X-Shuttle-Agent` headers. A 429 or 5xx is retried once after 30 seconds; any
+other refusal, or a recipient neither delivered nor queued, records the run's
+delivery `failed` with the error, and a 401 or 403 also opens an incident. A
+report is `pending` only while its send is in flight; one a daemon restart
+interrupts stays pending, and nothing resends a pending or failed report.
+`--no-deliver` records `skipped`, as a silent run or one with no email output
+does, keeps the retained output and any filed report, and drops the sender's
+configuration from preflight.
+`install daemon` installs the KeepAlive launchd job, a
 companion watchdog that recovers macOS 26's deferred respawns, and the updater
 that installs new releases; `uninstall` removes all three while preserving
 state. `preflight [agent]` checks declared local
 requirements without a model call, and `resume <agent>` clears a pause and its
-failure counter. `pause` prevents new claims until that resume; `prune` and
-`deliver` appear in the design/help text but are not implemented.
+failure counter. `pause` prevents new claims until that resume. `deliver --test`
+sends one test email through the configured sender and writes no ledger row;
+`prune` appears in the design/help text but is not implemented.
 
 ## Build and check
 
@@ -194,9 +205,12 @@ at start, so restart it after adding a binding.
 protects the checkout, adds the binding once the daemon's loader passes the
 edited file, restarts the daemon while nothing runs and reports the project from
 `/v2/projects`; `shuttle weft unbind <project>` removes a binding the same way
-(`docs/agent-users.md`). Nothing
-updates a hosted checkout from origin yet: after pushing from elsewhere, run
-`git -C /Users/Shared/weft/repos/<repo> pull --ff-only` before launching.
+(`docs/agent-users.md`). A v2 run's first segment fetches origin and
+fast-forwards the hosted checkout's default branch before it provisions a
+worktree (weft's `WorktreeProvider.syncDefaultBranch`), so a push from
+elsewhere needs no manual pull. A v1 segment or a resume does not sync. A
+checkout that is off its default branch, has tracked changes, or is ahead of or
+diverged from origin refuses the launch.
 
 ```sh
 ./shuttle run daily --dry-run
